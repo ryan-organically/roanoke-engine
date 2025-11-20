@@ -1,0 +1,10 @@
+/mnt/c/dev/roanoke engine/target/release/deps/wayland_client-fe813581de03c955.d: /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/lib.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/conn.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/event_queue.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/globals.rs
+
+/mnt/c/dev/roanoke engine/target/release/deps/libwayland_client-fe813581de03c955.rlib: /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/lib.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/conn.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/event_queue.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/globals.rs
+
+/mnt/c/dev/roanoke engine/target/release/deps/libwayland_client-fe813581de03c955.rmeta: /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/lib.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/conn.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/event_queue.rs /home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/globals.rs
+
+/home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/lib.rs:
+/home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/conn.rs:
+/home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/event_queue.rs:
+/home/ryan-organically/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.11/src/globals.rs:

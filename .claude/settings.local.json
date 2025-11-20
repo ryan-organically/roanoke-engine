@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(touch:*)",
+      "Bash(mkdir:*)",
+      "Bash(cargo new:*)",
+      "Bash(curl:*)",
+      "Bash(sh -s -- -y)",
+      "Bash(source \"$HOME/.cargo/env\")",
+      "Bash(cargo --version:*)",
+      "Bash(cargo check:*)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(cargo build:*)",
+      "Bash(rustc:*)",
+      "Bash(./test_noise)",
+      "Bash(cargo run:*)",
+      "Bash(timeout 5 cargo run:*)",
+      "Bash(timeout 10 cargo run:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

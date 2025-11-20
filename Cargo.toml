@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/*", "roanoke_game"]
+resolver = "2"
+
+[workspace.dependencies]
+# Engine
+bevy_ecs = "0.13"
+winit = "0.29"
+wgpu = "0.19"
+log = "0.4"
+env_logger = "0.11"
+
+# Math & Physics
+glam = "0.25"        # SIMD Math (Replaces Unity.Mathematics)
+noise = "0.9"        # Base noise library
+bytemuck = "1.14"
+
+# AI
+burn = { version = "0.13", features = ["wgpu", "train"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

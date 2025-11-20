@@ -1,0 +1,8 @@
+[package]
+name = "croatoan_wfc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glam = { workspace = true }
+noise = { workspace = true }

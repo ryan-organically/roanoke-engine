@@ -1,0 +1,12 @@
+[package]
+name = "roanoke_game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+croatoan_core = { path = "../crates/croatoan_core" }
+croatoan_render = { path = "../crates/croatoan_render" }
+croatoan_wfc = { path = "../crates/croatoan_wfc" }
+wgpu = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
