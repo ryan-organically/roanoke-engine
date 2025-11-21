@@ -19,29 +19,49 @@ pub fn generate_terrain_chunk(
             let fx = x as f32;
             let fz = z as f32;
 
+            // Normalized coordinates (0.0 to 1.0)
+            // We use size (grid cells) for normalization to match the gradient across the chunk
+            let _u = fx / size as f32;
+            let v = fz / size as f32;
+
+            // The Gradient: slope increases with z (v)
+            let slope = v;
+
             // Sample noise at this position
-            let sample_point = Vec2::new(fx * 0.1, fz * 0.1);
-            let height = noise_util::fbm(
+            // Frequency reduced to 0.03 for wider features
+            let sample_point = Vec2::new(fx * 0.03, fz * 0.03);
+            let noise = noise_util::fbm(
                 sample_point,
                 4,    // octaves
                 2.0,  // lacunarity
-                0.5,  // persistence
+                0.4,  // persistence (reduced from 0.5)
                 seed,
-            ) * 10.0; // Scale height
+            );
+
+            // The Composition
+            // Base height rises from -5.0 to +15.0
+            let base_height = (slope * 20.0) - 5.0;
+            // Detail is small rolling dunes
+            let detail = noise * 2.0;
+            
+            let height = base_height + detail;
 
             // Position
             positions.push([fx, height, fz]);
 
             // Color based on height
             let color = if height < 0.0 {
-                // Blue - water
-                [0.1, 0.3, 0.8]
-            } else if height < 2.0 {
-                // Yellow - beach/sand
+                // Deep Blue - Ocean
+                [0.0, 0.0, 0.5]
+            } else if height < 1.5 {
+                // Sand Yellow - Beach
                 [0.9, 0.8, 0.3]
+            } else if height < 5.0 {
+                // Scrub Green - Dunes
+                [0.4, 0.6, 0.3]
             } else {
-                // Green - land
-                [0.2, 0.7, 0.3]
+                // Pine Dark Green - Forest
+                [0.1, 0.4, 0.1]
             };
 
             colors.push(color);
