@@ -1,0 +1,234 @@
+# Roanoke Engine - LLM Context & Development Notes
+
+## Project Overview
+The Roanoke Engine is a procedural generation engine for creating vast game worlds with minimal storage requirements. It uses algorithmic generation (L-Systems, noise functions, WFC) to create terrain, vegetation, and objects from tiny "recipes" instead of storing massive asset files.
+
+## Development Environment Notes
+
+### WSL Usage
+- **WSL is for Claude (the AI assistant) to interact with the codebase**
+- The human developer runs the actual game/tests via Windows
+- Claude operates in WSL to read/write files, run builds, and manage code
+- The human tests the game by running `cargo run --release -p roanoke_game` from Windows bash/PowerShell
+
+### Running the Game
+The human runs the game from Windows, not WSL. Command:
+```bash
+cargo run --release -p roanoke_game
+```
+
+Do NOT attempt to run GUI applications from WSL - they are run by the human on Windows.
+
+## Communication Protocol
+
+### When the User Reports Errors
+**IMPORTANT:** When the user asks questions about an error or describes a problem, it does NOT automatically mean "fix it immediately."
+
+The user may be:
+- **Investigating** what went wrong
+- **Learning** about the root cause
+- **Discussing** the exact fix needed before implementing
+- **Exploring** different approaches to solving the problem
+
+### Proper Response to Error Questions
+1. **Analyze and explain** what the error means
+2. **Identify the root cause** and explain why it happened
+3. **Discuss potential solutions** and their tradeoffs
+4. **Wait for explicit direction** before making changes
+5. Only implement fixes when the user explicitly asks you to do so
+
+### Example Interactions
+
+**Bad (presumptive):**
+```
+User: "I'm seeing this error when trees render..."
+Claude: [immediately edits files to fix it]
+```
+
+**Good (collaborative):**
+```
+User: "I'm seeing this error when trees render..."
+Claude: "This error indicates X is happening because Y. The issue is in Z.
+We could fix this by A, B, or C. What approach would you like to take?"
+User: "Let's go with approach B"
+Claude: [implements approach B]
+```
+
+### Keywords that Mean "Explain, Don't Fix"
+- "I'm seeing..."
+- "What's causing..."
+- "Why is..."
+- "How does..."
+- "Can you explain..."
+- "I'm getting this error..."
+- "What went wrong..."
+
+### Keywords that Mean "Fix It"
+- "Fix this..."
+- "Implement..."
+- "Change..."
+- "Update..."
+- "Make it so..."
+- "Go ahead and..."
+
+## Project Structure
+
+```
+roanoke_engine/
+├── roanoke_game/              # Main game executable
+│   └── src/main.rs            # Game entry point, rendering, state
+├── crates/
+│   ├── croatoan_core/         # Core engine (windowing, input)
+│   ├── croatoan_render/       # Rendering pipelines (terrain, grass, trees)
+│   ├── croatoan_wfc/          # Terrain & vegetation generation
+│   ├── croatoan_procgen/      # Procedural generation (grass, trees)
+│   └── croatoan_neural/       # Future: ML-assisted generation
+├── assets/shaders/            # WGSL shaders
+├── saves/                     # Player save files (JSON)
+├── PROCGEN_FRAMEWORK.md       # Procedural generation plans
+├── VOBJ_SPECIFICATION.md      # Custom file format spec
+└── llms.txt                   # This file
+```
+
+## Key Technologies
+- **Rust** - Systems programming language
+- **wgpu** - Cross-platform GPU API (WebGPU)
+- **winit** - Window creation and input
+- **egui** - Immediate mode GUI
+- **glam** - Linear algebra (vectors, matrices)
+- **noise** - Perlin/simplex noise generation
+
+## Procedural Generation Systems
+
+### Implemented
+1. **Terrain** - Multi-octave noise with biome blending
+2. **Grass** - Curved ribbon blades with position-based density
+3. **Trees** - L-System branching with 7 species
+
+### Planned
+1. **Rocks** - Voronoi fracturing + noise displacement
+2. **Buildings** - Shape grammar architecture
+3. **Animals** - Parametric skeletons + metaballs
+4. **Insects** - Segmented exoskeletons
+
+## Biome System
+
+Biomes are height-based (from terrain noise):
+- **Beach** (height < 1.5): Sand, no vegetation
+- **Scrub** (height 1.5-6.0): Sparse short grass
+- **Forest Edge** (height 6.0-12.0): Dense tall grass, trees begin
+- **Deep Forest** (height 12.0+): Very dense tall grass, thick trees
+
+## Storage Philosophy
+
+**Traditional Game:** 10 GB+ of 3D models → Requires Git LFS, slow clones
+
+**Roanoke Engine:** < 10 MB of recipes → Pure text, instant clones
+
+Example compression ratios:
+- Grass: 50,000x (200 bytes → 100 MB worth of blades)
+- Trees: 100,000x (120 bytes → 50 MB worth of geometry)
+- Entire forest: < 1 KB → Infinite variation
+
+## Development Workflow
+
+1. **Planning**: Discuss approach with user, explain tradeoffs
+2. **Specification**: Create or reference spec documents (*.md files)
+3. **Implementation**: Write code only when explicitly directed
+4. **Testing**: User runs the game, reports observations
+5. **Iteration**: Discuss issues, plan fixes together
+6. **Documentation**: Update relevant *.md files
+
+## Code Style Guidelines
+
+- Prefer explicit types over inference in public APIs
+- Use descriptive variable names (not `x`, `y`, `z` unless coordinates)
+- Comments explain *why*, not *what* (code should be self-documenting)
+- Avoid over-engineering: YAGNI (You Aren't Gonna Need It)
+- Keep functions small and focused
+- Use Rust idioms (`.iter()`, pattern matching, `Option`/`Result`)
+
+## Git Workflow
+
+- Main branch: `master`
+- Commit messages: Imperative mood ("Add tree system", not "Added tree system")
+- Keep commits focused (one logical change per commit)
+- All recipes and specs are text files (Git-friendly, no binary blobs)
+
+## Performance Targets
+
+- **Frame rate**: 60 FPS minimum
+- **View distance**: 3-5 km with fog
+- **Chunk size**: 256x256 units
+- **Generation time**: < 100ms per chunk (background threaded)
+- **Memory budget**: < 2 GB for full game
+
+## Future Directions
+
+### Short-term
+- Wind animation for grass and trees
+- Texture atlases for tree bark/leaves
+- Frustum culling for trees
+
+### Medium-term
+- Dynamic LOD system
+- Chunk streaming (infinite world)
+- Multiplayer foundation
+
+### Long-term
+- Neural network assisted generation
+- User-generated content (modding)
+- VR support
+
+## Common Issues & Solutions
+
+### "Failed to create device" error
+- GPU/driver issue
+- Try updating graphics drivers
+- Check if wgpu backend is supported
+
+### Terrain not generating
+- Check seed value (must be valid u32)
+- Verify background thread is spawning
+- Check console for generation logs
+
+### Grass/Trees not appearing
+- Verify biome height thresholds
+- Check density calculations
+- Ensure mesh upload succeeded
+
+### Performance issues
+- Reduce view distance (fog_end value)
+- Lower terrain resolution (chunk_resolution)
+- Implement frustum culling
+
+## Testing Checklist
+
+When testing new features:
+1. Does it compile? (`cargo build --release`)
+2. Does it run without crashing?
+3. Are assets generated correctly? (check console logs)
+4. Is performance acceptable? (60+ FPS)
+5. Does it look right? (visual inspection)
+6. Does it work with different seeds? (test variation)
+
+## Documentation Standards
+
+All major features should have:
+1. Specification document (SYSTEM_NAME_SPECIFICATION.md)
+2. Completion document (SYSTEM_NAME_COMPLETE.md)
+3. Integration notes (SYSTEM_INTEGRATION.md)
+4. Code comments for non-obvious logic
+5. Usage examples in docs
+
+## Remember
+
+- **The user is the decision maker** - Claude suggests, user decides
+- **Explain before doing** - Especially for errors and bugs
+- **Ask when uncertain** - Better to ask than assume
+- **Document as you go** - Keep .md files up to date
+- **Test on Windows** - User runs the game, not Claude
+
+---
+
+*This file exists to help LLMs understand the project context and communication preferences.*

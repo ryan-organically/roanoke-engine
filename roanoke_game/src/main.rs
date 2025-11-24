@@ -1,6 +1,6 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline};
 use glam::{Vec3, Mat4};
 use wgpu;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +20,7 @@ use player::Player;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GameState {
     Menu,
+    Loading,
     Playing,
 }
 
@@ -29,6 +30,13 @@ struct SaveData {
     player_pos: [f32; 3],
     player_rot: [f32; 2], // Yaw, Pitch
     inventory: Vec<String>,
+}
+
+struct LoadingProgress {
+    total_chunks: usize,
+    chunks_generated: usize,
+    chunks_uploaded: usize,
+    current_status: String,
 }
 
 struct SharedState {
@@ -48,6 +56,8 @@ struct SharedState {
     keys: std::collections::HashMap<KeyCode, ElementState>,
     // Time
     time_of_day: f32, // 0.0 - 24.0
+    // Loading Progress
+    loading_progress: LoadingProgress,
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -121,11 +131,22 @@ fn main() {
         player: Player::new(Vec3::new(0.0, 50.0, 0.0)), // Start high up
         keys: std::collections::HashMap::new(),
         time_of_day: 12.0, // Start at noon
+        loading_progress: LoadingProgress {
+            total_chunks: 0,
+            chunks_generated: 0,
+            chunks_uploaded: 0,
+            current_status: String::new(),
+        },
     }));
 
     // Terrain Generation Channel
-    // We send (positions, colors, indices, offset_x, offset_z)
-    type ChunkData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, i32, i32);
+    // We send (terrain_pos, terrain_col, terrain_nrm, terrain_idx, grass_pos, grass_col, grass_idx, tree_pos, tree_nrm, tree_uv, tree_idx, offset_x, offset_z)
+    type ChunkData = (
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Grass
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Trees
+        i32, i32 // Offsets
+    );
     let (chunk_tx, chunk_rx): (Sender<ChunkData>, Receiver<ChunkData>) = channel();
     // We need to keep the receiver in a mutex or just move it into the render closure?
     // The render closure is called repeatedly, so we can't move the receiver into it if it's FnMut (which it is).
@@ -165,7 +186,7 @@ fn main() {
             }
         }
 
-        // Handle Game Input (only if Playing)
+        // Handle Game Input (only if Playing, not during Loading)
         if state.game_state == GameState::Playing {
             match event {
                 Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
@@ -209,6 +230,13 @@ fn main() {
         static PIPELINE_STORE: OnceLock<Mutex<Vec<TerrainPipeline>>> = OnceLock::new();
         let pipeline_store = PIPELINE_STORE.get_or_init(|| Mutex::new(Vec::new()));
 
+        // Per-chunk vegetation pipelines
+        static GRASS_PIPELINES: OnceLock<Mutex<Vec<GrassPipeline>>> = OnceLock::new();
+        let grass_pipelines = GRASS_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
+
+        static TREE_PIPELINES: OnceLock<Mutex<Vec<TreePipeline>>> = OnceLock::new();
+        let tree_pipelines = TREE_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
+
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
         let (shadow_map_mutex, shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
@@ -224,6 +252,13 @@ fn main() {
         let grass_pipeline_mutex = GRASS_PIPELINE.get_or_init(|| {
             let grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format());
             Mutex::new(grass_pipeline)
+        });
+
+        // Tree System
+        static TREE_PIPELINE: OnceLock<Mutex<TreePipeline>> = OnceLock::new();
+        let tree_pipeline_mutex = TREE_PIPELINE.get_or_init(|| {
+            let tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
+            Mutex::new(tree_pipeline)
         });
 
         let mut state = render_state.lock().unwrap();
@@ -285,7 +320,7 @@ fn main() {
 
             // Sync Cursor State with Game State
             match state.game_state {
-                GameState::Menu => {
+                GameState::Menu | GameState::Loading => {
                     ctx.window.set_cursor_visible(true);
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
@@ -300,6 +335,42 @@ fn main() {
             }
 
             match state.game_state {
+                GameState::Loading => {
+                    egui::CentralPanel::default().show(ui_ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(150.0);
+                            ui.heading(egui::RichText::new("Loading World").size(40.0).color(egui::Color32::BLACK));
+                            ui.add_space(30.0);
+
+                            // Progress Bar
+                            let progress = if state.loading_progress.total_chunks > 0 {
+                                state.loading_progress.chunks_uploaded as f32 / state.loading_progress.total_chunks as f32
+                            } else {
+                                0.0
+                            };
+
+                            ui.add(egui::ProgressBar::new(progress)
+                                .text(format!("{} / {}", state.loading_progress.chunks_uploaded, state.loading_progress.total_chunks))
+                                .desired_width(400.0));
+
+                            ui.add_space(20.0);
+
+                            // Detailed Status
+                            ui.label(egui::RichText::new(&state.loading_progress.current_status)
+                                .size(16.0)
+                                .color(egui::Color32::DARK_GRAY));
+
+                            ui.add_space(10.0);
+
+                            // Additional Progress Info
+                            ui.label(egui::RichText::new(format!(
+                                "Generated: {} | Uploaded: {}",
+                                state.loading_progress.chunks_generated,
+                                state.loading_progress.chunks_uploaded
+                            )).color(egui::Color32::DARK_GRAY));
+                        });
+                    });
+                }
                 GameState::Menu => {
                     egui::CentralPanel::default().show(ui_ctx, |ui| {
                         ui.vertical_centered(|ui| {
@@ -313,44 +384,98 @@ fn main() {
                             if ui.button(egui::RichText::new("New Game").size(20.0)).clicked() {
                                 if let Ok(seed) = state.seed_input.parse::<u32>() {
                                     state.seed = seed;
-                                    state.game_state = GameState::Playing;
+                                    state.game_state = GameState::Loading;
                                     state.save_name_input = format!("seed_{}", seed); // Default save name
                                     state.player = Player::new(Vec3::new(0.0, 50.0, 0.0)); // Reset player position
                                     println!("[GAME] Starting new game with seed: {}", seed);
+
+                                    // Initialize loading progress
+                                    let range = 1;
+                                    let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                    state.loading_progress = LoadingProgress {
+                                        total_chunks: total,
+                                        chunks_generated: 0,
+                                        chunks_uploaded: 0,
+                                        current_status: "Initializing world generation...".to_string(),
+                                    };
+
                                     // Force regeneration by clearing chunks
                                     pipeline_store.lock().unwrap().clear();
+                                    grass_pipelines.lock().unwrap().clear();
+                                    tree_pipelines.lock().unwrap().clear();
 
-                                    // Generate grass for the spawn area
-                                    println!("[GRASS] Generating vegetation...");
-                                    let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
-                                        seed,
-                                        256.0, // chunk size
-                                        0.0,   // offset x
-                                        0.0,   // offset z
-                                    );
-                                    println!("[GRASS] Generated {} grass blades", grass_pos.len() / 10);
-                                    let mut grass_pipeline = grass_pipeline_mutex.lock().unwrap();
-                                    grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
-
-                                    // Spawn Generation Thread
+                                    // Spawn Generation Thread (terrain + vegetation per chunk)
                                     let tx = chunk_tx.clone();
+                                    let progress_state = Arc::clone(&render_state);
                                     thread::spawn(move || {
                                         println!("[GEN] Starting background generation for seed {}", seed);
-                                        let range = 12; 
-                                        let chunk_world_size = 256;
+                                        let range = 1;  // 1 = 9 chunks (3x3), 2 = 25 chunks (5x5), 3 = 49 chunks (7x7)
+                                        let chunk_world_size = 256.0;
                                         let chunk_resolution = 64;
                                         let scale = 4.0;
 
                                         for z in -range..=range {
                                             for x in -range..=range {
-                                                let offset_x = x * chunk_world_size as i32;
-                                                let offset_z = z * chunk_world_size as i32;
-                                                
-                                                let (pos, col, nrm, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-                                                if tx.send((pos, col, nrm, idx, offset_x, offset_z)).is_err() {
+                                                let offset_x = (x as f32 * chunk_world_size) as i32;
+                                                let offset_z = (z as f32 * chunk_world_size) as i32;
+
+                                                // Update progress: Generating terrain
+                                                if let Ok(mut state) = progress_state.try_lock() {
+                                                    state.loading_progress.current_status =
+                                                        format!("Generating terrain chunk ({}, {})...", x, z);
+                                                }
+
+                                                // Generate terrain
+                                                let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
+                                                    generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
+
+                                                // Update progress: Generating grass
+                                                if let Ok(mut state) = progress_state.try_lock() {
+                                                    state.loading_progress.current_status =
+                                                        format!("Generating grass for chunk ({}, {})...", x, z);
+                                                }
+
+                                                // Generate grass for this chunk
+                                                let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
+                                                    seed,
+                                                    chunk_world_size,
+                                                    offset_x as f32,
+                                                    offset_z as f32,
+                                                );
+
+                                                // Update progress: Generating trees
+                                                if let Ok(mut state) = progress_state.try_lock() {
+                                                    state.loading_progress.current_status =
+                                                        format!("Generating trees for chunk ({}, {})...", x, z);
+                                                }
+
+                                                // Generate trees for this chunk
+                                                let (tree_pos, tree_nrm, tree_uv, tree_idx) = generate_trees_for_chunk(
+                                                    seed,
+                                                    chunk_world_size,
+                                                    offset_x as f32,
+                                                    offset_z as f32,
+                                                );
+
+                                                // Send all data together
+                                                if tx.send((
+                                                    terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                                                    grass_pos, grass_col, grass_idx,
+                                                    tree_pos, tree_nrm, tree_uv, tree_idx,
+                                                    offset_x, offset_z
+                                                )).is_err() {
                                                     break; // Receiver dropped
                                                 }
+
+                                                // Update chunks generated
+                                                if let Ok(mut state) = progress_state.try_lock() {
+                                                    state.loading_progress.chunks_generated += 1;
+                                                }
                                             }
+                                        }
+
+                                        if let Ok(mut state) = progress_state.try_lock() {
+                                            state.loading_progress.current_status = "All chunks generated! Uploading to GPU...".to_string();
                                         }
                                         println!("[GEN] Background generation complete.");
                                     });
@@ -373,33 +498,87 @@ fn main() {
                                                 state.player.position = Vec3::from_array(data.player_pos);
                                                 state.player.yaw = data.player_rot[0];
                                                 state.player.pitch = data.player_rot[1];
-                                                state.game_state = GameState::Playing;
+                                                state.game_state = GameState::Loading;
                                                 state.save_name_input = save_name.clone();
-                                                
+
                                                 println!("[GAME] Loaded game: {}", save_name);
+
+                                                // Initialize loading progress
+                                                let range = 1;
+                                                let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                                state.loading_progress = LoadingProgress {
+                                                    total_chunks: total,
+                                                    chunks_generated: 0,
+                                                    chunks_uploaded: 0,
+                                                    current_status: "Loading saved world...".to_string(),
+                                                };
+
                                                 // Force regeneration by clearing chunks
                                                 pipeline_store.lock().unwrap().clear();
+                                                grass_pipelines.lock().unwrap().clear();
+                                                tree_pipelines.lock().unwrap().clear();
 
                                                 // Spawn Generation Thread (Same as New Game)
                                                 let tx = chunk_tx.clone();
                                                 let seed = state.seed;
+                                                let progress_state = Arc::clone(&render_state);
                                                 thread::spawn(move || {
                                                     println!("[GEN] Starting background generation for seed {}", seed);
-                                                    let range = 12; 
-                                                    let chunk_world_size = 256;
+                                                    let range = 1;  // 1 = 9 chunks (3x3), 2 = 25 chunks (5x5), 3 = 49 chunks (7x7)
+                                                    let chunk_world_size = 256.0;
                                                     let chunk_resolution = 64;
                                                     let scale = 4.0;
 
                                                     for z in -range..=range {
                                                         for x in -range..=range {
-                                                            let offset_x = x * chunk_world_size as i32;
-                                                            let offset_z = z * chunk_world_size as i32;
-                                                            
-                                                            let (pos, col, nrm, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-                                                            if tx.send((pos, col, nrm, idx, offset_x, offset_z)).is_err() {
+                                                            let offset_x = (x as f32 * chunk_world_size) as i32;
+                                                            let offset_z = (z as f32 * chunk_world_size) as i32;
+
+                                                            // Update progress
+                                                            if let Ok(mut state) = progress_state.try_lock() {
+                                                                state.loading_progress.current_status =
+                                                                    format!("Generating chunk ({}, {})...", x, z);
+                                                            }
+
+                                                            // Generate terrain
+                                                            let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
+                                                                generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
+
+                                                            // Generate grass for this chunk
+                                                            let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
+                                                                seed,
+                                                                chunk_world_size,
+                                                                offset_x as f32,
+                                                                offset_z as f32,
+                                                            );
+
+                                                            // Generate trees for this chunk
+                                                            let (tree_pos, tree_nrm, tree_uv, tree_idx) = generate_trees_for_chunk(
+                                                                seed,
+                                                                chunk_world_size,
+                                                                offset_x as f32,
+                                                                offset_z as f32,
+                                                            );
+
+                                                            // Send all data together
+                                                            if tx.send((
+                                                                terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                                                                grass_pos, grass_col, grass_idx,
+                                                                tree_pos, tree_nrm, tree_uv, tree_idx,
+                                                                offset_x, offset_z
+                                                            )).is_err() {
                                                                 break; // Receiver dropped
                                                             }
+
+                                                            // Update chunks generated
+                                                            if let Ok(mut state) = progress_state.try_lock() {
+                                                                state.loading_progress.chunks_generated += 1;
+                                                            }
                                                         }
+                                                    }
+
+                                                    if let Ok(mut state) = progress_state.try_lock() {
+                                                        state.loading_progress.current_status = "Uploading to GPU...".to_string();
                                                     }
                                                     println!("[GEN] Background generation complete.");
                                                 });
@@ -437,30 +616,91 @@ fn main() {
             }
         });
 
-        // Handle Pipeline Updates
-        let mut pipeline_guard = pipeline_store.lock().unwrap();
+        // Handle Pipeline Updates (scoped to release locks early)
+        {
+            let mut pipeline_guard = pipeline_store.lock().unwrap();
+            let mut grass_pipelines_guard = grass_pipelines.lock().unwrap();
+            let mut tree_pipelines_guard = tree_pipelines.lock().unwrap();
 
-        // Check for new chunks from background thread
+            // Check for new chunks from background thread
         if let Ok(rx) = render_rx.try_lock() {
-            // Process up to 5 chunks per frame to avoid stuttering if they come in too fast
-            for _ in 0..5 {
+            // During Loading: Process 1 chunk per frame to keep UI responsive
+            // During Playing: Process up to 5 chunks per frame for dynamic loading
+            let chunks_per_frame = if state.game_state == GameState::Loading { 1 } else { 5 };
+            for _ in 0..chunks_per_frame {
                 match rx.try_recv() {
-                    Ok((pos, col, nrm, idx, _ox, _oz)) => {
+                    Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                        grass_pos, grass_col, grass_idx,
+                        tree_pos, tree_nrm, tree_uv, tree_idx,
+                        _ox, _oz)) => {
+
+                        // Update status: Uploading
+                        state.loading_progress.current_status = format!(
+                            "Uploading chunk {} to GPU...",
+                            state.loading_progress.chunks_uploaded + 1
+                        );
+
+                        println!("[UPLOAD] Starting upload for chunk {}", state.loading_progress.chunks_uploaded + 1);
+                        println!("[UPLOAD] Creating terrain pipeline...");
+                        let terrain_start = std::time::Instant::now();
+
+                        // Add terrain pipeline
                         let pipeline = TerrainPipeline::new(
                             ctx.device(),
                             ctx.surface_format(),
-                            &pos, &col, &nrm, &idx,
+                            &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
                             &shadow_map
                         );
                         pipeline_guard.push(pipeline);
+                        println!("[UPLOAD] Terrain pipeline created in {:?}", terrain_start.elapsed());
+
+                        // Create per-chunk grass pipeline
+                        if !grass_pos.is_empty() {
+                            println!("[UPLOAD] Creating grass pipeline...");
+                            let grass_start = std::time::Instant::now();
+                            let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format());
+                            grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
+                            grass_pipelines_guard.push(grass_pipeline);
+                            println!("[UPLOAD] Grass pipeline created in {:?}", grass_start.elapsed());
+                        }
+
+                        // Create per-chunk tree pipeline
+                        if !tree_pos.is_empty() {
+                            println!("[UPLOAD] Creating tree pipeline...");
+                            let tree_start = std::time::Instant::now();
+                            let mut tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
+                            tree_pipeline.upload_mesh(ctx.device(), ctx.queue(), &tree_pos, &tree_nrm, &tree_uv, &tree_idx);
+                            tree_pipelines_guard.push(tree_pipeline);
+                            println!("[UPLOAD] Tree pipeline created in {:?}", tree_start.elapsed());
+                        }
+
+                        // Update uploaded count
+                        state.loading_progress.chunks_uploaded += 1;
+                        println!("[UPLOAD] Chunk {} complete. Total uploaded: {}/{}",
+                            state.loading_progress.chunks_uploaded,
+                            state.loading_progress.chunks_uploaded,
+                            state.loading_progress.total_chunks);
+
+                        // Check if loading is complete
+                        if state.loading_progress.chunks_uploaded >= state.loading_progress.total_chunks {
+                            if state.game_state == GameState::Loading {
+                                println!("[LOAD] Loading complete! Transitioning to Playing...");
+                                state.loading_progress.current_status = "Loading complete! Starting game...".to_string();
+                                state.game_state = GameState::Playing;
+                                println!("[LOAD] State changed to Playing. Pipeline count: {}", pipeline_guard.len());
+                            }
+                        }
                     },
                     Err(_) => break, // Empty
                 }
             }
         }
+        } // Release pipeline locks before rendering
 
-        // Render frame
+        // Render frame (re-acquire locks as needed)
+        let pipeline_guard = pipeline_store.lock().unwrap();
         if state.game_state == GameState::Playing && !pipeline_guard.is_empty() {
+            println!("[RENDER] Starting Playing state render loop");
             let elapsed = start_time.elapsed().as_secs_f32();
 
             // Get the current frame
@@ -480,16 +720,33 @@ fn main() {
             let light_proj = Mat4::orthographic_rh(-500.0, 500.0, -500.0, 500.0, 1.0, 2000.0);
             let light_view_proj = light_proj * light_view;
 
-            // Update grass camera before render pass
+            // Update grass and tree cameras before render pass
+            println!("[RENDER] Calculating view projection matrix");
             let view_proj = state.camera.view_projection_matrix();
+            println!("[RENDER] View proj calculated, updating pipelines");
             {
-                let grass_pipeline = grass_pipeline_mutex.lock().unwrap();
-                grass_pipeline.update_camera(ctx.queue(), &view_proj);
+                let grass_guard = grass_pipelines.lock().unwrap();
+                println!("[RENDER] Updating {} grass pipelines", grass_guard.len());
+                for (i, grass_pipeline) in grass_guard.iter().enumerate() {
+                    println!("[RENDER] Updating grass pipeline {}", i);
+                    grass_pipeline.update_camera(ctx.queue(), &view_proj);
+                }
+
+                let tree_guard = tree_pipelines.lock().unwrap();
+                println!("[RENDER] Updating {} tree pipelines", tree_guard.len());
+                for (i, tree_pipeline) in tree_guard.iter().enumerate() {
+                    println!("[RENDER] Updating tree pipeline {}", i);
+                    tree_pipeline.update_camera(ctx.queue(), &view_proj);
+                }
             }
+            println!("[RENDER] Camera updates complete, starting main render pass");
 
             // 1. Main Render Pass
             {
-                let grass_pipeline = grass_pipeline_mutex.lock().unwrap();
+                println!("[RENDER] Locking grass/tree pipelines for render");
+                let grass_pipelines_guard = grass_pipelines.lock().unwrap();
+                let tree_pipelines_guard = tree_pipelines.lock().unwrap();
+                println!("[RENDER] Creating render pass");
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -525,8 +782,8 @@ fn main() {
                         &light_view_proj,
                         elapsed,
                         [0.8, 0.85, 0.9], // Fog Color (Hazy)
-                        1000.0,           // Fog Start
-                        3000.0,           // Fog End (3km)
+                        200.0,            // Fog Start
+                        400.0,            // Fog End (matches 1-chunk range: 1*256 = 256)
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()
@@ -534,8 +791,15 @@ fn main() {
                     pipeline.render(&mut render_pass);
                 }
 
-                // Render grass
-                grass_pipeline.render(&mut render_pass);
+                // Render all grass chunks
+                for grass_pipeline in grass_pipelines_guard.iter() {
+                    grass_pipeline.render(&mut render_pass);
+                }
+
+                // Render all tree chunks
+                for tree_pipeline in tree_pipelines_guard.iter() {
+                    tree_pipeline.render(&mut render_pass);
+                }
             } // End Main Pass
 
             // 2. Egui Pass
@@ -586,8 +850,14 @@ fn main() {
 
             ctx.queue().submit(std::iter::once(encoder.finish()));
             output.present();
+            println!("[RENDER] Playing frame complete");
         } else {
-            // Menu rendering (just egui)
+            // Menu or Loading rendering (just egui)
+            if state.game_state == GameState::Loading {
+                println!("[RENDER] Rendering Loading screen. Progress: {}/{}",
+                    state.loading_progress.chunks_uploaded,
+                    state.loading_progress.total_chunks);
+            }
             let output = ctx.surface.get_current_texture().unwrap();
             let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 

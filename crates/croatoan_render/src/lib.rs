@@ -6,11 +6,13 @@ pub mod camera;
 pub mod terrain_pipeline;
 pub mod shadows;
 pub mod grass_pipeline;
+pub mod tree_pipeline;
 
 pub use camera::Camera;
 pub use terrain_pipeline::TerrainPipeline;
 pub use shadows::{ShadowMap, ShadowPipeline};
 pub use grass_pipeline::GrassPipeline;
+pub use tree_pipeline::TreePipeline;
 
 pub mod sky_pipeline;
 pub use sky_pipeline::SkyPipeline;
