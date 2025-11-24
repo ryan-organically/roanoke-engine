@@ -1,9 +1,9 @@
 [package]
-name = "croatoan_wfc"
+name = "croatoan_procgen"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 glam = { workspace = true }
 noise = { workspace = true }
-croatoan_procgen = { path = "../croatoan_procgen" }
+bytemuck = { workspace = true }

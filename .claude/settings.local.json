@@ -16,7 +16,10 @@
       "Bash(cargo run:*)",
       "Bash(timeout 5 cargo run:*)",
       "Bash(timeout 10 cargo run:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(echo:*)",
+      "Bash(cargo test:*)",
+      "Bash(timeout 120 cargo build:*)"
     ],
     "deny": [],
     "ask": []

@@ -4,9 +4,16 @@ use std::sync::Arc;
 
 pub mod camera;
 pub mod terrain_pipeline;
+pub mod shadows;
+pub mod grass_pipeline;
 
 pub use camera::Camera;
 pub use terrain_pipeline::TerrainPipeline;
+pub use shadows::{ShadowMap, ShadowPipeline};
+pub use grass_pipeline::GrassPipeline;
+
+pub mod sky_pipeline;
+pub use sky_pipeline::SkyPipeline;
 
 pub struct GraphicsContext {
     pub surface: Surface<'static>,
@@ -15,6 +22,7 @@ pub struct GraphicsContext {
     config: SurfaceConfiguration,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    pub window: Arc<Window>,
 }
 
 impl GraphicsContext {
@@ -90,6 +98,7 @@ impl GraphicsContext {
             config,
             depth_texture,
             depth_view,
+            window,
         }
     }
 

@@ -1,12 +1,12 @@
 [package]
 name = "croatoan_render"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 wgpu = { workspace = true }
 winit = { workspace = true }
 log = { workspace = true }
 glam = { workspace = true }
-bytemuck = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 pollster = "0.3"

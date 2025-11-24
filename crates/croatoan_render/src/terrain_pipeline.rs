@@ -2,13 +2,21 @@ use wgpu::util::DeviceExt;
 use glam::Mat4;
 
 /// Uniform data structure matching WGSL layout
-/// WGSL struct size: 96 bytes (vec3 padding forces 16-byte alignment for following fields)
+/// Must match the shader struct exactly!
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct Uniforms {
-    view_proj: [[f32; 4]; 4],  // mat4x4<f32> - 64 bytes
-    time: f32,                  // f32 - 4 bytes
-    _padding: [f32; 7],         // Padding to 96 bytes total (28 bytes)
+    view_proj: [[f32; 4]; 4],       // 64 bytes (0-64)
+    light_view_proj: [[f32; 4]; 4], // 64 bytes (64-128)
+    fog_color: [f32; 3],            // 12 bytes (128-140)
+    time: f32,                      // 4 bytes (140-144)
+    fog_start: f32,                 // 4 bytes (144-148)
+    fog_end: f32,                   // 4 bytes (148-152)
+    _padding1: [f32; 2],            // 8 bytes (152-160)
+    sun_dir: [f32; 3],              // 12 bytes (160-172)
+    _padding2: f32,                 // 4 bytes (172-176)
+    view_pos: [f32; 3],             // 12 bytes (176-188)
+    _padding3: f32,                 // 4 bytes (188-192) -> Total 192 bytes
 }
 
 // SAFETY: Uniforms is repr(C) and contains only f32, which is Pod
@@ -18,11 +26,11 @@ unsafe impl bytemuck::Zeroable for Uniforms {}
 /// Terrain rendering pipeline with vertex buffers
 pub struct TerrainPipeline {
     render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
-    index_count: u32,
+    bind_group: wgpu::BindGroup,
+    pub index_count: u32,
+    pub vertex_buffer: wgpu::Buffer, // Made public for shadow pass
+    pub index_buffer: wgpu::Buffer,  // Made public for shadow pass
 }
 
 impl TerrainPipeline {
@@ -33,6 +41,7 @@ impl TerrainPipeline {
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
         indices: &[u32],
+        shadow_map: &crate::shadows::ShadowMap,
     ) -> Self {
         // Load shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -51,26 +60,57 @@ impl TerrainPipeline {
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Camera Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                // Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // Shadow Map Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                // Shadow Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
         });
 
         // Create bind group
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Bind Group"),
             layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
+                },
+            ],
         });
 
         // Create vertex buffers
@@ -127,7 +167,7 @@ impl TerrainPipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, // Disable culling to debug visibility
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -152,7 +192,7 @@ impl TerrainPipeline {
             vertex_buffer,
             index_buffer,
             uniform_buffer,
-            uniform_bind_group,
+            bind_group,
             index_count,
         }
     }
@@ -186,25 +226,28 @@ impl TerrainPipeline {
         (vertex_buffer, index_buffer)
     }
 
-    /// Update uniform buffer with camera and time
-    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, time: f32) {
+    /// Update uniform buffer with camera, time, fog, and light matrix
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, sun_dir: [f32; 3], view_pos: [f32; 3], camera_pos: [f32; 3]) {
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
+            fog_color,
             time,
-            _padding: [0.0; 7],
+            fog_start,
+            fog_end,
+            _padding1: [0.0; 2],
+            sun_dir,
+            _padding2: 0.0,
+            view_pos,
+            _padding3: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-    }
-
-    /// Update camera uniform buffer (deprecated - use update_uniforms)
-    pub fn update_camera(&self, queue: &wgpu::Queue, view_proj: &Mat4) {
-        self.update_uniforms(queue, view_proj, 0.0);
     }
 
     /// Render the terrain
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);

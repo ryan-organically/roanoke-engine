@@ -55,7 +55,7 @@ impl Camera {
     }
 
     /// Update the view matrix based on yaw and pitch
-    pub fn update_view(&mut self) {
+    pub fn update_vectors(&mut self) {
         // Calculate forward direction from yaw and pitch
         let forward = Vec3::new(
             self.yaw.cos() * self.pitch.cos(),
@@ -91,7 +91,7 @@ impl Camera {
         // Clamp pitch to prevent gimbal lock
         self.pitch = self.pitch.clamp(-1.5, 1.5);
 
-        self.update_view();
+        self.update_vectors();
     }
 
     /// Move the camera forward/backward
@@ -103,19 +103,19 @@ impl Camera {
         )
         .normalize();
         self.position += forward * amount;
-        self.update_view();
+        self.update_vectors();
     }
 
     /// Move the camera left/right
     pub fn move_right(&mut self, amount: f32) {
         let right = self.right();
         self.position += Vec3::new(right.x, 0.0, right.z).normalize() * amount;
-        self.update_view();
+        self.update_vectors();
     }
 
     /// Move the camera up/down (global Y)
     pub fn move_up(&mut self, amount: f32) {
         self.position.y += amount;
-        self.update_view();
+        self.update_vectors();
     }
 }

@@ -2,7 +2,7 @@ use croatoan_render::GraphicsContext;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::{WindowBuilder, CursorGrabMode},
+    window::WindowBuilder,
 };
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ pub use winit::event::{DeviceEvent, ElementState, KeyEvent};
 pub use winit::keyboard::{KeyCode, PhysicalKey};
 pub use winit::event::Event as WinitEvent;
 pub use winit::event::WindowEvent as WinitWindowEvent;
+pub use winit::window::CursorGrabMode;
 
 /// Main application structure that manages the engine loop
 pub struct App {
@@ -18,7 +19,8 @@ pub struct App {
     width: u32,
     height: u32,
     render_callback: Option<Box<dyn FnMut(&mut GraphicsContext) + 'static>>,
-    input_callback: Option<Box<dyn FnMut(&Event<()>) + 'static>>,
+    input_callback: Option<Box<dyn FnMut(&Event<()>, &winit::window::Window) + 'static>>,
+    key_states: std::collections::HashMap<KeyCode, ElementState>,
 }
 
 impl App {
@@ -30,7 +32,13 @@ impl App {
             height,
             render_callback: None,
             input_callback: None,
+            key_states: std::collections::HashMap::new(),
         }
+    }
+
+    /// Get the current state of a key
+    pub fn get_key_state(&self, key: KeyCode) -> ElementState {
+        *self.key_states.get(&key).unwrap_or(&ElementState::Released)
     }
 
     /// Set the render callback that will be called each frame
@@ -44,7 +52,7 @@ impl App {
     /// Set the input callback that will be called for input events
     pub fn set_input_callback<F>(&mut self, callback: F)
     where
-        F: FnMut(&Event<()>) + 'static,
+        F: FnMut(&Event<()>, &winit::window::Window) + 'static,
     {
         self.input_callback = Some(Box::new(callback));
     }
@@ -86,7 +94,14 @@ impl App {
 
             // Call input callback for all events
             if let Some(callback) = &mut self.input_callback {
-                callback(&event);
+                callback(&event, &window);
+            }
+
+            // Update key states
+            if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } = &event {
+                if let PhysicalKey::Code(keycode) = key_event.physical_key {
+                    self.key_states.insert(keycode, key_event.state);
+                }
             }
 
             match event {
