@@ -138,9 +138,10 @@ pub fn generate_grass_patch(
     let mut all_indices = Vec::new();
 
     for i in 0..blade_count {
-        // Pseudo-random position within chunk
-        let rand_x = noise.get([i as f64 * 0.1, 0.0]) as f32;
-        let rand_z = noise.get([i as f64 * 0.1, 100.0]) as f32;
+        // Pseudo-random position within chunk using 2D noise
+        // Use different prime multipliers to ensure good distribution
+        let rand_x = noise.get([i as f64 * 0.7341, i as f64 * 0.9127]) as f32;
+        let rand_z = noise.get([i as f64 * 0.5813, i as f64 * 0.6719]) as f32;
 
         let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
         let local_z = (rand_z + 1.0) * 0.5 * chunk_size;

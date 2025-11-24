@@ -13,34 +13,56 @@ struct GrassVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],  // 64 bytes
-    time: f32,                  // 4 bytes
-    _padding: [f32; 7],         // 28 bytes padding to reach 96 bytes total (WGSL struct alignment)
+    view_proj: [[f32; 4]; 4],      // 64 bytes (0-64)
+    light_view_proj: [[f32; 4]; 4], // 64 bytes (64-128)
+    time: f32,                      // 4 bytes (128-132)
+    _padding1: [f32; 3],            // 12 bytes (132-144)
+    sun_dir: [f32; 3],              // 12 bytes (144-156)
+    _padding2: [f32; 5],            // 20 bytes (156-176) -> Total 176 bytes (aligned to 16)
 }
 
 pub struct GrassPipeline {
     pipeline: RenderPipeline,
-    vertex_buffer: Option<Buffer>,
-    index_buffer: Option<Buffer>,
-    index_count: u32,
+    pub vertex_buffer: Option<Buffer>,
+    pub index_buffer: Option<Buffer>,
+    pub index_count: u32,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
 }
 
 impl GrassPipeline {
-    pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
-        // Camera bind group layout (shared with terrain)
+    pub fn new(device: &Device, surface_format: wgpu::TextureFormat, shadow_map: &crate::shadows::ShadowMap) -> Self {
+        // Camera bind group layout with shadow map
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Grass Camera Bind Group Layout"),
             entries: &[
+                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                // Shadow Map Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                // Shadow Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
             ],
@@ -123,7 +145,7 @@ impl GrassPipeline {
             mapped_at_creation: false,
         });
 
-        // Create camera bind group
+        // Create camera bind group with shadow map
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Grass Camera Bind Group"),
             layout: &camera_bind_group_layout,
@@ -131,6 +153,14 @@ impl GrassPipeline {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
                 },
             ],
         });
@@ -183,12 +213,15 @@ impl GrassPipeline {
         log::info!("Uploaded grass mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
     }
 
-    /// Update camera uniform with time for wind animation
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, time: f32) {
+    /// Update camera uniform with time for wind animation and shadow data
+    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, light_view_proj: &Mat4, sun_dir: [f32; 3], time: f32) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
             time,
-            _padding: [0.0; 7],
+            _padding1: [0.0; 3],
+            sun_dir,
+            _padding2: [0.0; 5],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

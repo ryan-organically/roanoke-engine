@@ -154,8 +154,8 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         let blend = (t - 0.45) / 0.1;
         let h = lerp(0.0, 2.0, blend);
         let m = 0.2; // Soft dunes
-        // Golden Beige Sand
-        let c = [0.94, 0.85, 0.65]; 
+        // Warm Sandy Brown (more saturated yellow-brown)
+        let c = [0.85, 0.70, 0.45];
         (h, m, c)
     } else if t < 0.75 {
         // Subtropical Scrub

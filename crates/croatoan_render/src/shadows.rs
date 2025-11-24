@@ -152,8 +152,8 @@ impl ShadowPipeline {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 2, // Small bias
-                    slope_scale: 2.0,
+                    constant: 50, // Balanced to reduce both acne and flickering
+                    slope_scale: 1.5,
                     clamp: 0.0,
                 },
             }),
@@ -182,4 +182,7 @@ impl ShadowPipeline {
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..index_count, 0, 0..1);
     }
+
+    // Note: This pipeline works with both terrain (stride 36) and grass (stride 24)
+    // because it only reads position at offset 0, regardless of what comes after
 }

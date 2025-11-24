@@ -245,10 +245,12 @@ fn main() {
             (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
         });
 
-        // Grass System
+        // Grass System (requires shadow map)
         static GRASS_PIPELINE: OnceLock<Mutex<GrassPipeline>> = OnceLock::new();
-        let grass_pipeline_mutex = GRASS_PIPELINE.get_or_init(|| {
-            let grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format());
+        let _grass_pipeline_mutex = GRASS_PIPELINE.get_or_init(|| {
+            let shadow_map = shadow_map_mutex.lock().unwrap();
+            let grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
+            drop(shadow_map);  // Release lock
             Mutex::new(grass_pipeline)
         });
 
@@ -270,12 +272,13 @@ fn main() {
             state.fps = state.fps * 0.9 + (1.0 / delta) * 0.1;
         }
 
-        // Update Time of Day
+        // Update Time of Day (FROZEN AT SUNRISE for shadow testing)
         if state.game_state == GameState::Playing {
-            state.time_of_day += delta * 0.1; // 1 second = 0.1 hour (fast cycle for testing)
-            if state.time_of_day >= 24.0 {
-                state.time_of_day -= 24.0;
-            }
+            state.time_of_day = 6.0; // Frozen at 6 AM (sunrise) for long dramatic shadows
+            // state.time_of_day += delta * 0.1; // 1 second = 0.1 hour (fast cycle for testing)
+            // if state.time_of_day >= 24.0 {
+            //     state.time_of_day -= 24.0;
+            // }
         }
 
         // Handle Input (Player Controller)
@@ -652,7 +655,9 @@ fn main() {
 
                         // Create per-chunk grass pipeline
                         if !grass_pos.is_empty() {
-                            let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format());
+                            let shadow_map = shadow_map_mutex.lock().unwrap();
+                            let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
+                            drop(shadow_map);
                             grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
                             grass_pipelines_guard.push(grass_pipeline);
                         }
@@ -696,20 +701,37 @@ fn main() {
                 label: Some("Render Encoder"),
             });
 
-            // Calculate lighting
-            let hour_angle = (state.time_of_day - 12.0) * 15.0f32.to_radians();
-            let sun_dir = Vec3::new(hour_angle.sin(), hour_angle.cos(), 0.2).normalize();
-            let light_pos = state.camera.target + sun_dir * 100.0;
+            // Calculate lighting - Sun rises from EAST (positive X) over the ocean
+            // At 6 AM (sunrise): sun low on eastern horizon
+            // At 12 PM (noon): sun high overhead
+            // At 18 PM (sunset): sun low on western horizon
+            let hour_angle = (state.time_of_day - 6.0) * 15.0f32.to_radians(); // Offset so 6 AM = 0°
+
+            // Sun travels from East (+X) to West (-X)
+            // X: cos(angle) - starts at 1.0 (east) at sunrise, goes to -1.0 (west) at sunset
+            // Y: sin(angle) - starts at 0.0 (horizon) at sunrise, peaks at noon, back to 0.0 at sunset
+            // Z: slight southward angle for more interesting shadows
+            let sun_dir = Vec3::new(
+                -hour_angle.cos(),  // Negative because light direction points TOWARD surface
+                -hour_angle.sin(),
+                -0.3  // Slight angle from south
+            ).normalize();
+
+            // Position light far away in direction of sun
+            let light_pos = state.camera.target - sun_dir * 100.0;
             let light_view = Mat4::look_at_rh(light_pos, state.camera.target, Vec3::Y);
-            let light_proj = Mat4::orthographic_rh(-500.0, 500.0, -500.0, 500.0, 1.0, 2000.0);
+
+            // Larger orthographic projection to cover more terrain
+            let light_proj = Mat4::orthographic_rh(-800.0, 800.0, -800.0, 800.0, 1.0, 2000.0);
             let light_view_proj = light_proj * light_view;
+
 
             // Update grass and tree cameras before render pass
             let view_proj = state.camera.view_projection_matrix();
             {
                 let grass_guard = grass_pipelines.lock().unwrap();
                 for grass_pipeline in grass_guard.iter() {
-                    grass_pipeline.update_camera(ctx.queue(), &view_proj, elapsed);
+                    grass_pipeline.update_camera(ctx.queue(), &view_proj, &light_view_proj, sun_dir.to_array(), elapsed);
                 }
 
                 let tree_guard = tree_pipelines.lock().unwrap();
@@ -720,15 +742,12 @@ fn main() {
 
             // 0. Shadow Pass - Render scene from light's perspective
             {
-                println!("[SHADOW] Acquiring shadow locks");
                 let shadow_map = shadow_map_mutex.lock().unwrap();
                 let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
 
-                println!("[SHADOW] Updating shadow uniforms");
                 // Update shadow uniforms with light view-projection
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
-                println!("[SHADOW] Creating shadow render pass");
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Shadow Pass"),
                     color_attachments: &[],
@@ -744,10 +763,8 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                println!("[SHADOW] Rendering {} terrain chunks into shadow map", pipeline_guard.len());
                 // Render terrain into shadow map
-                for (i, pipeline) in pipeline_guard.iter().enumerate() {
-                    println!("[SHADOW] Rendering terrain chunk {}", i);
+                for pipeline in pipeline_guard.iter() {
                     shadow_pipeline.render(
                         &mut shadow_pass,
                         &pipeline.vertex_buffer,
@@ -756,8 +773,8 @@ fn main() {
                     );
                 }
 
-                println!("[SHADOW] Shadow pass complete");
-                // TODO: Add grass and trees to shadow pass once their pipelines expose buffers
+                // TODO: Grass shadow casting requires different vertex stride (24 vs 36)
+                // TODO: Add trees to shadow pass
             } // End Shadow Pass
 
             // 1. Main Render Pass
@@ -771,9 +788,9 @@ fn main() {
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.53,
-                                g: 0.81,
-                                b: 0.92,
+                                r: 0.95,  // Bright warm sunrise sky
+                                g: 0.75,
+                                b: 0.55,
                                 a: 1.0,
                             }),
                             store: wgpu::StoreOp::Store,
@@ -798,9 +815,9 @@ fn main() {
                         &view_proj,
                         &light_view_proj,
                         elapsed,
-                        [0.8, 0.85, 0.9], // Fog Color (Hazy)
-                        200.0,            // Fog Start
-                        400.0,            // Fog End (matches 1-chunk range: 1*256 = 256)
+                        [0.9, 0.7, 0.5], // Fog Color - Warm sunrise/sunset haze
+                        400.0,            // Fog Start - further away to see shadows
+                        800.0,            // Fog End - much further for dramatic lighting
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()

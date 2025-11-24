@@ -67,14 +67,17 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
     // Calculate shadow position
     // Transform world position to light space
-    // Range [-1, 1] -> [0, 1] for texture sampling
     let pos_from_light = uniforms.light_view_proj * vec4<f32>(world_pos, 1.0);
-    
-    // Convert to texture coordinates
+
+    // Perspective divide to get NDC coordinates
+    let shadow_ndc = pos_from_light.xyz / pos_from_light.w;
+
+    // Convert NDC [-1, 1] to texture coordinates [0, 1]
     // Flip Y because texture coordinates are top-down
     output.shadow_pos = vec3<f32>(
-        pos_from_light.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5),
-        pos_from_light.z
+        shadow_ndc.x * 0.5 + 0.5,
+        -shadow_ndc.y * 0.5 + 0.5,
+        shadow_ndc.z
     );
 
     return output;
@@ -100,34 +103,37 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Sun Direction from Uniforms
     let light_dir = normalize(uniforms.sun_dir);
 
-    // Warm Golden Sunlight
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9);
-    let ambient_color = vec3<f32>(0.4, 0.45, 0.5); // Increased ambient
+    // Warm Golden Sunlight for Sunrise - VERY BRIGHT
+    let sun_color = vec3<f32>(1.5, 1.1, 0.7); // Intense warm sunrise
+    let ambient_color = vec3<f32>(0.08, 0.10, 0.15); // Very low ambient for maximum contrast
 
-    // Diffuse lighting - stronger sun effect
+    // Diffuse lighting - strong directional sun
     let diff = max(dot(normal, -light_dir), 0.0);
 
     // Shadow Calculation - Sample shadow map
-    let shadow_pos = uniforms.light_view_proj * vec4<f32>(input.world_pos, 1.0);
-    let shadow_ndc = shadow_pos.xyz / shadow_pos.w;
-
-    // Convert NDC [-1, 1] to texture coords [0, 1]
-    let shadow_uv = vec2<f32>(
-        shadow_ndc.x * 0.5 + 0.5,
-        -shadow_ndc.y * 0.5 + 0.5  // Flip Y for texture coordinates
-    );
+    // Use the pre-calculated shadow position from vertex shader (already in texture space)
+    // The vertex shader already did the light_view_proj transform and texture coordinate conversion
+    let shadow_uv = input.shadow_pos.xy;
+    let shadow_depth = input.shadow_pos.z;
 
     var shadow = 1.0;
+    var in_shadow_map = false;
+
     // Only sample if within shadow map bounds
     if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
         shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
-        shadow_ndc.z >= 0.0 && shadow_ndc.z <= 1.0) {
+        shadow_depth >= 0.0 && shadow_depth <= 1.0) {
+        in_shadow_map = true;
         // Use comparison sampler for PCF (Percentage Closer Filtering)
-        shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_ndc.z - 0.005);
+        // NO bias in shader - rely entirely on hardware depth bias
+        shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_depth);
+        // Make shadows MUCH darker: 1.0 = lit, 0.2 = deep shadow
+        shadow = shadow * 0.8 + 0.2;
     }
 
-    // Apply shadow to sun color only - increased sun intensity
-    let lighting = ambient_color + (sun_color * diff * 1.2 * shadow);
+    // Apply shadow to sun color only - EXTREMELY dramatic sunrise lighting
+    // Very high multiplier (3.5) to create intense highlights showing clear direction
+    let lighting = ambient_color + (sun_color * diff * 3.5 * shadow);
 
     // Apply lighting to surface color
     var final_color = input.color * lighting;

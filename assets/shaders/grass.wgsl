@@ -1,13 +1,20 @@
-// Grass Shader with Wind Animation
+// Grass Shader with Wind Animation and Shadows
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    light_view_proj: mat4x4<f32>,
     time: f32,
-    _padding: vec3<f32>,  // Align to 16 bytes
+    _padding1: vec3<f32>,
+    sun_dir: vec3<f32>,
+    _padding2: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+@group(0) @binding(1)
+var t_shadow: texture_depth_2d;
+@group(0) @binding(2)
+var s_shadow: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -18,6 +25,7 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
     @location(1) world_position: vec3<f32>,
+    @location(2) shadow_pos: vec3<f32>,
 };
 
 // Simple wind animation
@@ -50,9 +58,7 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     // Calculate height factor (0 at base, 1 at tip)
-    // Assumes grass blades are oriented vertically
-    let base_height = 0.0; // You could pass this as a uniform
-    let height_factor = saturate(vertex.position.y / 1.0); // Normalize to ~1.0 max height
+    let height_factor = saturate(vertex.position.y / 1.0);
 
     // Apply wind animation with real time
     let animated_position = apply_wind(vertex.position, height_factor, camera.time);
@@ -61,19 +67,44 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     out.color = vertex.color;
     out.world_position = animated_position;
 
+    // Calculate shadow position
+    let pos_from_light = camera.light_view_proj * vec4<f32>(animated_position, 1.0);
+    let shadow_ndc = pos_from_light.xyz / pos_from_light.w;
+    out.shadow_pos = vec3<f32>(
+        shadow_ndc.x * 0.5 + 0.5,
+        -shadow_ndc.y * 0.5 + 0.5,
+        shadow_ndc.z
+    );
+
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Simple lighting based on height
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+    // Use actual sun direction from uniform
+    let light_dir = normalize(camera.sun_dir);
     let normal = vec3<f32>(0.0, 1.0, 0.0); // Simplified normal (pointing up)
 
-    let ambient = 0.4;
-    let diffuse = max(dot(normal, light_dir), 0.0) * 0.6;
-    let lighting = ambient + diffuse;
+    // Match terrain lighting - VERY BRIGHT
+    let sun_color = vec3<f32>(1.5, 1.1, 0.7);
+    let ambient_color = vec3<f32>(0.08, 0.10, 0.15);
 
+    let diffuse = max(dot(normal, -light_dir), 0.0);
+
+    // Shadow calculation
+    let shadow_uv = in.shadow_pos.xy;
+    let shadow_depth = in.shadow_pos.z;
+
+    var shadow = 1.0;
+    if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
+        shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
+        shadow_depth >= 0.0 && shadow_depth <= 1.0) {
+        shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_depth);
+        shadow = shadow * 0.8 + 0.2; // Darken shadows
+    }
+
+    // Apply lighting with shadows - intense directional light
+    let lighting = ambient_color + (sun_color * diffuse * 3.5 * shadow);
     let final_color = in.color * lighting;
 
     return vec4<f32>(final_color, 1.0);
