@@ -16,7 +16,7 @@ pub fn generate_vegetation_for_chunk(
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
-    let max_density = 12.0; // Sample many potential positions
+    let max_density = 20.0; // Balanced grass coverage (increased from 12.0, reduced from 40.0 for GPU limits)
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();

@@ -126,9 +126,9 @@ impl ShadowPipeline {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[
-                    // Position only (stride 24 because we reuse the main vertex buffer which has color)
+                    // Position only (stride 36 because we reuse the main vertex buffer which has pos+color+normal)
                     wgpu::VertexBufferLayout {
-                        array_stride: 24,
+                        array_stride: 36,  // Match terrain buffer: 3 floats pos + 3 floats color + 3 floats normal
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
                             wgpu::VertexAttribute {

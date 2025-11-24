@@ -244,8 +244,6 @@ fn main() {
             let shadow_pipeline = ShadowPipeline::new(ctx.device());
             (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
         });
-        let shadow_map = shadow_map_mutex.lock().unwrap();
-        let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
 
         // Grass System
         static GRASS_PIPELINE: OnceLock<Mutex<GrassPipeline>> = OnceLock::new();
@@ -640,46 +638,34 @@ fn main() {
                             state.loading_progress.chunks_uploaded + 1
                         );
 
-                        println!("[UPLOAD] Starting upload for chunk {}", state.loading_progress.chunks_uploaded + 1);
-                        println!("[UPLOAD] Creating terrain pipeline...");
-                        let terrain_start = std::time::Instant::now();
-
-                        // Add terrain pipeline
-                        let pipeline = TerrainPipeline::new(
-                            ctx.device(),
-                            ctx.surface_format(),
-                            &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
-                            &shadow_map
-                        );
+                        // Add terrain pipeline (acquire shadow_map only for creation)
+                        let pipeline = {
+                            let shadow_map = shadow_map_mutex.lock().unwrap();
+                            TerrainPipeline::new(
+                                ctx.device(),
+                                ctx.surface_format(),
+                                &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
+                                &shadow_map
+                            )
+                        };
                         pipeline_guard.push(pipeline);
-                        println!("[UPLOAD] Terrain pipeline created in {:?}", terrain_start.elapsed());
 
                         // Create per-chunk grass pipeline
                         if !grass_pos.is_empty() {
-                            println!("[UPLOAD] Creating grass pipeline...");
-                            let grass_start = std::time::Instant::now();
                             let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format());
                             grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
                             grass_pipelines_guard.push(grass_pipeline);
-                            println!("[UPLOAD] Grass pipeline created in {:?}", grass_start.elapsed());
                         }
 
                         // Create per-chunk tree pipeline
                         if !tree_pos.is_empty() {
-                            println!("[UPLOAD] Creating tree pipeline...");
-                            let tree_start = std::time::Instant::now();
                             let mut tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
                             tree_pipeline.upload_mesh(ctx.device(), ctx.queue(), &tree_pos, &tree_nrm, &tree_uv, &tree_idx);
                             tree_pipelines_guard.push(tree_pipeline);
-                            println!("[UPLOAD] Tree pipeline created in {:?}", tree_start.elapsed());
                         }
 
                         // Update uploaded count
                         state.loading_progress.chunks_uploaded += 1;
-                        println!("[UPLOAD] Chunk {} complete. Total uploaded: {}/{}",
-                            state.loading_progress.chunks_uploaded,
-                            state.loading_progress.chunks_uploaded,
-                            state.loading_progress.total_chunks);
 
                         // Check if loading is complete
                         if state.loading_progress.chunks_uploaded >= state.loading_progress.total_chunks {
@@ -687,7 +673,6 @@ fn main() {
                                 println!("[LOAD] Loading complete! Transitioning to Playing...");
                                 state.loading_progress.current_status = "Loading complete! Starting game...".to_string();
                                 state.game_state = GameState::Playing;
-                                println!("[LOAD] State changed to Playing. Pipeline count: {}", pipeline_guard.len());
                             }
                         }
                     },
@@ -700,7 +685,6 @@ fn main() {
         // Render frame (re-acquire locks as needed)
         let pipeline_guard = pipeline_store.lock().unwrap();
         if state.game_state == GameState::Playing && !pipeline_guard.is_empty() {
-            println!("[RENDER] Starting Playing state render loop");
             let elapsed = start_time.elapsed().as_secs_f32();
 
             // Get the current frame
@@ -721,32 +705,65 @@ fn main() {
             let light_view_proj = light_proj * light_view;
 
             // Update grass and tree cameras before render pass
-            println!("[RENDER] Calculating view projection matrix");
             let view_proj = state.camera.view_projection_matrix();
-            println!("[RENDER] View proj calculated, updating pipelines");
             {
                 let grass_guard = grass_pipelines.lock().unwrap();
-                println!("[RENDER] Updating {} grass pipelines", grass_guard.len());
-                for (i, grass_pipeline) in grass_guard.iter().enumerate() {
-                    println!("[RENDER] Updating grass pipeline {}", i);
-                    grass_pipeline.update_camera(ctx.queue(), &view_proj);
+                for grass_pipeline in grass_guard.iter() {
+                    grass_pipeline.update_camera(ctx.queue(), &view_proj, elapsed);
                 }
 
                 let tree_guard = tree_pipelines.lock().unwrap();
-                println!("[RENDER] Updating {} tree pipelines", tree_guard.len());
-                for (i, tree_pipeline) in tree_guard.iter().enumerate() {
-                    println!("[RENDER] Updating tree pipeline {}", i);
+                for tree_pipeline in tree_guard.iter() {
                     tree_pipeline.update_camera(ctx.queue(), &view_proj);
                 }
             }
-            println!("[RENDER] Camera updates complete, starting main render pass");
+
+            // 0. Shadow Pass - Render scene from light's perspective
+            {
+                println!("[SHADOW] Acquiring shadow locks");
+                let shadow_map = shadow_map_mutex.lock().unwrap();
+                let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
+
+                println!("[SHADOW] Updating shadow uniforms");
+                // Update shadow uniforms with light view-projection
+                shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
+
+                println!("[SHADOW] Creating shadow render pass");
+                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow Pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &shadow_map.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                println!("[SHADOW] Rendering {} terrain chunks into shadow map", pipeline_guard.len());
+                // Render terrain into shadow map
+                for (i, pipeline) in pipeline_guard.iter().enumerate() {
+                    println!("[SHADOW] Rendering terrain chunk {}", i);
+                    shadow_pipeline.render(
+                        &mut shadow_pass,
+                        &pipeline.vertex_buffer,
+                        &pipeline.index_buffer,
+                        pipeline.index_count,
+                    );
+                }
+
+                println!("[SHADOW] Shadow pass complete");
+                // TODO: Add grass and trees to shadow pass once their pipelines expose buffers
+            } // End Shadow Pass
 
             // 1. Main Render Pass
             {
-                println!("[RENDER] Locking grass/tree pipelines for render");
                 let grass_pipelines_guard = grass_pipelines.lock().unwrap();
                 let tree_pipelines_guard = tree_pipelines.lock().unwrap();
-                println!("[RENDER] Creating render pass");
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -850,14 +867,8 @@ fn main() {
 
             ctx.queue().submit(std::iter::once(encoder.finish()));
             output.present();
-            println!("[RENDER] Playing frame complete");
         } else {
             // Menu or Loading rendering (just egui)
-            if state.game_state == GameState::Loading {
-                println!("[RENDER] Rendering Loading screen. Progress: {}/{}",
-                    state.loading_progress.chunks_uploaded,
-                    state.loading_progress.total_chunks);
-            }
             let output = ctx.surface.get_current_texture().unwrap();
             let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 

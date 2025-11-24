@@ -2,6 +2,8 @@
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    time: f32,
+    _padding: vec3<f32>,  // Align to 16 bytes
 };
 
 @group(0) @binding(0)
@@ -19,17 +21,14 @@ struct VertexOutput {
 };
 
 // Simple wind animation
-// Uses sine waves based on world position for organic movement
-fn apply_wind(world_pos: vec3<f32>, height_factor: f32) -> vec3<f32> {
-    // Time simulation (we'll use world position as proxy for now)
-    // In a real implementation, you'd pass time as a uniform
-    let time = world_pos.x * 0.1 + world_pos.z * 0.1;
-
+// Uses sine waves based on actual elapsed time for organic movement
+fn apply_wind(world_pos: vec3<f32>, height_factor: f32, time: f32) -> vec3<f32> {
     // Wind direction and strength
     let wind_strength = 0.15;
     let wind_direction = vec2<f32>(1.0, 0.5);
 
-    // Multiple sine waves for organic motion
+    // Multiple sine waves for organic motion using REAL TIME
+    // Add world position for spatial variation so all grass doesn't move identically
     let wave1 = sin(time * 2.0 + world_pos.x * 0.5) * wind_strength;
     let wave2 = sin(time * 1.5 + world_pos.z * 0.7) * wind_strength * 0.5;
 
@@ -55,8 +54,8 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     let base_height = 0.0; // You could pass this as a uniform
     let height_factor = saturate(vertex.position.y / 1.0); // Normalize to ~1.0 max height
 
-    // Apply wind animation
-    let animated_position = apply_wind(vertex.position, height_factor);
+    // Apply wind animation with real time
+    let animated_position = apply_wind(vertex.position, height_factor, camera.time);
 
     out.clip_position = camera.view_proj * vec4<f32>(animated_position, 1.0);
     out.color = vertex.color;

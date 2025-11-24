@@ -107,8 +107,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Diffuse lighting - stronger sun effect
     let diff = max(dot(normal, -light_dir), 0.0);
 
-    // Shadow Calculation (DISABLED FOR DEBUGGING)
-    let shadow = 1.0;
+    // Shadow Calculation - Sample shadow map
+    let shadow_pos = uniforms.light_view_proj * vec4<f32>(input.world_pos, 1.0);
+    let shadow_ndc = shadow_pos.xyz / shadow_pos.w;
+
+    // Convert NDC [-1, 1] to texture coords [0, 1]
+    let shadow_uv = vec2<f32>(
+        shadow_ndc.x * 0.5 + 0.5,
+        -shadow_ndc.y * 0.5 + 0.5  // Flip Y for texture coordinates
+    );
+
+    var shadow = 1.0;
+    // Only sample if within shadow map bounds
+    if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
+        shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
+        shadow_ndc.z >= 0.0 && shadow_ndc.z <= 1.0) {
+        // Use comparison sampler for PCF (Percentage Closer Filtering)
+        shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_ndc.z - 0.005);
+    }
 
     // Apply shadow to sun color only - increased sun intensity
     let lighting = ambient_color + (sun_color * diff * 1.2 * shadow);

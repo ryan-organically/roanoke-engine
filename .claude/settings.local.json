@@ -21,7 +21,8 @@
       "Bash(cargo test:*)",
       "Bash(timeout 120 cargo build:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(RUST_BACKTRACE=1 cargo run:*)"
     ],
     "deny": [],
     "ask": []

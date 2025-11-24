@@ -13,7 +13,9 @@ struct GrassVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
+    view_proj: [[f32; 4]; 4],  // 64 bytes
+    time: f32,                  // 4 bytes
+    _padding: [f32; 7],         // 28 bytes padding to reach 96 bytes total (WGSL struct alignment)
 }
 
 pub struct GrassPipeline {
@@ -181,10 +183,12 @@ impl GrassPipeline {
         log::info!("Uploaded grass mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
     }
 
-    /// Update camera uniform
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4) {
+    /// Update camera uniform with time for wind animation
+    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, time: f32) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
+            time,
+            _padding: [0.0; 7],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
