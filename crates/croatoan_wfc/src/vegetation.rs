@@ -11,17 +11,17 @@ pub fn generate_vegetation_for_chunk(
     offset_z: f32,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
     let recipe = GrassBladeRecipe {
-        height_range: (0.2, 0.6),
-        blade_segments: 3,
-        curve_factor: 0.4,
-        width_base: 0.06,
+        height_range: (0.4, 1.2),  // Taller grass (was 0.2-0.6)
+        blade_segments: 4,          // More segments for smoother curves
+        curve_factor: 0.5,          // More curve for natural look
+        width_base: 0.08,           // Slightly wider base
         width_tip: 0.01,
-        color_base: [0.15, 0.4, 0.1],
-        color_tip: [0.3, 0.6, 0.2],
+        color_base: [0.12, 0.35, 0.08],  // Darker, richer green
+        color_tip: [0.25, 0.55, 0.15],   // Brighter tips
     };
 
     // Grass density varies by biome
-    let base_density = 2.0; // blades per square unit
+    let base_density = 2.5; // blades per square unit (increased)
 
     generate_grass_patch(
         &recipe,
@@ -35,22 +35,22 @@ pub fn generate_vegetation_for_chunk(
             height
         },
         |x, z| {
-            // Biome filter: Only spawn grass in certain biomes
+            // Biome filter: Grass starts at end of beach
             let (height, _color) = get_height_at(x, z, seed);
 
-            // Grass grows in:
-            // - Beaches (above water line)
-            // - Subtropical Scrub
-            // - Coastal Forest (sparse in forest)
+            // Grass starts where beach ends and scrub begins
+            // Beach ends at ~height 1.5-2.0 (t=0.53-0.55)
+            // Scrub: height 2.0-6.0
+            // Forest: height 6.0+
 
-            // No grass underwater or on deep sand
-            if height < 0.5 {
+            // Start grass at end of beach (height > 1.5)
+            // Continue through scrub and into forest
+            if height < 1.5 {
                 return false;
             }
 
-            // Reduce density in forest (t > 0.75)
-            // For now, allow grass everywhere above water
-            height > 0.5 && height < 20.0
+            // Allow grass up to forest heights
+            height >= 1.5 && height < 20.0
         },
     )
 }

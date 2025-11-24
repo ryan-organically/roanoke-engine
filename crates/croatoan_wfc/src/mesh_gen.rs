@@ -1,15 +1,15 @@
 use crate::noise_util;
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 /// Generate a procedural terrain chunk mesh
-/// Returns (positions, colors, indices)
+/// Returns (positions, colors, normals, indices)
 pub fn generate_terrain_chunk(
     seed: u32,
     size: u32,
     offset_x: i32,
     offset_z: i32,
     scale: f32,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
     let grid_size = size + 1; // Number of vertices per dimension
     let vertex_count = (grid_size * grid_size) as usize;
 
@@ -54,6 +54,9 @@ pub fn generate_terrain_chunk(
         }
     }
 
+    // Calculate smooth normals
+    let normals = calculate_smooth_normals(&positions, &indices, grid_size);
+
     // VERIFICATION OUTPUT
     if offset_x == 0 && offset_z == 0 {
         println!("[VERIFY] Generated Terrain Chunk: {}x{} (Scale {}) at ({}, {})", size, size, scale, offset_x, offset_z);
@@ -61,7 +64,51 @@ pub fn generate_terrain_chunk(
         println!("[VERIFY] Triangle Count: {}", indices.len() / 3);
     }
 
-    (positions, colors, indices)
+    (positions, colors, normals, indices)
+}
+
+/// Calculate smooth vertex normals by averaging face normals
+fn calculate_smooth_normals(positions: &[[f32; 3]], indices: &[u32], grid_size: u32) -> Vec<[f32; 3]> {
+    let vertex_count = positions.len();
+    let mut normals = vec![[0.0f32; 3]; vertex_count];
+
+    // Accumulate face normals for each vertex
+    for triangle in indices.chunks(3) {
+        let i0 = triangle[0] as usize;
+        let i1 = triangle[1] as usize;
+        let i2 = triangle[2] as usize;
+
+        let p0 = Vec3::from_array(positions[i0]);
+        let p1 = Vec3::from_array(positions[i1]);
+        let p2 = Vec3::from_array(positions[i2]);
+
+        // Calculate face normal
+        let edge1 = p1 - p0;
+        let edge2 = p2 - p0;
+        let face_normal = edge1.cross(edge2);
+
+        // Add to each vertex
+        normals[i0][0] += face_normal.x;
+        normals[i0][1] += face_normal.y;
+        normals[i0][2] += face_normal.z;
+
+        normals[i1][0] += face_normal.x;
+        normals[i1][1] += face_normal.y;
+        normals[i1][2] += face_normal.z;
+
+        normals[i2][0] += face_normal.x;
+        normals[i2][1] += face_normal.y;
+        normals[i2][2] += face_normal.z;
+    }
+
+    // Normalize all normals
+    for normal in &mut normals {
+        let n = Vec3::from_array(*normal);
+        let normalized = n.normalize();
+        *normal = normalized.to_array();
+    }
+
+    normals
 }
 
 /// Calculate height and color at a specific global position
@@ -152,21 +199,23 @@ mod tests {
 
     #[test]
     fn test_mesh_generation() {
-        let (positions, colors, indices) = generate_terrain_chunk(1587, 64, 0, 0, 1.0);
+        let (positions, colors, normals, indices) = generate_terrain_chunk(1587, 64, 0, 0, 1.0);
 
         // Verify dimensions
         assert_eq!(positions.len(), 65 * 65);
         assert_eq!(colors.len(), 65 * 65);
+        assert_eq!(normals.len(), 65 * 65);
         assert_eq!(indices.len(), 64 * 64 * 2 * 3);
     }
 
     #[test]
     fn test_small_mesh() {
-        let (positions, colors, indices) = generate_terrain_chunk(42, 4, 0, 0, 1.0);
+        let (positions, colors, normals, indices) = generate_terrain_chunk(42, 4, 0, 0, 1.0);
 
         // 5x5 grid = 25 vertices
         assert_eq!(positions.len(), 25);
         assert_eq!(colors.len(), 25);
+        assert_eq!(normals.len(), 25);
 
         // 4x4 quads = 32 triangles = 96 indices
         assert_eq!(indices.len(), 96);
@@ -175,10 +224,10 @@ mod tests {
     #[test]
     fn test_eastern_sea_gradient() {
         // Generate West Chunk (Spawn)
-        let (west_pos, _, _) = generate_terrain_chunk(12345, 64, 0, 0, 1.0);
-        
+        let (west_pos, _, _, _) = generate_terrain_chunk(12345, 64, 0, 0, 1.0);
+
         // Generate East Chunk (Far East)
-        let (east_pos, _, _) = generate_terrain_chunk(12345, 64, 1000, 0, 1.0);
+        let (east_pos, _, _, _) = generate_terrain_chunk(12345, 64, 1000, 0, 1.0);
         
         // Calculate average height
         let west_avg: f32 = west_pos.iter().map(|p| p[1]).sum::<f32>() / west_pos.len() as f32;

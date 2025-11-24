@@ -125,7 +125,7 @@ fn main() {
 
     // Terrain Generation Channel
     // We send (positions, colors, indices, offset_x, offset_z)
-    type ChunkData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, i32, i32);
+    type ChunkData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, i32, i32);
     let (chunk_tx, chunk_rx): (Sender<ChunkData>, Receiver<ChunkData>) = channel();
     // We need to keep the receiver in a mutex or just move it into the render closure?
     // The render closure is called repeatedly, so we can't move the receiver into it if it's FnMut (which it is).
@@ -346,8 +346,8 @@ fn main() {
                                                 let offset_x = x * chunk_world_size as i32;
                                                 let offset_z = z * chunk_world_size as i32;
                                                 
-                                                let (pos, col, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-                                                if tx.send((pos, col, idx, offset_x, offset_z)).is_err() {
+                                                let (pos, col, nrm, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
+                                                if tx.send((pos, col, nrm, idx, offset_x, offset_z)).is_err() {
                                                     break; // Receiver dropped
                                                 }
                                             }
@@ -395,8 +395,8 @@ fn main() {
                                                             let offset_x = x * chunk_world_size as i32;
                                                             let offset_z = z * chunk_world_size as i32;
                                                             
-                                                            let (pos, col, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-                                                            if tx.send((pos, col, idx, offset_x, offset_z)).is_err() {
+                                                            let (pos, col, nrm, idx) = generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
+                                                            if tx.send((pos, col, nrm, idx, offset_x, offset_z)).is_err() {
                                                                 break; // Receiver dropped
                                                             }
                                                         }
@@ -445,11 +445,11 @@ fn main() {
             // Process up to 5 chunks per frame to avoid stuttering if they come in too fast
             for _ in 0..5 {
                 match rx.try_recv() {
-                    Ok((pos, col, idx, _ox, _oz)) => {
+                    Ok((pos, col, nrm, idx, _ox, _oz)) => {
                         let pipeline = TerrainPipeline::new(
                             ctx.device(),
                             ctx.surface_format(),
-                            &pos, &col, &idx,
+                            &pos, &col, &nrm, &idx,
                             &shadow_map
                         );
                         pipeline_guard.push(pipeline);

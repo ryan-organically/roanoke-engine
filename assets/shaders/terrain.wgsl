@@ -21,6 +21,7 @@ struct Uniforms {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) normal: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -28,6 +29,7 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) world_pos: vec3<f32>,
     @location(2) shadow_pos: vec3<f32>,
+    @location(3) normal: vec3<f32>,
 }
 
 @vertex
@@ -35,27 +37,33 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     var world_pos = input.position;
 
-    // WATER ANIMATION: Detect water vertices (blue channel > 0.5)
-    // Adjust threshold or logic if needed based on new colors
-    // Water is Turquoise [0.2, 0.8, 0.8] or Teal [0.05, 0.3, 0.4]
-    // Both have high Blue component relative to Red.
-    // Sand is [0.92, 0.90, 0.85]. Blue is high there too!
-    // We need a better way to detect water.
-    // Height check? Water is below 0.0 (or -0.5).
-    // Let's use world_pos.y.
-    if world_pos.y < 0.0 {
-        // Ocean breathing - dual wave system
+    // WATER ANIMATION with shore breaking
+    // Water is below y = 0.5 (includes shallow water)
+    if world_pos.y < 0.5 {
+        // Calculate depth factor (0 = shore, 1 = deep water)
+        let depth_factor = clamp((0.5 - world_pos.y) / 5.0, 0.0, 1.0);
+
+        // Deep ocean waves (rolling)
         let wave1 = sin(world_pos.x * 0.2 + uniforms.time * 1.5) * 0.3;
         let wave2 = cos(world_pos.z * 0.15 + uniforms.time * 1.2) * 0.25;
-        world_pos.y += wave1 + wave2;
+        let deep_waves = (wave1 + wave2) * depth_factor;
+
+        // Shore waves (breaking - faster, directional toward shore)
+        let shore_factor = 1.0 - depth_factor;
+        // Waves move toward shore (negative X direction based on Roanoke's east-facing ocean)
+        let breaking_wave = sin(world_pos.x * 0.8 + uniforms.time * 3.0) * 0.15 * shore_factor;
+
+        // Combine: deep rolling waves + shore breaking waves
+        world_pos.y += deep_waves + breaking_wave;
     }
 
     // Transform position by view-projection matrix
     output.clip_position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
 
-    // Pass through color and world position
+    // Pass through color, world position, and normal
     output.color = input.color;
     output.world_pos = world_pos;
+    output.normal = input.normal;
 
     // Calculate shadow position
     // Transform world position to light space
@@ -74,39 +82,50 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Calculate normal from world position derivatives (flat shading)
-    let dx = dpdx(input.world_pos);
-    let dy = dpdy(input.world_pos);
-    let normal = -normalize(cross(dx, dy)); // Flip normal to point up
+    // For water, calculate normals from derivatives to capture wave sparkle
+    // For land, use smooth interpolated normals
+    var normal: vec3<f32>;
+    let is_water = input.world_pos.y < 0.5; // Water is below this height
+
+    if (is_water) {
+        // Calculate normal from world position derivatives for dynamic waves
+        let dx = dpdx(input.world_pos);
+        let dy = dpdy(input.world_pos);
+        normal = normalize(cross(dx, dy));
+    } else {
+        // Use smooth interpolated normal for terrain
+        normal = normalize(input.normal);
+    }
 
     // Sun Direction from Uniforms
     let light_dir = normalize(uniforms.sun_dir);
 
     // Warm Golden Sunlight
-    let sun_color = vec3<f32>(1.0, 0.98, 0.9); 
-    let ambient_color = vec3<f32>(0.3, 0.35, 0.4); // Blue-ish shadows
+    let sun_color = vec3<f32>(1.0, 0.98, 0.9);
+    let ambient_color = vec3<f32>(0.4, 0.45, 0.5); // Increased ambient
 
-    // Diffuse lighting
+    // Diffuse lighting - stronger sun effect
     let diff = max(dot(normal, -light_dir), 0.0);
-    
+
     // Shadow Calculation (DISABLED FOR DEBUGGING)
     let shadow = 1.0;
 
-    // Apply shadow to sun color only
-    let lighting = ambient_color + (sun_color * diff * shadow);
+    // Apply shadow to sun color only - increased sun intensity
+    let lighting = ambient_color + (sun_color * diff * 1.2 * shadow);
 
     // Apply lighting to surface color
     var final_color = input.color * lighting;
 
-    // Water Specular Highlight
-    // Check if it's water (Blue > Red and Blue > Green significantly, or just height check if passed)
-    // We used height check in VS to animate. We can infer water if color is blue-ish.
-    // Water colors: [0.05, 0.3, 0.4] to [0.2, 0.8, 0.8]
-    if (input.color.b > input.color.r + 0.1) {
+    // Water Specular Highlight (Sun Sparkle)
+    if (is_water) {
         let view_dir = normalize(uniforms.view_pos - input.world_pos);
         let reflect_dir = reflect(-light_dir, normal);
-        let spec = pow(max(dot(view_dir, reflect_dir), 0.0), 32.0);
-        let specular = 0.8 * spec * sun_color * shadow; // Sun reflection
+
+        // Tighter specular for sharp sparkles
+        let spec = pow(max(dot(view_dir, reflect_dir), 0.0), 64.0);
+
+        // Brighter sparkles for distance visibility
+        let specular = 1.5 * spec * sun_color * shadow;
         final_color += specular;
     }
 

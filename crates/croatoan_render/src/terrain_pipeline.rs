@@ -40,6 +40,7 @@ impl TerrainPipeline {
         surface_format: wgpu::TextureFormat,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
+        normals: &[[f32; 3]],
         indices: &[u32],
         shadow_map: &crate::shadows::ShadowMap,
     ) -> Self {
@@ -114,7 +115,7 @@ impl TerrainPipeline {
         });
 
         // Create vertex buffers
-        let (vertex_buffer, index_buffer) = Self::create_buffers(device, positions, colors, indices);
+        let (vertex_buffer, index_buffer) = Self::create_buffers(device, positions, colors, normals, indices);
         let index_count = indices.len() as u32;
 
         // Create pipeline layout
@@ -125,9 +126,9 @@ impl TerrainPipeline {
         });
 
         // Define vertex buffer layout
-        // Stride: 24 bytes (3 floats position + 3 floats color)
+        // Stride: 36 bytes (3 floats position + 3 floats color + 3 floats normal)
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
-            array_stride: 24,
+            array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 // Position (location 0)
@@ -140,6 +141,12 @@ impl TerrainPipeline {
                 wgpu::VertexAttribute {
                     offset: 12,
                     shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                // Normal (location 2)
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 2,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -202,13 +209,15 @@ impl TerrainPipeline {
         device: &wgpu::Device,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
+        normals: &[[f32; 3]],
         indices: &[u32],
     ) -> (wgpu::Buffer, wgpu::Buffer) {
-        // Interleave position and color data
-        let mut vertex_data = Vec::with_capacity(positions.len() * 6);
+        // Interleave position, color, and normal data
+        let mut vertex_data = Vec::with_capacity(positions.len() * 9);
         for i in 0..positions.len() {
             vertex_data.extend_from_slice(&positions[i]);
             vertex_data.extend_from_slice(&colors[i]);
+            vertex_data.extend_from_slice(&normals[i]);
         }
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
