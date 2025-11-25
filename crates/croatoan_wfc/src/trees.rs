@@ -2,26 +2,39 @@ use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh};
 use crate::mesh_gen::get_height_at;
 use noise::{NoiseFn, Perlin};
 
+#[derive(Clone)]
+pub struct TreeTemplate {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+}
+
+use glam::{Mat4, Vec3, Quat};
+
 /// Generate trees for a terrain chunk based on biome
 ///
 /// Trees appear at forest edge and become denser in deep forest
-/// Returns combined mesh data (positions, normals, uvs, indices)
+/// Returns instance matrices for the chunk
 pub fn generate_trees_for_chunk(
     seed: u32,
     chunk_size: f32,
     offset_x: f32,
     offset_z: f32,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+) -> Vec<Mat4> {
     let noise = Perlin::new(seed + 777);
 
     // Sample potential tree positions
-    let tree_density = 0.001; // Trees per square unit (very sparse - was 0.02)
+    // Optimization: Reduced density slightly to prevent overcrowding while maintaining lush look
+    let tree_density = 0.005; 
     let potential_trees = (chunk_size * chunk_size * tree_density) as u32;
 
-    let mut all_positions = Vec::new();
-    let mut all_normals = Vec::new();
-    let mut all_uvs = Vec::new();
-    let mut all_indices = Vec::new();
+    let mut instances = Vec::new();
+
+    // Pre-calculate constants for performance
+    let lower_treeline = 12.0;
+    let upper_treeline_start = 40.0;
+    let upper_treeline_end = 55.0;
 
     for i in 0..potential_trees {
         // Pseudo-random position within chunk
@@ -37,74 +50,57 @@ pub fn generate_trees_for_chunk(
         // Get terrain height and determine biome
         let (height, _color) = get_height_at(world_x, world_z, seed);
 
-        // Beach: height < 1.5 (no trees)
-        // Scrub: height 1.5-6.0 (no trees)
-        // Forest edge: height 6.0-12.0 (sparse trees start appearing)
-        // Forest: height 12.0+ (dense trees)
+        // --- Treeline Logic ---
 
-        if height < 6.0 {
+        // 1. Lower Treeline (Coastal/Beach)
+        if height < lower_treeline {
             continue; // No trees in beach or scrub
         }
 
-        // Calculate biome factor (0.0 = forest edge start, 1.0 = deep forest)
-        let biome_factor = ((height - 6.0) / 10.0).clamp(0.0, 1.0);
+        // 2. Upper Treeline (Alpine/Mountain)
+        // Trees start fading out at `upper_treeline_start` and are gone by `upper_treeline_end`
+        if height > upper_treeline_end {
+            continue; // Above timberline
+        }
 
-        // Density increases with height (forest edge = 20%, deep forest = 100%)
-        let density_threshold = 0.2 + biome_factor * 0.8;
-        let density_roll = noise.get([world_x as f64 * 5.1, world_z as f64 * 5.1]) as f32;
+        // Calculate biome factor (0.0 = forest edge start, 1.0 = deep forest)
+        let mut biome_factor = ((height - lower_treeline) / 10.0).clamp(0.0, 1.0);
+
+        // Apply upper treeline fade
+        if height > upper_treeline_start {
+            let fade = 1.0 - ((height - upper_treeline_start) / (upper_treeline_end - upper_treeline_start));
+            biome_factor *= fade.clamp(0.0, 1.0);
+        }
+
+        // Density increases with height (forest edge = 40%, deep forest = 80%)
+        // Adjusted for upper treeline fade
+        let density_threshold = 0.4 + biome_factor * 0.4;
+        
+        // Use a different noise frequency for density map to create clumps/clearings
+        let density_roll = noise.get([world_x as f64 * 0.02, world_z as f64 * 0.02]) as f32;
         if (density_roll + 1.0) * 0.5 > density_threshold {
             continue; // Skip this tree based on density
         }
 
-        // Choose tree species based on biome
-        // Forest edge: Oak, Birch (40% each), Maple (20%)
-        // Deep forest: Pine, Spruce (40% each), Oak (20%)
-        let species_roll = noise.get([world_x as f64 * 7.3, world_z as f64 * 7.3]) as f32;
-        let species_roll_norm = (species_roll + 1.0) * 0.5;
+        // Random rotation
+        let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * 3.14;
+        
+        // Scale variation: Taller in deep forest, shorter at edges (both coastal and alpine)
+        let base_scale = 5.0 + (biome_factor * 2.0); 
+        let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32;
+        let scale = base_scale + scale_var;
 
-        let recipe = if biome_factor < 0.5 {
-            // Forest edge - deciduous trees
-            if species_roll_norm < 0.4 {
-                TreeRecipe::oak()
-            } else if species_roll_norm < 0.8 {
-                TreeRecipe::birch()
-            } else {
-                TreeRecipe::maple()
-            }
-        } else {
-            // Deep forest - mix of deciduous and coniferous
-            if species_roll_norm < 0.4 {
-                TreeRecipe::pine()
-            } else if species_roll_norm < 0.8 {
-                TreeRecipe::spruce()
-            } else {
-                TreeRecipe::oak()
-            }
-        };
+        // Create transform matrix
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_rotation_y(angle),
+            Vec3::new(world_x, height - 0.5, world_z), // -0.5 to sink slightly into ground
+        );
 
-        // Generate tree with position-based seed for variation
-        let tree_seed = seed.wrapping_add((world_x * 1000.0) as u32).wrapping_add((world_z * 100.0) as u32);
-        let tree = generate_tree(&recipe, tree_seed as u64);
-        let mesh = generate_tree_mesh(&tree);
-
-        // Offset tree to world position
-        let vertex_offset = all_positions.len() as u32;
-
-        for vertex in &mesh.vertices {
-            let mut pos = vertex.position;
-            pos[0] += world_x;
-            pos[1] += height; // Base of tree at terrain height
-            pos[2] += world_z;
-
-            all_positions.push(pos);
-            all_normals.push(vertex.normal);
-            all_uvs.push(vertex.uv);
-        }
-
-        all_indices.extend(mesh.indices.iter().map(|idx| idx + vertex_offset));
+        instances.push(transform);
     }
 
-    (all_positions, all_normals, all_uvs, all_indices)
+    instances
 }
 
 #[cfg(test)]
@@ -113,7 +109,7 @@ mod tests {
 
     #[test]
     fn test_tree_generation() {
-        let (positions, normals, uvs, indices) = generate_trees_for_chunk(
+        let instances = generate_trees_for_chunk(
             12345,
             256.0,
             0.0,
@@ -121,11 +117,12 @@ mod tests {
         );
 
         // Should generate some trees (depends on seed and chunk)
-        println!("Generated {} tree vertices", positions.len());
-        println!("Generated {} triangles", indices.len() / 3);
-
-        assert_eq!(positions.len(), normals.len());
-        assert_eq!(positions.len(), uvs.len());
-        assert!(indices.len() % 3 == 0);
+        println!("Generated {} tree instances", instances.len());
+        
+        // Basic validation
+        for instance in instances {
+            // Check if matrix is valid (not all zeros)
+            assert!(instance.w_axis.w == 1.0);
+        }
     }
 }

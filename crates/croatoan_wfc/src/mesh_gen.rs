@@ -68,7 +68,7 @@ pub fn generate_terrain_chunk(
 }
 
 /// Calculate smooth vertex normals by averaging face normals
-fn calculate_smooth_normals(positions: &[[f32; 3]], indices: &[u32], grid_size: u32) -> Vec<[f32; 3]> {
+fn calculate_smooth_normals(positions: &[[f32; 3]], indices: &[u32], _grid_size: u32) -> Vec<[f32; 3]> {
     let vertex_count = positions.len();
     let mut normals = vec![[0.0f32; 3]; vertex_count];
 
@@ -238,4 +238,164 @@ mod tests {
         // The East side should be lower (Ocean)
         assert!(east_avg < west_avg, "East side should be lower than West side due to gradient");
     }
+}
+
+/// Generate detritus (logs, driftwood, dead trees) for a chunk
+/// Returns (positions, normals, uvs, indices)
+pub fn generate_detritus_for_chunk(
+    seed: u32,
+    size: f32,
+    offset_x: f32,
+    offset_z: f32,
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+    let mut index_offset = 0;
+
+    // Use a fixed grid for potential spawn points
+    let grid_step = 4.0; // Check every 4 meters
+    let steps = (size / grid_step) as i32;
+
+    for z in 0..steps {
+        for x in 0..steps {
+            let global_x = offset_x + (x as f32 * grid_step);
+            let global_z = offset_z + (z as f32 * grid_step);
+
+            // Add some jitter to position
+            let jitter_x = noise_util::hash(seed + (global_x as u32) * 73856093) * 3.0;
+            let jitter_z = noise_util::hash(seed + (global_z as u32) * 19349663) * 3.0;
+            let px = global_x + jitter_x;
+            let pz = global_z + jitter_z;
+
+            // Get biome info
+            // Replicating get_height_at logic partially to get 't'
+            let biome_scale = 0.002;
+            let biome_noise = noise_util::fbm(
+                Vec2::new(px * biome_scale, pz * biome_scale),
+                3, 2.0, 0.5, seed + 100
+            );
+            let noise_norm = (biome_noise + 1.0) * 0.5;
+            let gradient = -px * 0.001; 
+            let t = (noise_norm * 0.3 + gradient + 0.5).clamp(0.0, 1.0);
+
+            let (terrain_height, _) = get_height_at(px, pz, seed);
+
+            // Spawn Logic based on Biome
+            let spawn_chance = noise_util::hash(seed + (px as u32) ^ (pz as u32));
+            
+            if t < 0.45 {
+                // Ocean / Shallow Water (Inlets)
+                // Spawn dead trees in shallow water
+                if terrain_height > -2.0 && terrain_height < 0.5 && spawn_chance > 0.95 {
+                    // Dead Tree (Vertical)
+                    add_cylinder(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
+                        Vec3::new(px, terrain_height, pz),
+                        0.3, // Radius
+                        4.0 + spawn_chance * 3.0, // Height
+                        Vec3::Y, // Up
+                        8 // Segments
+                    );
+                }
+            } else if t < 0.55 {
+                // Beach
+                // Spawn driftwood (scattered sticks)
+                if spawn_chance > 0.92 {
+                    // Driftwood (Small, random orientation)
+                    let rot_x = (spawn_chance * 10.0).sin();
+                    let rot_z = (spawn_chance * 10.0).cos();
+                    let axis = Vec3::new(rot_x, 0.1, rot_z).normalize();
+                    
+                    add_cylinder(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
+                        Vec3::new(px, terrain_height + 0.1, pz),
+                        0.1, // Radius
+                        1.5, // Length
+                        axis,
+                        6 // Segments
+                    );
+                }
+            } else if t > 0.75 {
+                // Forest
+                // Spawn fallen logs
+                if spawn_chance > 0.97 {
+                    // Fallen Log (Horizontal)
+                    let angle = spawn_chance * std::f32::consts::PI * 2.0;
+                    let axis = Vec3::new(angle.cos(), 0.0, angle.sin());
+                    
+                    add_cylinder(
+                        &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
+                        Vec3::new(px, terrain_height + 0.3, pz),
+                        0.4, // Radius
+                        3.0 + spawn_chance * 2.0, // Length
+                        axis,
+                        8 // Segments
+                    );
+                }
+            }
+        }
+    }
+
+    (positions, normals, uvs, indices)
+}
+
+/// Helper to add a cylinder mesh
+fn add_cylinder(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    index_offset: &mut u32,
+    center: Vec3,
+    radius: f32,
+    length: f32,
+    axis: Vec3,
+    segments: u32,
+) {
+    // Basis vectors for the cylinder cap
+    let up = axis.normalize();
+    let arbitrary = if up.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let right = up.cross(arbitrary).normalize();
+    let forward = up.cross(right).normalize();
+
+    let half_len = length * 0.5;
+    let start = center - up * half_len;
+    let end = center + up * half_len;
+
+    // Generate vertices for the side
+    for i in 0..=segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::PI * 2.0;
+        let x = angle.cos();
+        let z = angle.sin();
+
+        let normal = (right * x + forward * z).normalize();
+        let offset = normal * radius;
+
+        // Bottom vertex
+        positions.push((start + offset).to_array());
+        normals.push(normal.to_array());
+        uvs.push([i as f32 / segments as f32, 0.0]);
+
+        // Top vertex
+        positions.push((end + offset).to_array());
+        normals.push(normal.to_array());
+        uvs.push([i as f32 / segments as f32, 1.0]);
+    }
+
+    // Generate indices
+    for i in 0..segments {
+        let base = *index_offset + i * 2;
+        
+        indices.push(base);
+        indices.push(base + 1);
+        indices.push(base + 2);
+
+        indices.push(base + 1);
+        indices.push(base + 3);
+        indices.push(base + 2);
+    }
+
+    *index_offset += (segments + 1) * 2;
 }

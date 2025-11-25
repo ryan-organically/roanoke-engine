@@ -1771,6 +1771,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 name = "roanoke_game"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "croatoan_core",
  "croatoan_render",
  "croatoan_wfc",
@@ -1782,6 +1783,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "tobj",
  "wgpu",
 ]
 
@@ -2153,6 +2155,15 @@ checksum = "42d3e9c45c09de15d06dd8acf5f4e0e399e85927b7f00711024eb7ae10fa4869"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tobj"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04aca6092e5978e708ee784e8ab9b5cf3cdb598b28f99a2f257446e7081a7025"
+dependencies = [
+ "ahash",
 ]
 
 [[package]]

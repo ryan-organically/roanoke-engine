@@ -152,8 +152,8 @@ impl ShadowPipeline {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 50, // Balanced to reduce both acne and flickering
-                    slope_scale: 1.5,
+                    constant: 4,        // Lower constant bias
+                    slope_scale: 2.5,   // Higher slope scale for angled surfaces
                     clamp: 0.0,
                 },
             }),

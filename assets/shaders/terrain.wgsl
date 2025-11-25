@@ -101,14 +101,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Sun Direction from Uniforms
+    // sun_dir points FROM the sun TO the scene (direction light travels)
     let light_dir = normalize(uniforms.sun_dir);
 
-    // Warm Golden Sunlight for Sunrise - VERY BRIGHT
-    let sun_color = vec3<f32>(1.5, 1.1, 0.7); // Intense warm sunrise
-    let ambient_color = vec3<f32>(0.08, 0.10, 0.15); // Very low ambient for maximum contrast
+    // Dynamic sun color based on sun elevation (y component of light direction)
+    // When sun is low (horizon), warm orange. When high, bright white-yellow.
+    let sun_elevation = -light_dir.y; // Higher = sun is higher in sky
+    let sun_color = mix(
+        vec3<f32>(1.8, 0.6, 0.2),  // Sunrise/sunset: warm orange
+        vec3<f32>(1.4, 1.3, 1.1),  // Midday: bright white-yellow
+        clamp(sun_elevation * 2.0, 0.0, 1.0)
+    );
 
-    // Diffuse lighting - strong directional sun
-    let diff = max(dot(normal, -light_dir), 0.0);
+    // Ambient also shifts - bluer at midday, warmer at sunrise/sunset
+    let ambient_color = mix(
+        vec3<f32>(0.15, 0.10, 0.08), // Sunrise: warm ambient
+        vec3<f32>(0.12, 0.14, 0.18), // Midday: cool sky ambient
+        clamp(sun_elevation * 2.0, 0.0, 1.0)
+    );
+
+    // Diffuse lighting - use the direction light is coming FROM (negate light_dir)
+    // light_dir points toward scene, so -light_dir points toward light source
+    let n_dot_l = max(dot(normal, -light_dir), 0.0);
+    let diff = n_dot_l;
 
     // Shadow Calculation - Sample shadow map
     // Use the pre-calculated shadow position from vertex shader (already in texture space)
@@ -131,9 +146,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         shadow = shadow * 0.8 + 0.2;
     }
 
-    // Apply shadow to sun color only - EXTREMELY dramatic sunrise lighting
-    // Very high multiplier (3.5) to create intense highlights showing clear direction
-    let lighting = ambient_color + (sun_color * diff * 3.5 * shadow);
+    // Apply shadow to sun color only
+    // Multiplier adjusted for more natural look
+    let diffuse_contribution = sun_color * diff * 1.2 * shadow;
+    let lighting = ambient_color + diffuse_contribution;
 
     // Apply lighting to surface color
     var final_color = input.color * lighting;

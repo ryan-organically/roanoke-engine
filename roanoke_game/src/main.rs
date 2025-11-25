@@ -1,6 +1,6 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, TreeTemplate};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, Frustum, ChunkBounds, SunPipeline};
 use glam::{Vec3, Mat4};
 use wgpu;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,7 +13,17 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
 mod player;
+mod chunk_manager;
+mod asset_loader;
 use player::Player;
+use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
+
+mod water_system;
+use water_system::WaterSystem;
+
+// ... (Existing structs remain same) ...
+
+
 
 // --- Game State & Save System ---
 
@@ -58,6 +68,8 @@ struct SharedState {
     time_of_day: f32, // 0.0 - 24.0
     // Loading Progress
     loading_progress: LoadingProgress,
+    tree_template: Option<TreeTemplate>,
+    tree_mesh: Option<TreeMesh>,
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -112,6 +124,14 @@ fn main() {
     // Initialize App
     let mut app = App::new("Roanoke Engine", 1280, 720);
 
+    // Load assets
+    let tree_template = asset_loader::load_obj("trees/trees9.obj");
+    if tree_template.is_some() {
+        println!("[ASSET] Tree model loaded successfully");
+    } else {
+        println!("[ASSET] Failed to load tree model, using procedural fallback");
+    }
+
     // Shared State
     let shared_state = Arc::new(Mutex::new(SharedState {
         camera: Camera::new(
@@ -137,14 +157,17 @@ fn main() {
             chunks_uploaded: 0,
             current_status: String::new(),
         },
+        tree_template: tree_template.clone(),
+        tree_mesh: None, // Will be initialized in render callback
     }));
 
     // Terrain Generation Channel
-    // We send (terrain_pos, terrain_col, terrain_nrm, terrain_idx, grass_pos, grass_col, grass_idx, tree_pos, tree_nrm, tree_uv, tree_idx, offset_x, offset_z)
+    // We send (terrain_pos, terrain_col, terrain_nrm, terrain_idx, grass_pos, grass_col, grass_idx, tree_pos, tree_nrm, tree_uv, tree_idx, det_pos, det_nrm, det_uv, det_idx, offset_x, offset_z)
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Grass
-        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Trees
+        Vec<Mat4>, // Trees (Instanced)
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
         i32, i32 // Offsets
     );
     let (chunk_tx, chunk_rx): (Sender<ChunkData>, Receiver<ChunkData>) = channel();
@@ -198,10 +221,21 @@ fn main() {
                 Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } => {
                     if let PhysicalKey::Code(keycode) = key_event.physical_key {
                         state.keys.insert(keycode, key_event.state);
-                        
-                        // Handle Jump separately for single press logic if needed, but state check is fine for now
-                        if keycode == KeyCode::Space && key_event.state == ElementState::Pressed && state.game_state == GameState::Playing {
-                             state.player.jump();
+
+                        if key_event.state == ElementState::Pressed && state.game_state == GameState::Playing {
+                            match keycode {
+                                KeyCode::Space => state.player.jump(),
+                                // Time controls: T = advance time, Y = reverse time
+                                KeyCode::KeyT => {
+                                    state.time_of_day = (state.time_of_day + 1.0) % 24.0;
+                                    println!("[TIME] {:.1}:00", state.time_of_day);
+                                }
+                                KeyCode::KeyY => {
+                                    state.time_of_day = (state.time_of_day - 1.0 + 24.0) % 24.0;
+                                    println!("[TIME] {:.1}:00", state.time_of_day);
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -215,6 +249,22 @@ fn main() {
     let render_rx = Arc::clone(&chunk_rx);
     
     app.set_render_callback(move |ctx| {
+        // Initialize Tree Mesh if not already done
+        {
+            let mut state = render_state.lock().unwrap();
+            if state.tree_mesh.is_none() {
+                if let Some(tmpl) = &state.tree_template {
+                    state.tree_mesh = Some(TreePipeline::create_mesh(
+                        ctx.device(),
+                        &tmpl.positions,
+                        &tmpl.normals,
+                        &tmpl.uvs,
+                        &tmpl.indices,
+                    ));
+                }
+            }
+        }
+
         // Initialize egui renderer
         static EGUI_RENDERER: OnceLock<Mutex<egui_wgpu::Renderer>> = OnceLock::new();
         let egui_renderer_mutex = EGUI_RENDERER.get_or_init(|| {
@@ -226,16 +276,19 @@ fn main() {
             ))
         });
 
-        // Pipeline Store (Now stores a list of chunks)
-        static PIPELINE_STORE: OnceLock<Mutex<Vec<TerrainPipeline>>> = OnceLock::new();
+        // Pipeline Store (Now stores a list of chunks with bounds for culling)
+        static PIPELINE_STORE: OnceLock<Mutex<Vec<(TerrainPipeline, ChunkBounds)>>> = OnceLock::new();
         let pipeline_store = PIPELINE_STORE.get_or_init(|| Mutex::new(Vec::new()));
 
-        // Per-chunk vegetation pipelines
-        static GRASS_PIPELINES: OnceLock<Mutex<Vec<GrassPipeline>>> = OnceLock::new();
+        // Per-chunk vegetation pipelines with bounds
+        static GRASS_PIPELINES: OnceLock<Mutex<Vec<(GrassPipeline, ChunkBounds)>>> = OnceLock::new();
         let grass_pipelines = GRASS_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
 
-        static TREE_PIPELINES: OnceLock<Mutex<Vec<TreePipeline>>> = OnceLock::new();
+        static TREE_PIPELINES: OnceLock<Mutex<Vec<(TreePipeline, ChunkBounds)>>> = OnceLock::new();
         let tree_pipelines = TREE_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
+
+        static DETRITUS_PIPELINES: OnceLock<Mutex<Vec<(DetritusPipeline, ChunkBounds)>>> = OnceLock::new();
+        let detritus_pipelines = DETRITUS_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
 
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
@@ -256,10 +309,22 @@ fn main() {
 
         // Tree System
         static TREE_PIPELINE: OnceLock<Mutex<TreePipeline>> = OnceLock::new();
-        let tree_pipeline_mutex = TREE_PIPELINE.get_or_init(|| {
+        let _tree_pipeline_mutex = TREE_PIPELINE.get_or_init(|| {
             let tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
             Mutex::new(tree_pipeline)
         });
+
+        // Sun Billboard
+        static SUN_PIPELINE: OnceLock<Mutex<SunPipeline>> = OnceLock::new();
+        let sun_pipeline_mutex = SUN_PIPELINE.get_or_init(|| {
+            Mutex::new(SunPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Water System
+        static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
+        // let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
+        //     Mutex::new(WaterSystem::new(ctx.device(), ctx.surface_format()))
+        // });
 
         let mut state = render_state.lock().unwrap();
 
@@ -272,13 +337,14 @@ fn main() {
             state.fps = state.fps * 0.9 + (1.0 / delta) * 0.1;
         }
 
-        // Update Time of Day (FROZEN AT SUNRISE for shadow testing)
+        // Update Time of Day - cycles automatically, can be adjusted with T/Y keys
         if state.game_state == GameState::Playing {
-            state.time_of_day = 6.0; // Frozen at 6 AM (sunrise) for long dramatic shadows
-            // state.time_of_day += delta * 0.1; // 1 second = 0.1 hour (fast cycle for testing)
-            // if state.time_of_day >= 24.0 {
-            //     state.time_of_day -= 24.0;
-            // }
+            // Auto-advance time (1 real second = 0.5 game minutes = 1/120 hour)
+            state.time_of_day += delta * (1.0 / 120.0);
+            if state.time_of_day >= 24.0 {
+                state.time_of_day -= 24.0;
+            }
+            // Time is no longer clamped to allow night cycle
         }
 
         // Handle Input (Player Controller)
@@ -304,6 +370,15 @@ fn main() {
             state.camera.update_vectors();
         }
 
+        // Sun Billboard
+
+
+        // Moon Billboard (Reusing SunPipeline)
+        static MOON_PIPELINE: OnceLock<Mutex<SunPipeline>> = OnceLock::new();
+        let moon_pipeline_mutex = MOON_PIPELINE.get_or_init(|| {
+            Mutex::new(SunPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Egui Input
         let raw_input = if let Some(egui_state) = &mut state.egui_state {
             egui_state.take_egui_input(&ctx.window)
@@ -326,10 +401,6 @@ fn main() {
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
                 GameState::Playing => {
-                    // We keep the cursor visible and ungrabbed in Playing mode for now
-                    // so that the user can interact with the "Game Menu" (Save/Back).
-                    // In a future update, we should implement a proper "Pause" state
-                    // that toggles the cursor, and keep it hidden/locked during gameplay.
                     ctx.window.set_cursor_visible(true);
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
@@ -391,6 +462,7 @@ fn main() {
                                     println!("[GAME] Starting new game with seed: {}", seed);
 
                                     // Initialize loading progress
+                                    // Range 1 = 3x3 = 9 chunks to stay within GPU buffer limits
                                     let range = 1;
                                     let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
                                     state.loading_progress = LoadingProgress {
@@ -404,13 +476,15 @@ fn main() {
                                     pipeline_store.lock().unwrap().clear();
                                     grass_pipelines.lock().unwrap().clear();
                                     tree_pipelines.lock().unwrap().clear();
+                                    detritus_pipelines.lock().unwrap().clear();
 
                                     // Spawn Generation Thread (terrain + vegetation per chunk)
                                     let tx = chunk_tx.clone();
                                     let progress_state = Arc::clone(&render_state);
+                                    let template = state.tree_template.clone();
                                     thread::spawn(move || {
                                         println!("[GEN] Starting background generation for seed {}", seed);
-                                        let range = 1;  // 1 = 9 chunks (3x3), 2 = 25 chunks (5x5), 3 = 49 chunks (7x7)
+                                        let range = 1;  // 1 = 9 chunks (3x3)
                                         let chunk_world_size = 256.0;
                                         let chunk_resolution = 64;
                                         let scale = 4.0;
@@ -451,7 +525,15 @@ fn main() {
                                                 }
 
                                                 // Generate trees for this chunk
-                                                let (tree_pos, tree_nrm, tree_uv, tree_idx) = generate_trees_for_chunk(
+                                                let tree_instances = generate_trees_for_chunk(
+                                                    seed,
+                                                    chunk_world_size,
+                                                    offset_x as f32,
+                                                    offset_z as f32,
+                                                );
+
+                                                // Generate detritus for this chunk
+                                                let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
                                                     seed,
                                                     chunk_world_size,
                                                     offset_x as f32,
@@ -462,7 +544,8 @@ fn main() {
                                                 if tx.send((
                                                     terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                                                     grass_pos, grass_col, grass_idx,
-                                                    tree_pos, tree_nrm, tree_uv, tree_idx,
+                                                    tree_instances,
+                                                    det_pos, det_nrm, det_uv, det_idx,
                                                     offset_x, offset_z
                                                 )).is_err() {
                                                     break; // Receiver dropped
@@ -518,14 +601,16 @@ fn main() {
                                                 pipeline_store.lock().unwrap().clear();
                                                 grass_pipelines.lock().unwrap().clear();
                                                 tree_pipelines.lock().unwrap().clear();
+                                                detritus_pipelines.lock().unwrap().clear();
 
                                                 // Spawn Generation Thread (Same as New Game)
                                                 let tx = chunk_tx.clone();
                                                 let seed = state.seed;
                                                 let progress_state = Arc::clone(&render_state);
+                                                let template = state.tree_template.clone();
                                                 thread::spawn(move || {
                                                     println!("[GEN] Starting background generation for seed {}", seed);
-                                                    let range = 1;  // 1 = 9 chunks (3x3), 2 = 25 chunks (5x5), 3 = 49 chunks (7x7)
+                                                    let range = 1;
                                                     let chunk_world_size = 256.0;
                                                     let chunk_resolution = 64;
                                                     let scale = 4.0;
@@ -554,7 +639,15 @@ fn main() {
                                                             );
 
                                                             // Generate trees for this chunk
-                                                            let (tree_pos, tree_nrm, tree_uv, tree_idx) = generate_trees_for_chunk(
+                                                            let tree_instances = generate_trees_for_chunk(
+                                                                seed,
+                                                                chunk_world_size,
+                                                                offset_x as f32,
+                                                                offset_z as f32,
+                                                            );
+
+                                                            // Generate detritus for this chunk
+                                                            let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
                                                                 seed,
                                                                 chunk_world_size,
                                                                 offset_x as f32,
@@ -565,7 +658,8 @@ fn main() {
                                                             if tx.send((
                                                                 terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                                                                 grass_pos, grass_col, grass_idx,
-                                                                tree_pos, tree_nrm, tree_uv, tree_idx,
+                                                                tree_instances,
+                                                                det_pos, det_nrm, det_uv, det_idx,
                                                                 offset_x, offset_z
                                                             )).is_err() {
                                                                 break; // Receiver dropped
@@ -594,6 +688,10 @@ fn main() {
                 GameState::Playing => {
                     egui::Window::new("Game Menu").show(ui_ctx, |ui| {
                         ui.label(format!("FPS: {:.1}", state.fps));
+                        let hours = state.time_of_day as u32;
+                        let minutes = ((state.time_of_day - hours as f32) * 60.0) as u32;
+                        ui.label(format!("Time: {:02}:{:02}", hours, minutes));
+                        ui.label("T/Y keys: Change time");
                         ui.separator();
                         
                         ui.label("Save Name:");
@@ -622,6 +720,7 @@ fn main() {
             let mut pipeline_guard = pipeline_store.lock().unwrap();
             let mut grass_pipelines_guard = grass_pipelines.lock().unwrap();
             let mut tree_pipelines_guard = tree_pipelines.lock().unwrap();
+            let mut detritus_pipelines_guard = detritus_pipelines.lock().unwrap();
 
             // Check for new chunks from background thread
         if let Ok(rx) = render_rx.try_lock() {
@@ -632,13 +731,24 @@ fn main() {
                 match rx.try_recv() {
                     Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                         grass_pos, grass_col, grass_idx,
-                        tree_pos, tree_nrm, tree_uv, tree_idx,
-                        _ox, _oz)) => {
+                        tree_instances,
+                        det_pos, det_nrm, det_uv, det_idx,
+                        offset_x, offset_z)) => {
 
                         // Update status: Uploading
                         state.loading_progress.current_status = format!(
                             "Uploading chunk {} to GPU...",
                             state.loading_progress.chunks_uploaded + 1
+                        );
+
+                        // Calculate chunk bounds for frustum culling
+                        let chunk_size = 256.0;
+                        let bounds = ChunkBounds::new(
+                            offset_x as f32,
+                            offset_z as f32,
+                            chunk_size,
+                            -10.0,  // Approximate min terrain height (includes water)
+                            50.0,   // Approximate max terrain height
                         );
 
                         // Add terrain pipeline (acquire shadow_map only for creation)
@@ -651,7 +761,7 @@ fn main() {
                                 &shadow_map
                             )
                         };
-                        pipeline_guard.push(pipeline);
+                        pipeline_guard.push((pipeline, bounds));
 
                         // Create per-chunk grass pipeline
                         if !grass_pos.is_empty() {
@@ -659,14 +769,24 @@ fn main() {
                             let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                             drop(shadow_map);
                             grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
-                            grass_pipelines_guard.push(grass_pipeline);
+                            grass_pipelines_guard.push((grass_pipeline, bounds));
                         }
 
-                        // Create per-chunk tree pipeline
-                        if !tree_pos.is_empty() {
-                            let mut tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
-                            tree_pipeline.upload_mesh(ctx.device(), ctx.queue(), &tree_pos, &tree_nrm, &tree_uv, &tree_idx);
-                            tree_pipelines_guard.push(tree_pipeline);
+                        // Create per-chunk tree pipeline (Instanced)
+                        if !tree_instances.is_empty() {
+                            if let Some(mesh) = &state.tree_mesh {
+                                let mut tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
+                                tree_pipeline.set_mesh(mesh.clone());
+                                tree_pipeline.upload_instances(ctx.device(), &tree_instances);
+                                tree_pipelines_guard.push((tree_pipeline, bounds));
+                            }
+                        }
+
+                        // Create per-chunk detritus pipeline
+                        if !det_pos.is_empty() {
+                            let mut det_pipeline = DetritusPipeline::new(ctx.device(), ctx.surface_format());
+                            det_pipeline.upload_mesh(ctx.device(), ctx.queue(), &det_pos, &det_nrm, &det_uv, &det_idx);
+                            detritus_pipelines_guard.push((det_pipeline, bounds));
                         }
 
                         // Update uploaded count
@@ -693,7 +813,14 @@ fn main() {
             let elapsed = start_time.elapsed().as_secs_f32();
 
             // Get the current frame
-            let output = ctx.surface.get_current_texture().unwrap();
+            let output = match ctx.surface.get_current_texture() {
+                Ok(output) => output,
+                Err(wgpu::SurfaceError::Outdated) => return,
+                Err(e) => {
+                    eprintln!("Render error: {}", e);
+                    return;
+                }
+            };
             let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Create command encoder
@@ -701,51 +828,77 @@ fn main() {
                 label: Some("Render Encoder"),
             });
 
-            // Calculate lighting - Sun rises from EAST (positive X) over the ocean
-            // At 6 AM (sunrise): sun low on eastern horizon
-            // At 12 PM (noon): sun high overhead
-            // At 18 PM (sunset): sun low on western horizon
-            let hour_angle = (state.time_of_day - 6.0) * 15.0f32.to_radians(); // Offset so 6 AM = 0°
+            // Calculate sun direction
+            let hour_angle = (state.time_of_day - 6.0) * (std::f32::consts::PI / 12.0);
+            let sun_pos_x = hour_angle.cos();
+            let sun_pos_y = hour_angle.sin(); // Removed max(0.1) to allow setting
+            let sun_pos_z = 0.3;
+            let sun_dir = Vec3::new(-sun_pos_x, -sun_pos_y, -sun_pos_z).normalize();
 
-            // Sun travels from East (+X) to West (-X)
-            // X: cos(angle) - starts at 1.0 (east) at sunrise, goes to -1.0 (west) at sunset
-            // Y: sin(angle) - starts at 0.0 (horizon) at sunrise, peaks at noon, back to 0.0 at sunset
-            // Z: slight southward angle for more interesting shadows
-            let sun_dir = Vec3::new(
-                -hour_angle.cos(),  // Negative because light direction points TOWARD surface
-                -hour_angle.sin(),
-                -0.3  // Slight angle from south
-            ).normalize();
+            // Calculate moon direction (opposite to sun)
+            let moon_dir = -sun_dir;
 
-            // Position light far away in direction of sun
-            let light_pos = state.camera.target - sun_dir * 100.0;
-            let light_view = Mat4::look_at_rh(light_pos, state.camera.target, Vec3::Y);
+            // Determine main light source (Sun or Moon)
+            let is_day = sun_pos_y > -0.1; // Sun is visible or just setting
+            let light_dir = if is_day { sun_dir } else { moon_dir };
 
-            // Larger orthographic projection to cover more terrain
-            let light_proj = Mat4::orthographic_rh(-800.0, 800.0, -800.0, 800.0, 1.0, 2000.0);
-            let light_view_proj = light_proj * light_view;
+            // Stable shadow projection
+            let shadow_map_size = 2048.0_f32;
+            let ortho_size = 600.0_f32;
+            let shadow_center = Vec3::new(
+                (state.player.position.x / 64.0).round() * 64.0,
+                0.0,
+                (state.player.position.z / 64.0).round() * 64.0,
+            );
+            let light_pos = shadow_center - light_dir * 500.0;
+            let light_view = Mat4::look_at_rh(light_pos, shadow_center, Vec3::Y);
+            let light_proj = Mat4::orthographic_rh(-ortho_size, ortho_size, -ortho_size, ortho_size, 1.0, 1500.0);
+            let mut light_view_proj = light_proj * light_view;
 
+            // Snap to shadow map texel grid
+            let texel_size = (ortho_size * 2.0) / shadow_map_size;
+            let shadow_origin = light_view_proj.transform_point3(Vec3::ZERO);
+            let snapped_x = (shadow_origin.x / texel_size).round() * texel_size;
+            let snapped_y = (shadow_origin.y / texel_size).round() * texel_size;
+            let snap_offset = Vec3::new(snapped_x - shadow_origin.x, snapped_y - shadow_origin.y, 0.0);
+            light_view_proj = Mat4::from_translation(snap_offset) * light_view_proj;
 
-            // Update grass and tree cameras before render pass
+            // Update grass and tree cameras
             let view_proj = state.camera.view_projection_matrix();
+            let frustum = Frustum::from_view_proj(&view_proj);
+
             {
                 let grass_guard = grass_pipelines.lock().unwrap();
-                for grass_pipeline in grass_guard.iter() {
-                    grass_pipeline.update_camera(ctx.queue(), &view_proj, &light_view_proj, sun_dir.to_array(), elapsed);
+                for (grass_pipeline, _bounds) in grass_guard.iter() {
+                    grass_pipeline.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
                 }
 
                 let tree_guard = tree_pipelines.lock().unwrap();
-                for tree_pipeline in tree_guard.iter() {
+                for (tree_pipeline, _bounds) in tree_guard.iter() {
                     tree_pipeline.update_camera(ctx.queue(), &view_proj);
+                }
+
+                let detritus_guard = detritus_pipelines.lock().unwrap();
+                for (det_pipeline, _bounds) in detritus_guard.iter() {
+                    det_pipeline.update_camera(ctx.queue(), &view_proj);
+                }
+                for (det_pipeline, _bounds) in detritus_guard.iter() {
+                    det_pipeline.update_camera(ctx.queue(), &view_proj);
                 }
             }
 
-            // 0. Shadow Pass - Render scene from light's perspective
+            // Update Water & Dispatch Compute
+            // {
+            //     let mut water = water_system_mutex.lock().unwrap();
+            //     water.update(ctx.queue(), elapsed, delta);
+            //     water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
+            //     water.dispatch(&mut encoder);
+            // }
+
+            // 0. Shadow Pass
             {
                 let shadow_map = shadow_map_mutex.lock().unwrap();
                 let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
-
-                // Update shadow uniforms with light view-projection
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -763,8 +916,7 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                // Render terrain into shadow map
-                for pipeline in pipeline_guard.iter() {
+                for (pipeline, _bounds) in pipeline_guard.iter() {
                     shadow_pipeline.render(
                         &mut shadow_pass,
                         &pipeline.vertex_buffer,
@@ -772,27 +924,87 @@ fn main() {
                         pipeline.index_count,
                     );
                 }
+            }
 
-                // TODO: Grass shadow casting requires different vertex stride (24 vs 36)
-                // TODO: Add trees to shadow pass
-            } // End Shadow Pass
+            // Dynamic sky color
+            let sky_color = {
+                let sun_elevation = sun_pos_y;
+                let t = sun_elevation.clamp(0.0, 1.0);
+                
+                let night_sky = (0.02_f32, 0.02, 0.05); // Dark blue/black
+                let sunrise_sky = (0.95_f32, 0.65, 0.45); // Warm orange-pink
+                let midday_sky = (0.5_f32, 0.7, 0.95);    // Blue sky
 
-            // 1. Main Render Pass
+                if sun_elevation > 0.0 {
+                    // Day: Sunrise -> Midday
+                    wgpu::Color {
+                        r: (sunrise_sky.0 * (1.0 - t) + midday_sky.0 * t) as f64,
+                        g: (sunrise_sky.1 * (1.0 - t) + midday_sky.1 * t) as f64,
+                        b: (sunrise_sky.2 * (1.0 - t) + midday_sky.2 * t) as f64,
+                        a: 1.0,
+                    }
+                } else {
+                    // Night: Sunset -> Night
+                    let t_night = (-sun_elevation * 5.0).clamp(0.0, 1.0); // Transition quickly to night
+                    wgpu::Color {
+                        r: (sunrise_sky.0 * (1.0 - t_night) + night_sky.0 * t_night) as f64,
+                        g: (sunrise_sky.1 * (1.0 - t_night) + night_sky.1 * t_night) as f64,
+                        b: (sunrise_sky.2 * (1.0 - t_night) + night_sky.2 * t_night) as f64,
+                        a: 1.0,
+                    }
+                }
+            };
+
+            // 1. Sun/Moon Pass
+            {
+                // Acquire locks before starting render pass to ensure they outlive the pass
+                let sun_pipeline = sun_pipeline_mutex.lock().unwrap();
+                let moon_pipeline = moon_pipeline_mutex.lock().unwrap();
+
+                let mut sun_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Sun/Moon Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(sky_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                // Render Sun
+                if sun_pos_y > -0.2 { // Visible until slightly below horizon
+                    sun_pipeline.update(ctx.queue(), &view_proj, sun_dir, state.camera.position, state.camera.right(), state.camera.up, state.time_of_day);
+                    sun_pipeline.render(&mut sun_pass);
+                }
+
+                // Render Moon
+                if sun_pos_y < 0.2 { // Visible when sun is low or set
+                    // Hack: Pass a fixed "midday" time (12.0) to get white color from sun logic, 
+                    // or we could modify sun pipeline to take explicit color.
+                    // For now, let's rely on the fact that 12.0 gives white.
+                    moon_pipeline.update(ctx.queue(), &view_proj, moon_dir, state.camera.position, state.camera.right(), state.camera.up, 12.0);
+                    moon_pipeline.render(&mut sun_pass);
+                }
+            }
+
+            // 2. Main Render Pass
             {
                 let grass_pipelines_guard = grass_pipelines.lock().unwrap();
                 let tree_pipelines_guard = tree_pipelines.lock().unwrap();
+                let detritus_pipelines_guard = detritus_pipelines.lock().unwrap();
+                // let water_system_guard = water_system_mutex.lock().unwrap();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.95,  // Bright warm sunrise sky
-                                g: 0.75,
-                                b: 0.55,
-                                a: 1.0,
-                            }),
+                            load: wgpu::LoadOp::Load, // Keep sky + sun from previous pass
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -808,16 +1020,32 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                // Render all terrain chunks
-                for pipeline in pipeline_guard.iter() {
+                // Dynamic fog color matching sky
+                let fog_color = [
+                    sky_color.r as f32 * 0.9,
+                    sky_color.g as f32 * 0.9,
+                    sky_color.b as f32 * 0.9,
+                ];
+
+                // Render terrain chunks with frustum culling
+                let mut terrain_rendered = 0;
+                let mut terrain_culled = 0;
+                for (pipeline, bounds) in pipeline_guard.iter() {
+                    // Frustum cull - skip chunks outside view
+                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
+                        terrain_culled += 1;
+                        continue;
+                    }
+                    terrain_rendered += 1;
+
                     pipeline.update_uniforms(
                         ctx.queue(),
                         &view_proj,
                         &light_view_proj,
                         elapsed,
-                        [0.9, 0.7, 0.5], // Fog Color - Warm sunrise/sunset haze
-                        400.0,            // Fog Start - further away to see shadows
-                        800.0,            // Fog End - much further for dramatic lighting
+                        fog_color,
+                        400.0,
+                        800.0,
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()
@@ -825,15 +1053,60 @@ fn main() {
                     pipeline.render(&mut render_pass);
                 }
 
-                // Render all grass chunks
-                for grass_pipeline in grass_pipelines_guard.iter() {
+                // Render grass chunks with frustum culling and distance LOD
+                let grass_max_distance = 350.0; // Don't render grass beyond fog start
+                let mut grass_rendered = 0;
+                for (grass_pipeline, bounds) in grass_pipelines_guard.iter() {
+                    // Frustum cull
+                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
+                        continue;
+                    }
+                    // Distance cull - grass not visible beyond fog anyway
+                    let dist = (bounds.center - state.camera.position).length();
+                    if dist > grass_max_distance {
+                        continue;
+                    }
+                    grass_rendered += 1;
                     grass_pipeline.render(&mut render_pass);
                 }
 
-                // Render all tree chunks
-                for tree_pipeline in tree_pipelines_guard.iter() {
+                // Render tree chunks with frustum culling and distance LOD
+                let tree_max_distance = 600.0; // Trees visible further than grass
+                let mut trees_rendered = 0;
+                for (tree_pipeline, bounds) in tree_pipelines_guard.iter() {
+                    // Frustum cull
+                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
+                        continue;
+                    }
+                    // Distance cull
+                    let dist = (bounds.center - state.camera.position).length();
+                    if dist > tree_max_distance {
+                        continue;
+                    }
+                    trees_rendered += 1;
                     tree_pipeline.render(&mut render_pass);
                 }
+
+                // Render detritus chunks with frustum culling and distance LOD
+                let detritus_max_distance = 500.0;
+                for (det_pipeline, bounds) in detritus_pipelines_guard.iter() {
+                    // Frustum cull
+                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
+                        continue;
+                    }
+                    // Distance cull
+                    let dist = (bounds.center - state.camera.position).length();
+                    if dist > detritus_max_distance {
+                        continue;
+                    }
+                    det_pipeline.render(&mut render_pass);
+                }
+
+                // Render Water
+                // water_system_guard.draw(&mut render_pass);
+
+                // Log culling stats occasionally (every ~60 frames)
+                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered);
             } // End Main Pass
 
             // 2. Egui Pass

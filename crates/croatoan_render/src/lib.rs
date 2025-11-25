@@ -4,18 +4,23 @@ use std::sync::Arc;
 
 pub mod camera;
 pub mod terrain_pipeline;
-pub mod shadows;
 pub mod grass_pipeline;
 pub mod tree_pipeline;
-
-pub use camera::Camera;
-pub use terrain_pipeline::TerrainPipeline;
-pub use shadows::{ShadowMap, ShadowPipeline};
-pub use grass_pipeline::GrassPipeline;
-pub use tree_pipeline::TreePipeline;
-
+pub mod detritus_pipeline;
 pub mod sky_pipeline;
+pub mod sun_pipeline;
+pub mod shadows;
+pub mod frustum;
+
+pub use terrain_pipeline::TerrainPipeline;
+pub use grass_pipeline::GrassPipeline;
+pub use tree_pipeline::{TreePipeline, TreeMesh};
+pub use detritus_pipeline::DetritusPipeline;
 pub use sky_pipeline::SkyPipeline;
+pub use sun_pipeline::SunPipeline;
+pub use shadows::{ShadowPipeline, ShadowMap};
+pub use camera::Camera;
+pub use frustum::{Frustum, ChunkBounds};
 
 pub struct GraphicsContext {
     pub surface: Surface<'static>,

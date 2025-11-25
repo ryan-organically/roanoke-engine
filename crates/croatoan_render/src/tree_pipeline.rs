@@ -2,6 +2,7 @@ use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroupLayout, BindGroup};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -17,11 +18,24 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct TreeInstance {
+    model_matrix: [[f32; 4]; 4],
+}
+
+#[derive(Clone)]
+pub struct TreeMesh {
+    pub vertex_buffer: Arc<Buffer>,
+    pub index_buffer: Arc<Buffer>,
+    pub index_count: u32,
+}
+
 pub struct TreePipeline {
     pipeline: RenderPipeline,
-    vertex_buffer: Option<Buffer>,
-    index_buffer: Option<Buffer>,
-    index_count: u32,
+    mesh: Option<TreeMesh>,
+    instance_buffer: Option<Buffer>,
+    instance_count: u32,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
 }
@@ -62,30 +76,61 @@ impl TreePipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<TreeVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        // Position
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        // Normal
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        // UV
-                        wgpu::VertexAttribute {
-                            offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                    ],
-                }],
+                buffers: &[
+                    // Vertex Buffer Layout
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<TreeVertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            // Position
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 0,
+                                format: wgpu::VertexFormat::Float32x3,
+                            },
+                            // Normal
+                            wgpu::VertexAttribute {
+                                offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                                shader_location: 1,
+                                format: wgpu::VertexFormat::Float32x3,
+                            },
+                            // UV
+                            wgpu::VertexAttribute {
+                                offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                                shader_location: 2,
+                                format: wgpu::VertexFormat::Float32x2,
+                            },
+                        ],
+                    },
+                    // Instance Buffer Layout
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<TreeInstance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            // Model Matrix (4x vec4)
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 5,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                                shader_location: 6,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: (std::mem::size_of::<[f32; 4]>() * 2) as wgpu::BufferAddress,
+                                shader_location: 7,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: (std::mem::size_of::<[f32; 4]>() * 3) as wgpu::BufferAddress,
+                                shader_location: 8,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                        ],
+                    },
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -100,7 +145,7 @@ impl TreePipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -142,38 +187,22 @@ impl TreePipeline {
 
         Self {
             pipeline,
-            vertex_buffer: None,
-            index_buffer: None,
-            index_count: 0,
+            mesh: None,
+            instance_buffer: None,
+            instance_count: 0,
             camera_buffer,
             camera_bind_group,
         }
     }
 
-    /// Upload tree mesh data to GPU
-    pub fn upload_mesh(
-        &mut self,
+    /// Create the shared tree mesh buffers
+    pub fn create_mesh(
         device: &Device,
-        _queue: &Queue,
         positions: &[[f32; 3]],
         normals: &[[f32; 3]],
         uvs: &[[f32; 2]],
         indices: &[u32],
-    ) {
-        // Safety check: GPU has 256 MB max buffer size
-        const MAX_VERTICES: usize = 1_000_000; // ~80 MB vertex buffer
-        const MAX_INDICES: usize = 3_000_000;  // ~12 MB index buffer
-
-        if positions.len() > MAX_VERTICES {
-            log::warn!("Tree mesh too large ({} vertices), skipping. Max: {}", positions.len(), MAX_VERTICES);
-            return;
-        }
-
-        if indices.len() > MAX_INDICES {
-            log::warn!("Tree mesh too large ({} indices), skipping. Max: {}", indices.len(), MAX_INDICES);
-            return;
-        }
-
+    ) -> TreeMesh {
         // Interleave vertex data
         let vertices: Vec<TreeVertex> = (0..positions.len())
             .map(|i| TreeVertex {
@@ -184,22 +213,54 @@ impl TreePipeline {
             .collect();
 
         // Create vertex buffer
-        self.vertex_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vertex_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Tree Vertex Buffer"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         }));
 
         // Create index buffer
-        self.index_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let index_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Tree Index Buffer"),
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX,
         }));
 
-        self.index_count = indices.len() as u32;
+        log::info!("Created tree mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
 
-        log::info!("Uploaded tree mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
+        TreeMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+        }
+    }
+
+    /// Set the shared mesh for this pipeline
+    pub fn set_mesh(&mut self, mesh: TreeMesh) {
+        self.mesh = Some(mesh);
+    }
+
+    /// Upload instances for a chunk
+    pub fn upload_instances(
+        &mut self,
+        device: &Device,
+        instances: &[Mat4],
+    ) {
+        self.instance_count = instances.len() as u32;
+        if self.instance_count == 0 {
+            self.instance_buffer = None;
+            return;
+        }
+
+        let instance_data: Vec<TreeInstance> = instances.iter()
+            .map(|m| TreeInstance { model_matrix: m.to_cols_array_2d() })
+            .collect();
+
+        self.instance_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Tree Instance Buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        }));
     }
 
     /// Update camera uniform
@@ -215,17 +276,20 @@ impl TreePipeline {
         &'rpass self,
         render_pass: &mut wgpu::RenderPass<'rpass>,
     ) {
-        if self.vertex_buffer.is_none() || self.index_count == 0 {
+        if self.mesh.is_none() || self.instance_count == 0 || self.instance_buffer.is_none() {
             return;
         }
 
+        let mesh = self.mesh.as_ref().unwrap();
+
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.as_ref().unwrap().slice(..));
+        render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, self.instance_buffer.as_ref().unwrap().slice(..));
         render_pass.set_index_buffer(
-            self.index_buffer.as_ref().unwrap().slice(..),
+            mesh.index_buffer.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+        render_pass.draw_indexed(0..mesh.index_count, 0, 0..self.instance_count);
     }
 }

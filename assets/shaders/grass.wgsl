@@ -81,15 +81,32 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Use actual sun direction from uniform
+    // Sun direction from uniform (points FROM sun TO scene)
     let light_dir = normalize(camera.sun_dir);
-    let normal = vec3<f32>(0.0, 1.0, 0.0); // Simplified normal (pointing up)
 
-    // Match terrain lighting - VERY BRIGHT
-    let sun_color = vec3<f32>(1.5, 1.1, 0.7);
-    let ambient_color = vec3<f32>(0.08, 0.10, 0.15);
+    // Grass normal - mostly up, with slight variation based on position for visual interest
+    let normal = normalize(vec3<f32>(
+        sin(in.world_position.x * 0.5) * 0.1,
+        1.0,
+        cos(in.world_position.z * 0.5) * 0.1
+    ));
 
-    let diffuse = max(dot(normal, -light_dir), 0.0);
+    // Dynamic sun color matching terrain shader
+    let sun_elevation = -light_dir.y;
+    let sun_color = mix(
+        vec3<f32>(1.8, 0.6, 0.2),  // Sunrise/sunset
+        vec3<f32>(1.4, 1.3, 1.1),  // Midday
+        clamp(sun_elevation * 2.0, 0.0, 1.0)
+    );
+
+    let ambient_color = mix(
+        vec3<f32>(0.15, 0.10, 0.08),
+        vec3<f32>(0.12, 0.14, 0.18),
+        clamp(sun_elevation * 2.0, 0.0, 1.0)
+    );
+
+    // Diffuse lighting
+    let n_dot_l = max(dot(normal, -light_dir), 0.0);
 
     // Shadow calculation
     let shadow_uv = in.shadow_pos.xy;
@@ -100,11 +117,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
         shadow_depth >= 0.0 && shadow_depth <= 1.0) {
         shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_depth);
-        shadow = shadow * 0.8 + 0.2; // Darken shadows
+        shadow = shadow * 0.8 + 0.2;
     }
 
-    // Apply lighting with shadows - intense directional light
-    let lighting = ambient_color + (sun_color * diffuse * 3.5 * shadow);
+    // Apply lighting
+    let diffuse_contribution = sun_color * n_dot_l * 2.0 * shadow;
+    let lighting = ambient_color + diffuse_contribution;
     let final_color = in.color * lighting;
 
     return vec4<f32>(final_color, 1.0);

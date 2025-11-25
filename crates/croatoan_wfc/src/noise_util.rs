@@ -85,6 +85,14 @@ pub fn turbulence(point: Vec2, octaves: u32, lacunarity: f32, persistence: f32, 
     value / max_value
 }
 
+/// Simple hash function for deterministic randomness
+pub fn hash(n: u32) -> f32 {
+    let mut n = n;
+    n = (n << 13) ^ n;
+    n = n.wrapping_mul(n.wrapping_mul(n).wrapping_mul(15731) + 789221) + 1376312589;
+    (n & 0x7fffffff) as f32 / 0x7fffffff as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
