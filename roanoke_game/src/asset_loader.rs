@@ -13,7 +13,8 @@ pub fn load_obj(path: &str) -> Option<TreeTemplate> {
     };
 
     match tobj::load_obj(path, &load_options) {
-        Ok((models, _materials)) => {
+        Ok((models, materials)) => {
+            let materials = materials.unwrap_or_default();
             let mut positions = Vec::new();
             let mut normals = Vec::new();
             let mut uvs = Vec::new();
@@ -22,6 +23,19 @@ pub fn load_obj(path: &str) -> Option<TreeTemplate> {
 
             for (i, m) in models.iter().enumerate() {
                 let mesh = &m.mesh;
+                
+                // Check material name
+                if let Some(mat_id) = mesh.material_id {
+                    if mat_id < materials.len() {
+                        let mat_name = &materials[mat_id].name.to_lowercase();
+                        if mat_name.contains("leaf") || mat_name.contains("leaves") || mat_name.contains("frond") 
+                           || mat_name.contains("oak_leav") || mat_name.contains("sonnerat") || mat_name.contains("walnut_l") {
+                            println!("[ASSET] Skipping leaf mesh {}: {}", i, mat_name);
+                            continue;
+                        }
+                    }
+                }
+
                 println!("[ASSET] Mesh {}: {} vertices, {} indices", i, mesh.positions.len() / 3, mesh.indices.len());
 
                 // Positions

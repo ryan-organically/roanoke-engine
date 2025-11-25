@@ -26,7 +26,7 @@ pub fn generate_trees_for_chunk(
 
     // Sample potential tree positions
     // Optimization: Reduced density slightly to prevent overcrowding while maintaining lush look
-    let tree_density = 0.005; 
+    let tree_density = 0.002; 
     let potential_trees = (chunk_size * chunk_size * tree_density) as u32;
 
     let mut instances = Vec::new();
@@ -94,7 +94,54 @@ pub fn generate_trees_for_chunk(
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
             Quat::from_rotation_y(angle),
-            Vec3::new(world_x, height - 0.5, world_z), // -0.5 to sink slightly into ground
+            Vec3::new(world_x, height - 1.0, world_z), // -1.0 to sink firmly into ground
+        );
+
+        instances.push(transform);
+    }
+
+
+
+    // --- Bush Generation (Transition Zone) ---
+    // Dense, small vegetation between beach and forest
+    let bush_density = 0.01; // Reduced density
+    let potential_bushes = (chunk_size * chunk_size * bush_density) as u32;
+    let bush_zone_start = 3.5;
+    let bush_zone_end = 12.0;
+
+    for i in 0..potential_bushes {
+        // Offset noise lookup to avoid overlapping exactly with trees
+        let rand_x = noise.get([i as f64 * 0.1, 500.0]) as f32;
+        let rand_z = noise.get([i as f64 * 0.1, 600.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+
+        // Bush Zone Logic
+        if height < bush_zone_start || height > bush_zone_end {
+            continue;
+        }
+
+        // Density check
+        let density_roll = noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) as f32;
+        if (density_roll + 1.0) * 0.5 > 0.6 {
+            continue;
+        }
+
+        let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * 3.14;
+        
+        // Small scale for bushes
+        let scale = 0.8 + (noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32 * 0.3);
+
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_rotation_y(angle),
+            Vec3::new(world_x, height - 1.0, world_z), // Sink firmly
         );
 
         instances.push(transform);

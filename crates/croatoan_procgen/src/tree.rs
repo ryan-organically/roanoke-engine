@@ -475,6 +475,8 @@ pub fn generate_tree_mesh(tree: &GeneratedTree) -> TreeMesh {
     }
 
     // Generate leaf billboards
+    // DISABLED for performance/style
+    /*
     for leaf in &tree.leaves {
         let base_index = vertices.len() as u32;
 
@@ -514,6 +516,7 @@ pub fn generate_tree_mesh(tree: &GeneratedTree) -> TreeMesh {
         indices.push(base_index + 2);
         indices.push(base_index + 3);
     }
+    */
 
     TreeMesh {
         vertices,

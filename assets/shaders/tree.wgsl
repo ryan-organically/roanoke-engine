@@ -5,17 +5,22 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
-struct InstanceInput {
-    @location(5) model_matrix_0: vec4<f32>,
-    @location(6) model_matrix_1: vec4<f32>,
-    @location(7) model_matrix_2: vec4<f32>,
-    @location(8) model_matrix_3: vec4<f32>,
-}
+@group(1) @binding(0)
+var t_diffuse: texture_2d<f32>;
+@group(1) @binding(1)
+var s_diffuse: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+}
+
+struct InstanceInput {
+    @location(5) model_matrix_0: vec4<f32>,
+    @location(6) model_matrix_1: vec4<f32>,
+    @location(7) model_matrix_2: vec4<f32>,
+    @location(8) model_matrix_3: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -48,34 +53,24 @@ fn vs_main(input: VertexInput, instance: InstanceInput) -> VertexOutput {
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Sun direction (fixed for now)
-    let sun_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
-
-    // Simple diffuse lighting
-    let normal = normalize(input.world_normal);
-    let diffuse = max(dot(normal, sun_dir), 0.0);
-
-    // Ambient lighting
-    let ambient = 0.3;
-
-    // Determine if this is a branch or leaf based on UV
-    // Branches have low V coordinate, leaves have high V coordinate
-    let is_leaf = input.uv.y > 0.8;
-
-    if (is_leaf) {
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Sample texture
+    let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
+    
+    // Alpha mask (discard transparent pixels for leaves)
+    if (tex_color.a < 0.5) {
         discard;
     }
 
-    // Bark color - brown with variation based on UV
-    let bark_variation = fract(input.uv.y * 20.0) * 0.15;
-    let base_color = vec3<f32>(0.35 + bark_variation, 0.25 + bark_variation, 0.15);
+    // Simple lighting (Lambertian)
+    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3)); // Hardcoded sun for now
+    let diffuse = max(dot(normalize(in.world_normal), light_dir), 0.2); // Ambient 0.2
 
-    // Apply lighting
-    let lit_color = base_color * (ambient + diffuse * 0.7);
+    let final_color = tex_color.rgb * diffuse;
 
-    // Alpha
-    let alpha = 1.0;
-
-    return vec4<f32>(lit_color, alpha);
+    // Fog (simple linear)
+    // Hardcoded camera/fog for now to match terrain roughly
+    // Ideally pass fog params in uniform
+    
+    return vec4<f32>(final_color, 1.0);
 }

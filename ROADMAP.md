@@ -9,7 +9,7 @@ Prioritized implementation guide. Each section includes the problem, approach, a
 | Phase | Status | Notes |
 |-------|--------|-------|
 | 1.1-1.2 Directional Lighting | ✅ DONE | Dynamic sun color based on elevation |
-| 1.3 Sun Billboard | ⏳ PENDING | Visual sun disk not implemented |
+| 1.3 Sun Billboard | ✅ DONE | Visual sun disk implemented |
 | 1.4 Time of Day | ✅ DONE | T/Y keys, dynamic sky/fog colors |
 | 2.1-2.3 Shadow Fixes | ✅ DONE | Texel snapping, stable projection |
 | 3.1-3.3 Frustum Culling | ✅ DONE | ~50% fewer draw calls |

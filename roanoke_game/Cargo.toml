@@ -7,6 +7,7 @@ edition = "2021"
 croatoan_core = { path = "../crates/croatoan_core" }
 croatoan_render = { path = "../crates/croatoan_render" }
 croatoan_wfc = { path = "../crates/croatoan_wfc" }
+croatoan_procgen = { path = "../crates/croatoan_procgen" }
 wgpu = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
@@ -24,3 +25,4 @@ serde_json = "1.0"
 rand = "0.8"
 tobj = { version = "4.0", features = ["async"] }
 bytemuck = { version = "1.14", features = ["derive"] }
+image = "0.24"

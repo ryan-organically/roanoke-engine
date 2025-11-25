@@ -11,6 +11,7 @@ pub mod sky_pipeline;
 pub mod sun_pipeline;
 pub mod shadows;
 pub mod frustum;
+pub mod building_pipeline;
 
 pub use terrain_pipeline::TerrainPipeline;
 pub use grass_pipeline::GrassPipeline;
@@ -21,6 +22,7 @@ pub use sun_pipeline::SunPipeline;
 pub use shadows::{ShadowPipeline, ShadowMap};
 pub use camera::Camera;
 pub use frustum::{Frustum, ChunkBounds};
+pub use building_pipeline::{BuildingPipeline, BuildingMesh, BuildingVertex};
 
 pub struct GraphicsContext {
     pub surface: Surface<'static>,

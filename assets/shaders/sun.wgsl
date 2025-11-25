@@ -71,11 +71,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
         return vec4<f32>(core_color, 1.0);
     } else if dist < corona_radius {
-        // Corona glow - fade out
+        // Corona glow - Soft exponential falloff
         let corona_blend = (dist - core_radius) / (corona_radius - core_radius);
-        let alpha = 1.0 - corona_blend * corona_blend; // Quadratic falloff
-        let corona_color = uniforms.sun_color * (1.0 - corona_blend * 0.5);
-        return vec4<f32>(corona_color, alpha * 0.6);
+        // Use exponential falloff for a "glowing" look rather than linear/quadratic
+        let glow = exp(-corona_blend * 4.0); 
+        let corona_color = uniforms.sun_color;
+        return vec4<f32>(corona_color, glow * 0.8);
     } else {
         // Outside sun
         discard;

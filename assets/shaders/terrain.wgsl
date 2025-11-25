@@ -171,11 +171,32 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Distance from Camera
     let dist = distance(input.world_pos, uniforms.view_pos);
     
-    // Linear Fog
-    let fog_factor = clamp((dist - uniforms.fog_start) / (uniforms.fog_end - uniforms.fog_start), 0.0, 1.0);
+    // FOG CALCULATION (Atmospheric Volumetric Fog)
     
-    // Mix lit color with fog
-    final_color = mix(final_color, uniforms.fog_color, fog_factor);
+    // 1. Distance Fog (Base)
+    let dist_factor = clamp((dist - uniforms.fog_start) / (uniforms.fog_end - uniforms.fog_start), 0.0, 1.0);
+    
+    // 2. Height Fog (Denser at sea level, thins out upwards)
+    let fog_height_falloff = 40.0; // Height where fog disappears
+    let height_factor = 1.0 - clamp((input.world_pos.y + 5.0) / fog_height_falloff, 0.0, 1.0);
+    let height_fog = height_factor * height_factor; // Quadratic falloff for "settled" look
+
+    // Combine Fog Density
+    // Distance fog is always present, height fog adds density in low areas
+    let fog_density = clamp(dist_factor + height_fog * 0.6, 0.0, 1.0);
+
+    // 3. Sun Scattering (Glow when looking at sun)
+    let view_dir = normalize(input.world_pos - uniforms.view_pos);
+    let sun_dot = max(dot(view_dir, normalize(uniforms.sun_dir)), 0.0);
+    let sun_scatter = pow(sun_dot, 16.0); // Sharp glow near sun
+    
+    // Fog Color with Scattering
+    // Mix base fog color with a warm sun tint based on scatter
+    let scatter_color = vec3<f32>(1.0, 0.9, 0.7); // Warm sunlight
+    let final_fog_color = mix(uniforms.fog_color, scatter_color, sun_scatter * 0.5);
+
+    // Apply Fog
+    final_color = mix(final_color, final_fog_color, fog_density);
 
     return vec4<f32>(final_color, 1.0);
 }

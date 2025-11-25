@@ -29,6 +29,7 @@ pub struct TreeMesh {
     pub vertex_buffer: Arc<Buffer>,
     pub index_buffer: Arc<Buffer>,
     pub index_count: u32,
+    pub texture_bind_group: Option<Arc<BindGroup>>, // Added for textures
 }
 
 pub struct TreePipeline {
@@ -38,11 +39,16 @@ pub struct TreePipeline {
     instance_count: u32,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
+    // We store the texture layout here so we can create bind groups later if needed
+    pub texture_bind_group_layout: BindGroupLayout,
+    default_bind_group: BindGroup,
 }
 
+
+
 impl TreePipeline {
-    pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
-        // Camera bind group layout
+    pub fn new(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat) -> Self {
+        // Group 0: Camera
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Tree Camera Bind Group Layout"),
             entries: &[
@@ -59,9 +65,90 @@ impl TreePipeline {
             ],
         });
 
+        // Group 1: Texture
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Tree Texture Bind Group Layout"),
+            entries: &[
+                // Diffuse Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Create default white texture
+        let default_texture_size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
+        let default_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Default White Texture"),
+            size: default_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        
+        // Write white pixel
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &default_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255, 255, 255, 255],
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: None,
+            },
+            default_texture_size,
+        );
+
+        let default_texture_view = default_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let default_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&default_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&default_sampler),
+                },
+            ],
+            label: Some("Default Texture Bind Group"),
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Tree Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -192,6 +279,8 @@ impl TreePipeline {
             instance_count: 0,
             camera_buffer,
             camera_bind_group,
+            texture_bind_group_layout,
+            default_bind_group,
         }
     }
 
@@ -202,6 +291,7 @@ impl TreePipeline {
         normals: &[[f32; 3]],
         uvs: &[[f32; 2]],
         indices: &[u32],
+        texture_bind_group: Option<Arc<BindGroup>>,
     ) -> TreeMesh {
         // Interleave vertex data
         let vertices: Vec<TreeVertex> = (0..positions.len())
@@ -232,6 +322,7 @@ impl TreePipeline {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
+            texture_bind_group,
         }
     }
 
@@ -284,6 +375,13 @@ impl TreePipeline {
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        
+        if let Some(tex_bg) = &mesh.texture_bind_group {
+            render_pass.set_bind_group(1, tex_bg, &[]);
+        } else {
+            render_pass.set_bind_group(1, &self.default_bind_group, &[]);
+        }
+
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.as_ref().unwrap().slice(..));
         render_pass.set_index_buffer(

@@ -69,6 +69,7 @@ assets/shaders/
 - First-person camera controls
 - Loading screen with progress
 - FPS and time display
+- **Sun & Moon Billboards** (Visual celestial bodies)
 
 ## Technical Decisions
 
@@ -103,7 +104,6 @@ Shadow flickering fixed by:
 ## Known Issues
 
 ### Still Needs Work
-- Sun billboard not implemented (sun direction works, no visual disk)
 - Grass doesn't cast shadows (vertex stride mismatch - intentional skip)
 - Full chunk streaming not integrated (infrastructure ready in chunk_manager.rs)
 - Tree collision detection not implemented
@@ -150,3 +150,4 @@ cargo run -p roanoke_game --release
 12. **Distance-based LOD culling**
 13. **Dynamic sky/fog color based on time**
 14. **Chunk streaming infrastructure (ready for integration)**
+15. **Fully Procedural Tree Generation (L-Systems) replacing OBJ loading**

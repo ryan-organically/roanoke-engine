@@ -1,8 +1,10 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, Frustum, ChunkBounds, SunPipeline};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline};
+use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
+use image; // Added image crate
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use serde::{Serialize, Deserialize};
@@ -17,6 +19,14 @@ mod chunk_manager;
 mod asset_loader;
 use player::Player;
 use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
+
+// Extend LoadedChunk to include buildings (we can't modify the struct definition in chunk_manager.rs from here easily without replacing the file, 
+// but wait, LoadedChunk is defined in chunk_manager.rs. I need to modify chunk_manager.rs FIRST or define a wrapper.
+// Actually, I should modify chunk_manager.rs to add buildings field.
+// But for now, I will modify main.rs to import the struct and I will modify chunk_manager.rs in a separate step.
+// Wait, I can't modify main.rs to use a field that doesn't exist yet.
+// I will assume I will modify chunk_manager.rs in the next step.
+
 
 mod water_system;
 use water_system::WaterSystem;
@@ -68,8 +78,9 @@ struct SharedState {
     time_of_day: f32, // 0.0 - 24.0
     // Loading Progress
     loading_progress: LoadingProgress,
-    tree_template: Option<TreeTemplate>,
-    tree_mesh: Option<TreeMesh>,
+    // Asset Registry
+    mesh_registry: std::collections::HashMap<String, TreeMesh>, // For Trees/Rocks
+    building_registry: std::collections::HashMap<String, Arc<BuildingMesh>>, // For Buildings
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -124,14 +135,12 @@ fn main() {
     // Initialize App
     let mut app = App::new("Roanoke Engine", 1280, 720);
 
-    // Load assets
-    let tree_template = asset_loader::load_obj("trees/trees9.obj");
-    if tree_template.is_some() {
-        println!("[ASSET] Tree model loaded successfully");
-    } else {
-        println!("[ASSET] Failed to load tree model, using procedural fallback");
-    }
 
+    
+    // Re-thinking strategy: SharedState needs to hold `Option<TreeMesh>` or similar created in render loop.
+    // But we want a registry.
+    // Let's make SharedState hold `Option<HashMap<String, TreeMesh>>` which is populated in the first render pass.
+    
     // Shared State
     let shared_state = Arc::new(Mutex::new(SharedState {
         camera: Camera::new(
@@ -157,24 +166,99 @@ fn main() {
             chunks_uploaded: 0,
             current_status: String::new(),
         },
-        tree_template: tree_template.clone(),
-        tree_mesh: None, // Will be initialized in render callback
+        mesh_registry: std::collections::HashMap::new(),
+        building_registry: std::collections::HashMap::new(),
     }));
 
-    // Terrain Generation Channel
-    // We send (terrain_pos, terrain_col, terrain_nrm, terrain_idx, grass_pos, grass_col, grass_idx, tree_pos, tree_nrm, tree_uv, tree_idx, det_pos, det_nrm, det_uv, det_idx, offset_x, offset_z)
+    // ... (Channel setup) ...
+    // Response Data: (Terrain, Grass, Trees, Detritus, Rocks, Coord X, Coord Z)
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Grass
         Vec<Mat4>, // Trees (Instanced)
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
-        i32, i32 // Offsets
+        Vec<(String, Mat4)>, // Rocks (Named Instances)
+        Vec<(String, Mat4)>, // Buildings (Named Instances)
+        i32, i32 // Offsets (World Space)
     );
+    
+    // Channel for requesting chunks
+    let (request_tx, request_rx): (Sender<ChunkRequest>, Receiver<ChunkRequest>) = channel();
+    // Channel for receiving generated chunks
     let (chunk_tx, chunk_rx): (Sender<ChunkData>, Receiver<ChunkData>) = channel();
-    // We need to keep the receiver in a mutex or just move it into the render closure?
-    // The render closure is called repeatedly, so we can't move the receiver into it if it's FnMut (which it is).
-    // But we can put it in a Mutex/Arc if we need to share it, or just use a Mutex since it's single consumer.
+    
     let chunk_rx = Arc::new(Mutex::new(chunk_rx));
+
+    // Spawn Persistent Generation Thread
+    thread::spawn(move || {
+        println!("[GEN] Generation thread started.");
+        while let Ok(req) = request_rx.recv() {
+            let chunk_world_size = 256.0;
+            let chunk_resolution = 64;
+            let scale = 4.0;
+            let (offset_x, offset_z) = req.coord.world_offset(chunk_world_size);
+            let offset_x = offset_x as i32;
+            let offset_z = offset_z as i32;
+
+            // Generate terrain
+            let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
+                generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
+
+            // Generate grass
+            let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+
+            // Generate trees
+            let tree_instances = generate_trees_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+
+            // Generate detritus
+            let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+
+            // Generate rocks
+            let rock_instances = generate_rocks_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+
+            // Generate buildings
+            let building_instances = generate_buildings_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+
+            // Send result
+            if chunk_tx.send((
+                terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                grass_pos, grass_col, grass_idx,
+                tree_instances,
+                det_pos, det_nrm, det_uv, det_idx,
+                rock_instances,
+                building_instances,
+                offset_x, offset_z
+            )).is_err() {
+                println!("[GEN] Receiver dropped, stopping thread.");
+                break;
+            }
+        }
+    });
 
     // Terrain Data (Protected by Mutex to allow regeneration)
     let _terrain_data = Arc::new(Mutex::new(None::<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>)>));
@@ -249,19 +333,203 @@ fn main() {
     let render_rx = Arc::clone(&chunk_rx);
     
     app.set_render_callback(move |ctx| {
-        // Initialize Tree Mesh if not already done
+        // Initialize Asset Registry if empty
         {
             let mut state = render_state.lock().unwrap();
-            if state.tree_mesh.is_none() {
-                if let Some(tmpl) = &state.tree_template {
-                    state.tree_mesh = Some(TreePipeline::create_mesh(
-                        ctx.device(),
-                        &tmpl.positions,
-                        &tmpl.normals,
-                        &tmpl.uvs,
-                        &tmpl.indices,
-                    ));
+            if state.mesh_registry.is_empty() {
+                println!("[GPU] Initializing Mesh Registry...");
+
+                // 1. Oak Tree (Loaded from OBJ)
+                {
+                    println!("[ASSET] Loading tree model...");
+                    if let Some(template) = asset_loader::load_obj("trees/trees9.obj") {
+                        // Load Texture
+                        let texture_path = "trees/Texture/Bark___0.jpg";
+                        let texture_bytes = std::fs::read(texture_path).unwrap_or_else(|_| {
+                            println!("[WARN] Failed to load texture: {}, using fallback pink", texture_path);
+                            vec![255, 0, 255, 255] // Pink 1x1 fallback
+                        });
+
+                        let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|_| {
+                             image::DynamicImage::new_rgba8(1, 1)
+                        });
+                        let rgba = texture_image.to_rgba8();
+                        let dimensions = rgba.dimensions();
+
+                        let texture_size = wgpu::Extent3d {
+                            width: dimensions.0,
+                            height: dimensions.1,
+                            depth_or_array_layers: 1,
+                        };
+
+                        let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+                            size: texture_size,
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            label: Some("Tree Diffuse Texture"),
+                            view_formats: &[],
+                        });
+
+                        ctx.queue().write_texture(
+                            wgpu::ImageCopyTexture {
+                                texture: &texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            &rgba,
+                            wgpu::ImageDataLayout {
+                                offset: 0,
+                                bytes_per_row: Some(4 * dimensions.0),
+                                rows_per_image: Some(dimensions.1),
+                            },
+                            texture_size,
+                        );
+
+                        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
+                            address_mode_u: wgpu::AddressMode::Repeat,
+                            address_mode_v: wgpu::AddressMode::Repeat,
+                            mag_filter: wgpu::FilterMode::Linear,
+                            min_filter: wgpu::FilterMode::Linear,
+                            mipmap_filter: wgpu::FilterMode::Nearest,
+                            ..Default::default()
+                        });
+
+                        // We need to create a dummy pipeline to get the layout... 
+                        // Or better, expose a static function or create the layout here.
+                        // TreePipeline::new creates the layout internally.
+                        // We can just create a temporary pipeline to grab the layout or duplicate the layout creation.
+                        // Since we need the bind group to CREATE the mesh, we have a chicken-and-egg if the layout is inside pipeline.
+                        // Solution: Instantiate a dummy pipeline first to get the layout? No, expensive.
+                        // Better: Create the BindGroup here using a locally created layout that MATCHES the pipeline's layout.
+                        
+                        let texture_bind_group_layout = ctx.device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some("Tree Texture Bind Group Layout"),
+                            entries: &[
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 0,
+                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    ty: wgpu::BindingType::Texture {
+                                        multisampled: false,
+                                        view_dimension: wgpu::TextureViewDimension::D2,
+                                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                    },
+                                    count: None,
+                                },
+                                wgpu::BindGroupLayoutEntry {
+                                    binding: 1,
+                                    visibility: wgpu::ShaderStages::FRAGMENT,
+                                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                    count: None,
+                                },
+                            ],
+                        });
+
+                        let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                            layout: &texture_bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&sampler),
+                                },
+                            ],
+                            label: Some("Tree Texture Bind Group"),
+                        });
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &template.positions,
+                            &template.normals,
+                            &template.uvs,
+                            &template.indices,
+                            Some(Arc::new(bind_group)),
+                        );
+                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                    } else {
+                        println!("[WARN] Failed to load OBJ, falling back to procedural");
+                        let recipe = TreeRecipe::oak();
+                        let tree = generate_tree(&recipe, 12345);
+                        let mesh = generate_tree_mesh(&tree);
+                        // ... fallback code ...
+                    }
                 }
+
+                // 2. Rock (Boulder)
+                {
+                    let recipe = RockRecipe::boulder();
+                    let mesh = generate_rock(&recipe);
+                    
+                    let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                    let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                    let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+
+                    let gpu_mesh = TreePipeline::create_mesh(
+                        ctx.device(),
+                        &positions,
+                        &normals,
+                        &uvs,
+                        &mesh.indices,
+                        None,
+                    );
+                    state.mesh_registry.insert("rock_boulder".to_string(), gpu_mesh);
+                }
+
+                println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
+            }
+
+            if state.building_registry.is_empty() {
+                println!("[GPU] Initializing Building Registry...");
+                
+                // 1. Colonial House
+                {
+                    let recipe = BuildingRecipe::colonial_house();
+                    let mesh = generate_building(&recipe);
+                    
+                    // Convert to BuildingVertex
+                    let vertices: Vec<BuildingVertex> = mesh.vertices.iter().map(|v| BuildingVertex {
+                        position: v.position,
+                        normal: v.normal,
+                        uv: v.uv,
+                        color: v.color,
+                    }).collect();
+
+                    let gpu_mesh = BuildingPipeline::create_mesh(
+                        ctx.device(),
+                        &vertices,
+                        &mesh.indices,
+                    );
+                    state.building_registry.insert("building_colonial".to_string(), gpu_mesh);
+                }
+
+                // 2. Small Shack
+                {
+                    let recipe = BuildingRecipe::small_shack();
+                    let mesh = generate_building(&recipe);
+                    
+                    let vertices: Vec<BuildingVertex> = mesh.vertices.iter().map(|v| BuildingVertex {
+                        position: v.position,
+                        normal: v.normal,
+                        uv: v.uv,
+                        color: v.color,
+                    }).collect();
+
+                    let gpu_mesh = BuildingPipeline::create_mesh(
+                        ctx.device(),
+                        &vertices,
+                        &mesh.indices,
+                    );
+                    state.building_registry.insert("building_cabin".to_string(), gpu_mesh); // Matches "building_cabin" from buildings.rs
+                }
+                
+                println!("[GPU] Buildings registered: {:?}", state.building_registry.keys());
             }
         }
 
@@ -276,19 +544,13 @@ fn main() {
             ))
         });
 
-        // Pipeline Store (Now stores a list of chunks with bounds for culling)
-        static PIPELINE_STORE: OnceLock<Mutex<Vec<(TerrainPipeline, ChunkBounds)>>> = OnceLock::new();
-        let pipeline_store = PIPELINE_STORE.get_or_init(|| Mutex::new(Vec::new()));
-
-        // Per-chunk vegetation pipelines with bounds
-        static GRASS_PIPELINES: OnceLock<Mutex<Vec<(GrassPipeline, ChunkBounds)>>> = OnceLock::new();
-        let grass_pipelines = GRASS_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
-
-        static TREE_PIPELINES: OnceLock<Mutex<Vec<(TreePipeline, ChunkBounds)>>> = OnceLock::new();
-        let tree_pipelines = TREE_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
-
-        static DETRITUS_PIPELINES: OnceLock<Mutex<Vec<(DetritusPipeline, ChunkBounds)>>> = OnceLock::new();
-        let detritus_pipelines = DETRITUS_PIPELINES.get_or_init(|| Mutex::new(Vec::new()));
+        // Chunk Manager (Stores all loaded chunks and manages streaming)
+        static CHUNK_MANAGER: OnceLock<Mutex<ChunkManager>> = OnceLock::new();
+        let chunk_manager = CHUNK_MANAGER.get_or_init(|| {
+            // Load radius 2 = 5x5 grid (visible ~500 units), Unload radius 4 = buffer zone
+            // Reduced from 4 (9x9) for performance
+            Mutex::new(ChunkManager::new(256.0, 2, 4))
+        });
 
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
@@ -310,7 +572,7 @@ fn main() {
         // Tree System
         static TREE_PIPELINE: OnceLock<Mutex<TreePipeline>> = OnceLock::new();
         let _tree_pipeline_mutex = TREE_PIPELINE.get_or_init(|| {
-            let tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
+            let tree_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
             Mutex::new(tree_pipeline)
         });
 
@@ -462,8 +724,8 @@ fn main() {
                                     println!("[GAME] Starting new game with seed: {}", seed);
 
                                     // Initialize loading progress
-                                    // Range 1 = 3x3 = 9 chunks to stay within GPU buffer limits
-                                    let range = 1;
+                                    // Range 3 = 7x7 = 49 chunks
+                                    let range = 3;
                                     let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
                                     state.loading_progress = LoadingProgress {
                                         total_chunks: total,
@@ -473,96 +735,14 @@ fn main() {
                                     };
 
                                     // Force regeneration by clearing chunks
-                                    pipeline_store.lock().unwrap().clear();
-                                    grass_pipelines.lock().unwrap().clear();
-                                    tree_pipelines.lock().unwrap().clear();
-                                    detritus_pipelines.lock().unwrap().clear();
-
-                                    // Spawn Generation Thread (terrain + vegetation per chunk)
-                                    let tx = chunk_tx.clone();
-                                    let progress_state = Arc::clone(&render_state);
-                                    let template = state.tree_template.clone();
-                                    thread::spawn(move || {
-                                        println!("[GEN] Starting background generation for seed {}", seed);
-                                        let range = 1;  // 1 = 9 chunks (3x3)
-                                        let chunk_world_size = 256.0;
-                                        let chunk_resolution = 64;
-                                        let scale = 4.0;
-
-                                        for z in -range..=range {
-                                            for x in -range..=range {
-                                                let offset_x = (x as f32 * chunk_world_size) as i32;
-                                                let offset_z = (z as f32 * chunk_world_size) as i32;
-
-                                                // Update progress: Generating terrain
-                                                if let Ok(mut state) = progress_state.try_lock() {
-                                                    state.loading_progress.current_status =
-                                                        format!("Generating terrain chunk ({}, {})...", x, z);
-                                                }
-
-                                                // Generate terrain
-                                                let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
-                                                    generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-
-                                                // Update progress: Generating grass
-                                                if let Ok(mut state) = progress_state.try_lock() {
-                                                    state.loading_progress.current_status =
-                                                        format!("Generating grass for chunk ({}, {})...", x, z);
-                                                }
-
-                                                // Generate grass for this chunk
-                                                let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
-                                                    seed,
-                                                    chunk_world_size,
-                                                    offset_x as f32,
-                                                    offset_z as f32,
-                                                );
-
-                                                // Update progress: Generating trees
-                                                if let Ok(mut state) = progress_state.try_lock() {
-                                                    state.loading_progress.current_status =
-                                                        format!("Generating trees for chunk ({}, {})...", x, z);
-                                                }
-
-                                                // Generate trees for this chunk
-                                                let tree_instances = generate_trees_for_chunk(
-                                                    seed,
-                                                    chunk_world_size,
-                                                    offset_x as f32,
-                                                    offset_z as f32,
-                                                );
-
-                                                // Generate detritus for this chunk
-                                                let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
-                                                    seed,
-                                                    chunk_world_size,
-                                                    offset_x as f32,
-                                                    offset_z as f32,
-                                                );
-
-                                                // Send all data together
-                                                if tx.send((
-                                                    terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                                                    grass_pos, grass_col, grass_idx,
-                                                    tree_instances,
-                                                    det_pos, det_nrm, det_uv, det_idx,
-                                                    offset_x, offset_z
-                                                )).is_err() {
-                                                    break; // Receiver dropped
-                                                }
-
-                                                // Update chunks generated
-                                                if let Ok(mut state) = progress_state.try_lock() {
-                                                    state.loading_progress.chunks_generated += 1;
-                                                }
-                                            }
-                                        }
-
-                                        if let Ok(mut state) = progress_state.try_lock() {
-                                            state.loading_progress.current_status = "All chunks generated! Uploading to GPU...".to_string();
-                                        }
-                                        println!("[GEN] Background generation complete.");
-                                    });
+                                    if let Some(manager) = CHUNK_MANAGER.get() {
+                                        let mut mgr = manager.lock().unwrap();
+                                        mgr.loaded_chunks.clear();
+                                        mgr.loading_chunks.clear();
+                                    }
+                                    
+                                    // We don't spawn a thread here anymore. 
+                                    // The render loop will detect we are in Loading state and the ChunkManager will request chunks.
                                 }
                             }
 
@@ -588,7 +768,7 @@ fn main() {
                                                 println!("[GAME] Loaded game: {}", save_name);
 
                                                 // Initialize loading progress
-                                                let range = 1;
+                                                let range = 3;
                                                 let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
                                                 state.loading_progress = LoadingProgress {
                                                     total_chunks: total,
@@ -598,85 +778,11 @@ fn main() {
                                                 };
 
                                                 // Force regeneration by clearing chunks
-                                                pipeline_store.lock().unwrap().clear();
-                                                grass_pipelines.lock().unwrap().clear();
-                                                tree_pipelines.lock().unwrap().clear();
-                                                detritus_pipelines.lock().unwrap().clear();
-
-                                                // Spawn Generation Thread (Same as New Game)
-                                                let tx = chunk_tx.clone();
-                                                let seed = state.seed;
-                                                let progress_state = Arc::clone(&render_state);
-                                                let template = state.tree_template.clone();
-                                                thread::spawn(move || {
-                                                    println!("[GEN] Starting background generation for seed {}", seed);
-                                                    let range = 1;
-                                                    let chunk_world_size = 256.0;
-                                                    let chunk_resolution = 64;
-                                                    let scale = 4.0;
-
-                                                    for z in -range..=range {
-                                                        for x in -range..=range {
-                                                            let offset_x = (x as f32 * chunk_world_size) as i32;
-                                                            let offset_z = (z as f32 * chunk_world_size) as i32;
-
-                                                            // Update progress
-                                                            if let Ok(mut state) = progress_state.try_lock() {
-                                                                state.loading_progress.current_status =
-                                                                    format!("Generating chunk ({}, {})...", x, z);
-                                                            }
-
-                                                            // Generate terrain
-                                                            let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
-                                                                generate_terrain_chunk(seed, chunk_resolution, offset_x, offset_z, scale);
-
-                                                            // Generate grass for this chunk
-                                                            let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
-                                                                seed,
-                                                                chunk_world_size,
-                                                                offset_x as f32,
-                                                                offset_z as f32,
-                                                            );
-
-                                                            // Generate trees for this chunk
-                                                            let tree_instances = generate_trees_for_chunk(
-                                                                seed,
-                                                                chunk_world_size,
-                                                                offset_x as f32,
-                                                                offset_z as f32,
-                                                            );
-
-                                                            // Generate detritus for this chunk
-                                                            let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
-                                                                seed,
-                                                                chunk_world_size,
-                                                                offset_x as f32,
-                                                                offset_z as f32,
-                                                            );
-
-                                                            // Send all data together
-                                                            if tx.send((
-                                                                terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                                                                grass_pos, grass_col, grass_idx,
-                                                                tree_instances,
-                                                                det_pos, det_nrm, det_uv, det_idx,
-                                                                offset_x, offset_z
-                                                            )).is_err() {
-                                                                break; // Receiver dropped
-                                                            }
-
-                                                            // Update chunks generated
-                                                            if let Ok(mut state) = progress_state.try_lock() {
-                                                                state.loading_progress.chunks_generated += 1;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    if let Ok(mut state) = progress_state.try_lock() {
-                                                        state.loading_progress.current_status = "Uploading to GPU...".to_string();
-                                                    }
-                                                    println!("[GEN] Background generation complete.");
-                                                });
+                                                if let Some(manager) = CHUNK_MANAGER.get() {
+                                                    let mut mgr = manager.lock().unwrap();
+                                                    mgr.loaded_chunks.clear();
+                                                    mgr.loading_chunks.clear();
+                                                }
                                             }
                                         }
                                     });
@@ -717,99 +823,161 @@ fn main() {
 
         // Handle Pipeline Updates (scoped to release locks early)
         {
-            let mut pipeline_guard = pipeline_store.lock().unwrap();
-            let mut grass_pipelines_guard = grass_pipelines.lock().unwrap();
-            let mut tree_pipelines_guard = tree_pipelines.lock().unwrap();
-            let mut detritus_pipelines_guard = detritus_pipelines.lock().unwrap();
+            let mut manager = chunk_manager.lock().unwrap();
+
+            // Update Chunk Streaming (Request new chunks / Unload old ones)
+            if state.game_state == GameState::Loading || state.game_state == GameState::Playing {
+                let requests = manager.update(state.player.position, state.seed);
+                for req in requests {
+                    let _ = request_tx.send(req);
+                }
+                
+                // Update Loading Progress stats
+                state.loading_progress.chunks_generated = manager.chunk_count(); // Approximation
+            }
 
             // Check for new chunks from background thread
-        if let Ok(rx) = render_rx.try_lock() {
-            // During Loading: Process 1 chunk per frame to keep UI responsive
-            // During Playing: Process up to 5 chunks per frame for dynamic loading
-            let chunks_per_frame = if state.game_state == GameState::Loading { 1 } else { 5 };
-            for _ in 0..chunks_per_frame {
-                match rx.try_recv() {
-                    Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                        grass_pos, grass_col, grass_idx,
-                        tree_instances,
-                        det_pos, det_nrm, det_uv, det_idx,
-                        offset_x, offset_z)) => {
+            if let Ok(rx) = render_rx.try_lock() {
+                // During Loading: Process 1 chunk per frame
+                // During Playing: Process up to 2 chunks per frame to avoid stutter
+                let chunks_per_frame = if state.game_state == GameState::Loading { 1 } else { 2 };
+                for _ in 0..chunks_per_frame {
+                    match rx.try_recv() {
+                        Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                            grass_pos, grass_col, grass_idx,
+                            tree_instances,
+                            det_pos, det_nrm, det_uv, det_idx,
+                            rock_instances,
+                            building_instances,
+                            offset_x, offset_z)) => {
 
-                        // Update status: Uploading
-                        state.loading_progress.current_status = format!(
-                            "Uploading chunk {} to GPU...",
-                            state.loading_progress.chunks_uploaded + 1
-                        );
+                            // Update status
+                            state.loading_progress.current_status = format!(
+                                "Uploading chunk at ({}, {})...",
+                                offset_x, offset_z
+                            );
 
-                        // Calculate chunk bounds for frustum culling
-                        let chunk_size = 256.0;
-                        let bounds = ChunkBounds::new(
-                            offset_x as f32,
-                            offset_z as f32,
-                            chunk_size,
-                            -10.0,  // Approximate min terrain height (includes water)
-                            50.0,   // Approximate max terrain height
-                        );
+                            // Calculate bounds
+                            let chunk_size = 256.0;
+                            let bounds = ChunkBounds::new(
+                                offset_x as f32,
+                                offset_z as f32,
+                                chunk_size,
+                                -10.0,
+                                50.0,
+                            );
 
-                        // Add terrain pipeline (acquire shadow_map only for creation)
-                        let pipeline = {
-                            let shadow_map = shadow_map_mutex.lock().unwrap();
-                            TerrainPipeline::new(
-                                ctx.device(),
-                                ctx.surface_format(),
-                                &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
-                                &shadow_map
-                            )
-                        };
-                        pipeline_guard.push((pipeline, bounds));
+                            // Create Pipelines
+                            let terrain_pipeline = {
+                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                TerrainPipeline::new(
+                                    ctx.device(),
+                                    ctx.surface_format(),
+                                    &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
+                                    &shadow_map
+                                )
+                            };
 
-                        // Create per-chunk grass pipeline
-                        if !grass_pos.is_empty() {
-                            let shadow_map = shadow_map_mutex.lock().unwrap();
-                            let mut grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
-                            drop(shadow_map);
-                            grass_pipeline.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
-                            grass_pipelines_guard.push((grass_pipeline, bounds));
-                        }
-
-                        // Create per-chunk tree pipeline (Instanced)
-                        if !tree_instances.is_empty() {
-                            if let Some(mesh) = &state.tree_mesh {
-                                let mut tree_pipeline = TreePipeline::new(ctx.device(), ctx.surface_format());
-                                tree_pipeline.set_mesh(mesh.clone());
-                                tree_pipeline.upload_instances(ctx.device(), &tree_instances);
-                                tree_pipelines_guard.push((tree_pipeline, bounds));
+                            let mut grass_pipeline = None;
+                            if !grass_pos.is_empty() {
+                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
+                                drop(shadow_map);
+                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
+                                grass_pipeline = Some(gp);
                             }
-                        }
 
-                        // Create per-chunk detritus pipeline
-                        if !det_pos.is_empty() {
-                            let mut det_pipeline = DetritusPipeline::new(ctx.device(), ctx.surface_format());
-                            det_pipeline.upload_mesh(ctx.device(), ctx.queue(), &det_pos, &det_nrm, &det_uv, &det_idx);
-                            detritus_pipelines_guard.push((det_pipeline, bounds));
-                        }
+                            let mut tree_pipeline = None;
+                            if !tree_instances.is_empty() {
+                                if let Some(mesh) = state.mesh_registry.get("tree_oak") {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), &tree_instances);
+                                    tree_pipeline = Some(tp);
+                                }
+                            }
 
-                        // Update uploaded count
-                        state.loading_progress.chunks_uploaded += 1;
+                            let mut detritus_pipeline = None;
+                            if !det_pos.is_empty() {
+                                let mut dp = DetritusPipeline::new(ctx.device(), ctx.surface_format());
+                                dp.upload_mesh(ctx.device(), ctx.queue(), &det_pos, &det_nrm, &det_uv, &det_idx);
+                                detritus_pipeline = Some(dp);
+                            }
 
-                        // Check if loading is complete
-                        if state.loading_progress.chunks_uploaded >= state.loading_progress.total_chunks {
+                            // Group rocks by type
+                            let mut rock_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (name, transform) in rock_instances {
+                                rock_groups.entry(name).or_default().push(transform);
+                            }
+
+                            let mut rock_pipelines = Vec::new();
+                            for (name, transforms) in rock_groups {
+                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                                    let mut rp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    rp.set_mesh(mesh.clone());
+                                    rp.upload_instances(ctx.device(), &transforms);
+                                    rock_pipelines.push(rp);
+                                } else {
+                                    println!("[WARN] Unknown rock type '{}' requested by generator", name);
+                                }
+                            }
+
+                            // Process Buildings
+                            let mut building_pipelines = Vec::new();
+                            let mut buildings_by_type: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (name, transform) in building_instances {
+                                buildings_by_type.entry(name).or_default().push(transform);
+                            }
+
+                            for (name, transforms) in buildings_by_type {
+                                if let Some(mesh) = state.building_registry.get(&name) {
+                                    let mut pipeline = BuildingPipeline::new(ctx.device(), ctx.surface_format());
+                                    pipeline.set_mesh(mesh.clone());
+                                    pipeline.upload_instances(ctx.device(), &transforms);
+                                    building_pipelines.push(pipeline);
+                                } else {
+                                    println!("[WARN] Building mesh '{}' not found in registry", name);
+                                }
+                            }
+
+                            // Add to Manager
+                            let loaded_chunk = LoadedChunk {
+                                terrain: terrain_pipeline,
+                                grass: grass_pipeline,
+                                trees: tree_pipeline,
+                                detritus: detritus_pipeline,
+                                rocks: rock_pipelines,
+                                buildings: building_pipelines,
+                                bounds,
+                            };
+                            
+                            let coord = ChunkCoord::from_world_pos(Vec3::new(offset_x as f32, 0.0, offset_z as f32), chunk_size);
+                            manager.add_chunk(coord, loaded_chunk);
+
+                            // Update uploaded count
+                            state.loading_progress.chunks_uploaded += 1;
+
+                            // Check if loading is complete
+                            // For streaming, "complete" just means "initial batch done"
                             if state.game_state == GameState::Loading {
-                                println!("[LOAD] Loading complete! Transitioning to Playing...");
-                                state.loading_progress.current_status = "Loading complete! Starting game...".to_string();
-                                state.game_state = GameState::Playing;
+                                let (loaded, loading) = manager.get_stats();
+                                // If we have loaded enough and no more pending, switch to playing
+                                if loading == 0 && loaded > 0 {
+                                    println!("[LOAD] Initial chunks loaded! Transitioning to Playing...");
+                                    state.loading_progress.current_status = "Ready!".to_string();
+                                    state.game_state = GameState::Playing;
+                                }
                             }
-                        }
-                    },
-                    Err(_) => break, // Empty
+                        },
+                        Err(_) => break,
+                    }
                 }
             }
-        }
-        } // Release pipeline locks before rendering
+        } // Release manager lock
 
         // Render frame (re-acquire locks as needed)
-        let pipeline_guard = pipeline_store.lock().unwrap();
-        if state.game_state == GameState::Playing && !pipeline_guard.is_empty() {
+        let manager = chunk_manager.lock().unwrap();
+        if state.game_state == GameState::Playing && manager.chunk_count() > 0 {
             let elapsed = start_time.elapsed().as_secs_f32();
 
             // Get the current frame
@@ -868,22 +1036,22 @@ fn main() {
             let frustum = Frustum::from_view_proj(&view_proj);
 
             {
-                let grass_guard = grass_pipelines.lock().unwrap();
-                for (grass_pipeline, _bounds) in grass_guard.iter() {
-                    grass_pipeline.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
-                }
-
-                let tree_guard = tree_pipelines.lock().unwrap();
-                for (tree_pipeline, _bounds) in tree_guard.iter() {
-                    tree_pipeline.update_camera(ctx.queue(), &view_proj);
-                }
-
-                let detritus_guard = detritus_pipelines.lock().unwrap();
-                for (det_pipeline, _bounds) in detritus_guard.iter() {
-                    det_pipeline.update_camera(ctx.queue(), &view_proj);
-                }
-                for (det_pipeline, _bounds) in detritus_guard.iter() {
-                    det_pipeline.update_camera(ctx.queue(), &view_proj);
+                for (_coord, chunk) in manager.iter_chunks() {
+                    if let Some(grass) = &chunk.grass {
+                        grass.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
+                    }
+                    if let Some(trees) = &chunk.trees {
+                        trees.update_camera(ctx.queue(), &view_proj);
+                    }
+                    if let Some(detritus) = &chunk.detritus {
+                        detritus.update_camera(ctx.queue(), &view_proj);
+                    }
+                    for rock in &chunk.rocks {
+                        rock.update_camera(ctx.queue(), &view_proj);
+                    }
+                    // for building in &chunk.buildings {
+                    //     building.update_camera(ctx.queue(), &view_proj);
+                    // }
                 }
             }
 
@@ -916,13 +1084,16 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                for (pipeline, _bounds) in pipeline_guard.iter() {
+                for (_coord, chunk) in manager.iter_chunks() {
                     shadow_pipeline.render(
                         &mut shadow_pass,
-                        &pipeline.vertex_buffer,
-                        &pipeline.index_buffer,
-                        pipeline.index_count,
+                        &chunk.terrain.vertex_buffer,
+                        &chunk.terrain.index_buffer,
+                        chunk.terrain.index_count,
                     );
+                    // for building in &chunk.buildings {
+                    //     building.render_shadow(&mut shadow_pass, &shadow_pipeline);
+                    // }
                 }
             }
 
@@ -931,9 +1102,9 @@ fn main() {
                 let sun_elevation = sun_pos_y;
                 let t = sun_elevation.clamp(0.0, 1.0);
                 
-                let night_sky = (0.02_f32, 0.02, 0.05); // Dark blue/black
-                let sunrise_sky = (0.95_f32, 0.65, 0.45); // Warm orange-pink
-                let midday_sky = (0.5_f32, 0.7, 0.95);    // Blue sky
+                let night_sky = (0.01_f32, 0.01, 0.03); // Deeper dark blue/black
+                let sunrise_sky = (0.95_f32, 0.55, 0.35); // Slightly more vibrant sunrise
+                let midday_sky = (0.2_f32, 0.4, 0.8);    // Deeper, richer blue sky
 
                 if sun_elevation > 0.0 {
                     // Day: Sunrise -> Midday
@@ -994,9 +1165,6 @@ fn main() {
 
             // 2. Main Render Pass
             {
-                let grass_pipelines_guard = grass_pipelines.lock().unwrap();
-                let tree_pipelines_guard = tree_pipelines.lock().unwrap();
-                let detritus_pipelines_guard = detritus_pipelines.lock().unwrap();
                 // let water_system_guard = water_system_mutex.lock().unwrap();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
@@ -1026,87 +1194,99 @@ fn main() {
                     sky_color.g as f32 * 0.9,
                     sky_color.b as f32 * 0.9,
                 ];
+                let fog_start = 200.0;
+                let fog_end = 600.0;
 
-                // Render terrain chunks with frustum culling
+                // Render chunks with frustum culling and LOD
                 let mut terrain_rendered = 0;
                 let mut terrain_culled = 0;
-                for (pipeline, bounds) in pipeline_guard.iter() {
+                let mut grass_rendered = 0;
+                let mut trees_rendered = 0;
+                let mut buildings_rendered = 0;
+
+                let grass_max_distance = 350.0;
+                let tree_max_distance = 600.0;
+                let detritus_max_distance = 500.0;
+                let building_max_distance = 1000.0; // Buildings visible further
+
+                for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
-                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
+                    if !frustum.contains_sphere(chunk.bounds.center, chunk.bounds.radius) {
                         terrain_culled += 1;
                         continue;
                     }
                     terrain_rendered += 1;
 
-                    pipeline.update_uniforms(
+                    // Terrain
+                    chunk.terrain.update_uniforms(
                         ctx.queue(),
                         &view_proj,
                         &light_view_proj,
                         elapsed,
                         fog_color,
-                        400.0,
-                        800.0,
+                        fog_start,
+                        fog_end,
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()
                     );
-                    pipeline.render(&mut render_pass);
-                }
+                    chunk.terrain.render(&mut render_pass);
 
-                // Render grass chunks with frustum culling and distance LOD
-                let grass_max_distance = 350.0; // Don't render grass beyond fog start
-                let mut grass_rendered = 0;
-                for (grass_pipeline, bounds) in grass_pipelines_guard.iter() {
-                    // Frustum cull
-                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
-                        continue;
-                    }
-                    // Distance cull - grass not visible beyond fog anyway
-                    let dist = (bounds.center - state.camera.position).length();
-                    if dist > grass_max_distance {
-                        continue;
-                    }
-                    grass_rendered += 1;
-                    grass_pipeline.render(&mut render_pass);
-                }
+                    let dist = (chunk.bounds.center - state.camera.position).length();
 
-                // Render tree chunks with frustum culling and distance LOD
-                let tree_max_distance = 600.0; // Trees visible further than grass
-                let mut trees_rendered = 0;
-                for (tree_pipeline, bounds) in tree_pipelines_guard.iter() {
-                    // Frustum cull
-                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
-                        continue;
+                    // Grass
+                    if let Some(grass) = &chunk.grass {
+                        if dist <= grass_max_distance {
+                            grass_rendered += 1;
+                            grass.render(&mut render_pass);
+                        }
                     }
-                    // Distance cull
-                    let dist = (bounds.center - state.camera.position).length();
-                    if dist > tree_max_distance {
-                        continue;
-                    }
-                    trees_rendered += 1;
-                    tree_pipeline.render(&mut render_pass);
-                }
 
-                // Render detritus chunks with frustum culling and distance LOD
-                let detritus_max_distance = 500.0;
-                for (det_pipeline, bounds) in detritus_pipelines_guard.iter() {
-                    // Frustum cull
-                    if !frustum.contains_sphere(bounds.center, bounds.radius) {
-                        continue;
+                    // Trees
+                    if let Some(trees) = &chunk.trees {
+                        if dist <= tree_max_distance {
+                            trees_rendered += 1;
+                            trees.render(&mut render_pass);
+                        }
                     }
-                    // Distance cull
-                    let dist = (bounds.center - state.camera.position).length();
-                    if dist > detritus_max_distance {
-                        continue;
+
+                    // Detritus
+                    if let Some(detritus) = &chunk.detritus {
+                        if dist <= detritus_max_distance {
+                            detritus.render(&mut render_pass);
+                        }
                     }
-                    det_pipeline.render(&mut render_pass);
+
+                    // Rocks (Same LOD as trees for now)
+                    for rock in &chunk.rocks {
+                        if dist <= tree_max_distance {
+                            rock.render(&mut render_pass);
+                        }
+                    }
+
+                    // Buildings
+                    for building in &chunk.buildings {
+                        if dist <= building_max_distance {
+                            buildings_rendered += 1;
+                            building.update_uniforms(
+                                ctx.queue(),
+                                &view_proj,
+                                sun_dir,
+                                state.camera.position,
+                                fog_color,
+                                fog_start,
+                                fog_end,
+                            );
+                            building.render(&mut render_pass);
+                        }
+                    }
                 }
 
                 // Render Water
                 // water_system_guard.draw(&mut render_pass);
 
                 // Log culling stats occasionally (every ~60 frames)
-                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered);
+                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, buildings_rendered);
             } // End Main Pass
 
             // 2. Egui Pass

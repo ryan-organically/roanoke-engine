@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use glam::Vec3;
-use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, ChunkBounds};
+use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, DetritusPipeline, BuildingPipeline, ChunkBounds};
 
 /// Coordinates for a chunk in chunk space (not world space)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -28,6 +28,9 @@ pub struct LoadedChunk {
     pub terrain: TerrainPipeline,
     pub grass: Option<GrassPipeline>,
     pub trees: Option<TreePipeline>,
+    pub detritus: Option<DetritusPipeline>,
+    pub rocks: Vec<TreePipeline>, // List of pipelines for different rock types in this chunk
+    pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk
     pub bounds: ChunkBounds,
 }
 
