@@ -54,7 +54,7 @@ impl TreeRecipe {
         TreeRecipe {
             axiom: "F".to_string(),
             rules,
-            iterations: 3,  // Reduced from 4 to 3 for performance
+            iterations: 2,  // Reduced from 3 to 2 for performance
             angle: 22.5_f32.to_radians(),
             length_decay: 0.7,
             thickness_decay: 0.6,
@@ -63,8 +63,8 @@ impl TreeRecipe {
             leaf_probability: 0.3,
             gravity: 0.0,
             species: TreeSpecies::Oak,
-            branch_segments: 4,
-            radial_segments: 6,
+            branch_segments: 3,
+            radial_segments: 4,
         }
     }
 
@@ -76,7 +76,7 @@ impl TreeRecipe {
         TreeRecipe {
             axiom: "F".to_string(),
             rules,
-            iterations: 4,  // Reduced from 6 to 4 for performance
+            iterations: 3,  // Reduced from 4 to 3 for performance
             angle: 15.0_f32.to_radians(),
             length_decay: 0.75,
             thickness_decay: 0.65,
@@ -85,8 +85,8 @@ impl TreeRecipe {
             leaf_probability: 0.4,
             gravity: 0.0,
             species: TreeSpecies::Pine,
-            branch_segments: 3,
-            radial_segments: 6,
+            branch_segments: 2,
+            radial_segments: 4,
         }
     }
 
@@ -107,8 +107,8 @@ impl TreeRecipe {
             leaf_probability: 0.5,
             gravity: -0.5,
             species: TreeSpecies::Willow,
-            branch_segments: 5,
-            radial_segments: 6,
+            branch_segments: 3,
+            radial_segments: 4,
         }
     }
 
@@ -129,8 +129,8 @@ impl TreeRecipe {
             leaf_probability: 0.35,
             gravity: 0.0,
             species: TreeSpecies::Birch,
-            branch_segments: 4,
-            radial_segments: 8,
+            branch_segments: 3,
+            radial_segments: 5,
         }
     }
 
@@ -152,8 +152,8 @@ impl TreeRecipe {
             leaf_probability: 1.0,
             gravity: 0.0,
             species: TreeSpecies::Palm,
-            branch_segments: 3,
-            radial_segments: 8,
+            branch_segments: 2,
+            radial_segments: 5,
         }
     }
 
@@ -165,7 +165,7 @@ impl TreeRecipe {
         TreeRecipe {
             axiom: "F".to_string(),
             rules,
-            iterations: 4,
+            iterations: 3,
             angle: 28.0_f32.to_radians(),
             length_decay: 0.68,
             thickness_decay: 0.58,
@@ -174,8 +174,8 @@ impl TreeRecipe {
             leaf_probability: 0.4,
             gravity: 0.0,
             species: TreeSpecies::Maple,
-            branch_segments: 4,
-            radial_segments: 6,
+            branch_segments: 3,
+            radial_segments: 4,
         }
     }
 
@@ -187,7 +187,7 @@ impl TreeRecipe {
         TreeRecipe {
             axiom: "F".to_string(),
             rules,
-            iterations: 4,  // Reduced from 6 to 4 for performance
+            iterations: 3,  // Reduced from 4 to 3 for performance
             angle: 18.0_f32.to_radians(),
             length_decay: 0.73,
             thickness_decay: 0.68,
@@ -196,8 +196,8 @@ impl TreeRecipe {
             leaf_probability: 0.5,
             gravity: 0.0,
             species: TreeSpecies::Spruce,
-            branch_segments: 3,
-            radial_segments: 6,
+            branch_segments: 2,
+            radial_segments: 4,
         }
     }
 

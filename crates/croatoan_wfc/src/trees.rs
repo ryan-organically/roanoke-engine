@@ -26,7 +26,7 @@ pub fn generate_trees_for_chunk(
 
     // Sample potential tree positions
     // Optimization: Reduced density slightly to prevent overcrowding while maintaining lush look
-    let tree_density = 0.002; 
+    let tree_density = 0.0005; 
     let potential_trees = (chunk_size * chunk_size * tree_density) as u32;
 
     let mut instances = Vec::new();
@@ -104,7 +104,7 @@ pub fn generate_trees_for_chunk(
 
     // --- Bush Generation (Transition Zone) ---
     // Dense, small vegetation between beach and forest
-    let bush_density = 0.01; // Reduced density
+    let bush_density = 0.002; // Reduced density
     let potential_bushes = (chunk_size * chunk_size * bush_density) as u32;
     let bush_zone_start = 3.5;
     let bush_zone_end = 12.0;
