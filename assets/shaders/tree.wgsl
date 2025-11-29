@@ -62,15 +62,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Simple lighting (Lambertian)
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3)); // Hardcoded sun for now
-    let diffuse = max(dot(normalize(in.world_normal), light_dir), 0.2); // Ambient 0.2
+    // Simple Hash Noise to break up "sloppy" flat textures
+    let noise_scale = 50.0;
+    let p = in.world_position * noise_scale;
+    let noise = fract(sin(dot(p, vec3<f32>(12.9898, 78.233, 45.164))) * 43758.5453);
+    let noise_factor = 0.9 + noise * 0.2; // +/- 10% variation
 
-    let final_color = tex_color.rgb * diffuse;
+    // Improved Lighting (Half-Lambert for softer shading)
+    // Hardcoded sun direction matching terrain (approx)
+    let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.3)); 
+    let n_dot_l = dot(normalize(in.world_normal), light_dir);
+    let diffuse = pow(n_dot_l * 0.5 + 0.5, 2.0); // Half-Lambert
+    
+    // Ambient
+    let ambient = 0.3;
+    let lighting = ambient + diffuse * 0.9;
 
-    // Fog (simple linear)
-    // Hardcoded camera/fog for now to match terrain roughly
-    // Ideally pass fog params in uniform
+    let final_color = tex_color.rgb * lighting * noise_factor;
+
+    // Simple distance fog to blend with terrain
+    // Hardcoded fog params matching terrain roughly
+    // fog_start = 100.0, fog_end = 1000.0
+    let dist = distance(in.world_position, vec3<f32>(0.0, 0.0, 0.0)); // Camera pos unknown here, assuming near origin for now or just skipping fog
+    // Without camera pos, fog is hard. Skipping fog for now to avoid artifacts.
     
     return vec4<f32>(final_color, 1.0);
 }

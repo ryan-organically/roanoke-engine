@@ -6,11 +6,15 @@ use glam::{Mat4, Vec3};
 pub struct SkyUniforms {
     view_proj: [f32; 16],
     sun_dir: [f32; 3],
-    _padding: f32,
-    sun_color: [f32; 3],
-    _padding2: f32,
     time: f32,
-    _padding3: [f32; 3],
+    sun_color: [f32; 3],
+    cloud_coverage: f32,
+    cloud_color_base: [f32; 3],
+    cloud_density: f32,
+    cloud_color_shade: [f32; 3],
+    cloud_scale: f32,
+    wind_offset: [f32; 2],
+    _padding: [f32; 2],
 }
 
 pub struct SkyPipeline {
@@ -28,11 +32,15 @@ impl SkyPipeline {
             contents: bytemuck::cast_slice(&[SkyUniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array(),
                 sun_dir: [0.0, 1.0, 0.0],
-                _padding: 0.0,
-                sun_color: [1.0, 1.0, 1.0],
-                _padding2: 0.0,
                 time: 0.0,
-                _padding3: [0.0; 3],
+                sun_color: [1.0, 1.0, 1.0],
+                cloud_coverage: 0.5,
+                cloud_color_base: [0.8, 0.4, 0.3], // Burnt Sienna-ish
+                cloud_density: 0.5,
+                cloud_color_shade: [0.9, 0.6, 0.6], // Pinkish
+                cloud_scale: 1.0,
+                wind_offset: [0.0, 0.0],
+                _padding: [0.0; 2],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -92,13 +100,7 @@ impl SkyPipeline {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false, // Don't write depth, draw behind everything
-                depth_compare: wgpu::CompareFunction::LessEqual, // Draw if depth is max (1.0)
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
@@ -117,15 +119,25 @@ impl SkyPipeline {
         sun_dir: Vec3,
         sun_color: Vec3,
         time: f32,
+        cloud_coverage: f32,
+        cloud_color_base: Vec3,
+        cloud_density: f32,
+        cloud_color_shade: Vec3,
+        cloud_scale: f32,
+        wind_offset: [f32; 2],
     ) {
         let uniforms = SkyUniforms {
             view_proj: view_proj.to_cols_array(),
             sun_dir: sun_dir.to_array(),
-            _padding: 0.0,
-            sun_color: sun_color.to_array(),
-            _padding2: 0.0,
             time,
-            _padding3: [0.0; 3],
+            sun_color: sun_color.to_array(),
+            cloud_coverage,
+            cloud_color_base: cloud_color_base.to_array(),
+            cloud_density,
+            cloud_color_shade: cloud_color_shade.to_array(),
+            cloud_scale,
+            wind_offset,
+            _padding: [0.0; 2],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

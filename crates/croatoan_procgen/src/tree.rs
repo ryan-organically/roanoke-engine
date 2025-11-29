@@ -328,6 +328,8 @@ pub fn generate_tree(recipe: &TreeRecipe, seed: u64) -> GeneratedTree {
                 turtle.thickness *= recipe.thickness_decay;
 
                 // Possibly place a leaf
+                // DISABLED for performance/style
+                /*
                 if random() < recipe.leaf_probability && turtle.thickness < 0.05 {
                     leaves.push(LeafInstance {
                         position: end,
@@ -335,6 +337,7 @@ pub fn generate_tree(recipe: &TreeRecipe, seed: u64) -> GeneratedTree {
                         size: 0.2 + random() * 0.3,
                     });
                 }
+                */
             }
             'f' => {
                 // Move forward without drawing
@@ -376,11 +379,14 @@ pub fn generate_tree(recipe: &TreeRecipe, seed: u64) -> GeneratedTree {
             }
             'L' => {
                 // Explicit leaf command
+                // DISABLED
+                /*
                 leaves.push(LeafInstance {
                     position: turtle.position,
                     normal: turtle.direction,
                     size: 0.5 + random() * 0.5,
                 });
+                */
             }
             _ => {
                 // Ignore unknown characters

@@ -1,10 +1,15 @@
 struct Uniforms {
     view_proj: mat4x4<f32>,
     sun_dir: vec3<f32>,
-    padding1: f32,
-    sun_color: vec3<f32>,
-    padding2: f32,
     time: f32,
+    sun_color: vec3<f32>,
+    cloud_coverage: f32,
+    cloud_color_base: vec3<f32>,
+    cloud_density: f32,
+    cloud_color_shade: vec3<f32>,
+    cloud_scale: f32,
+    wind_offset: vec2<f32>,
+    padding: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -12,11 +17,11 @@ struct Uniforms {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
-    // Generate a full-screen triangle
     var positions = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>(3.0, -1.0),
@@ -25,72 +30,111 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     let pos = positions[in_vertex_index];
     
     var output: VertexOutput;
-    // Z = 1.0 (max depth) to render behind everything
     output.clip_position = vec4<f32>(pos, 1.0, 1.0);
-    
-    // Calculate world direction for skybox lookup (inverse view-proj would be better, but we can approximate)
-    // Actually, for a skybox, we usually use a cube or sphere.
-    // For a simple gradient, we can just use screen coordinates or view direction.
-    // Let's try to reconstruct view ray.
-    // Ideally we pass inverse view proj.
-    // For now, let's just use screen coords mapped to sphere.
-    output.world_pos = vec3<f32>(pos.x, pos.y, 1.0); 
-
+    output.world_pos = vec3<f32>(pos.x, pos.y, 1.0);
+    output.uv = pos * 0.5 + 0.5; // 0..1 range
     return output;
+}
+
+// Simple Hash Function
+fn hash(p: vec2<f32>) -> f32 {
+    var p2 = p;
+    p2 = 50.0 * fract(p2 * 0.3183099 + vec2<f32>(0.71, 0.113));
+    return -1.0 + 2.0 * fract(p2.x * p2.y * (p2.x + p2.y));
+}
+
+// 2D Noise
+fn noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    
+    return mix(mix(hash(i + vec2<f32>(0.0, 0.0)), 
+                   hash(i + vec2<f32>(1.0, 0.0)), u.x),
+               mix(hash(i + vec2<f32>(0.0, 1.0)), 
+                   hash(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
+}
+
+// FBM (Fractal Brownian Motion)
+fn fbm(p: vec2<f32>) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var frequency = 0.0;
+    var p2 = p;
+    
+    for (var i = 0; i < 5; i++) {
+        value += amplitude * noise(p2);
+        p2 = p2 * 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // We need the view direction for the pixel.
-    // Since we don't have the inverse matrix here easily without passing it,
-    // let's assume a simple sky gradient based on screen Y for now, 
-    // BUT to draw the sun we need the actual direction.
-    
-    // Let's rely on the fact that we can pass the view-proj inverse or just do it in screen space?
-    // Screen space sun is hard because it moves.
-    
-    // Better approach: The vertex shader should output a ray direction.
-    // But we are drawing a full screen quad.
-    
-    // Let's cheat: We will assume the user looks around.
-    // Actually, `sky_pipeline.rs` passes `view_proj`.
-    // If we render a CUBE instead of a quad, it's easier.
-    // But a quad is cheaper.
-    
-    // Let's use the `view_proj` to unproject the screen position?
-    // Or just render a giant sphere in the Rust code?
-    // No, let's stick to the quad and try to get the ray.
-    
-    // Simplified: Just draw a gradient for now.
-    // To draw the sun, we need to know where it is on screen.
-    // We can project the sun position in the vertex shader?
-    
-    // Let's switch to a simple gradient + sun glow.
-    
     // Sky Gradient
     let top_color = vec3<f32>(0.2, 0.4, 0.8);
     let horizon_color = vec3<f32>(0.6, 0.7, 0.9);
-    let bottom_color = vec3<f32>(0.1, 0.1, 0.2); // Night/Ground
-    
-    // Use screen Y for gradient
     let y = input.world_pos.y * 0.5 + 0.5;
-    var sky_color = mix(horizon_color, top_color, y);
+    var sky_color = mix(horizon_color, top_color, pow(y, 0.5));
     
-    // Sun
-    // We need the dot product between view ray and sun direction.
-    // This is hard without the view ray.
+    // Cloud Rendering
+    // Project UVs to "sky plane"
+    // We want clouds to look like they are on a plane above.
+    // Simple approximation: Use UVs + time
     
-    // ALTERNATIVE:
-    // Just clear the screen with a color in `main.rs` and don't use this pipeline yet?
-    // The user wants a VISIBLE sun.
+    let cloud_speed = 0.05;
+    let time_offset = uniforms.time * cloud_speed;
+    let wind = uniforms.wind_offset + vec2<f32>(time_offset, time_offset * 0.5);
     
-    // Let's try to get the view ray.
-    // In VS:
-    // output.view_dir = (inverse(view_proj) * vec4(pos, 1.0, 1.0)).xyz;
-    // We don't have inverse in WGSL easily unless passed.
+    // Scale UVs for cloud texture
+    let uv_scaled = (input.world_pos.xy * 2.0) * uniforms.cloud_scale + wind;
     
-    // Let's just return a nice blue for now and implement the sun logic in `main.rs` by drawing a billboard?
-    // No, sky shader is best.
+    // Generate Noise
+    var n = fbm(uv_scaled);
+    
+    // Shape clouds
+    // Remap noise from [-1, 1] to [0, 1]
+    n = n * 0.5 + 0.5;
+    
+    // Apply coverage threshold
+    // coverage 0.0 = no clouds, 1.0 = full clouds
+    // We want to discard low noise values based on coverage
+    // If coverage is high, we keep more low values.
+    // Let's say threshold = 1.0 - coverage
+    let threshold = 1.0 - uniforms.cloud_coverage;
+    
+    // Soft threshold
+    let cloud_alpha = smoothstep(threshold - 0.1, threshold + 0.1, n);
+    
+    // Density
+    let density = cloud_alpha * uniforms.cloud_density;
+    
+    if (density > 0.01) {
+        // Cloud Color Gradient
+        // Mix between base (Burnt Sienna) and shade (Pink) based on noise "thickness"
+        // Thicker parts (higher n) might be lighter or darker depending on style.
+        // Let's make thicker parts the "shade" color (maybe darker pink/purple)
+        // and edges the "base" color (burnt sienna).
+        
+        let color_mix = smoothstep(threshold, threshold + 0.4, n);
+        let cloud_rgb = mix(uniforms.cloud_color_base, uniforms.cloud_color_shade, color_mix);
+        
+        // Lighting/Shading fake
+        // Add a bit of white highlight on "top" (based on sun dir? or just noise derivative?)
+        // Simple: lighter color for very high density
+        let highlight = smoothstep(0.8, 1.0, n);
+        let final_cloud_color = mix(cloud_rgb, vec3<f32>(1.0, 0.9, 0.9), highlight * 0.5);
+        
+        // Blend with sky
+        sky_color = mix(sky_color, final_cloud_color, density);
+    }
+    
+    // Sun Glow (Simple)
+    // We don't have exact view ray here easily for a quad, but we can approximate.
+    // Or just rely on the SunPipeline for the actual sun disk.
+    // Let's add a subtle glow if looking up?
+    // Nah, let's keep it clean.
     
     return vec4<f32>(sky_color, 1.0);
 }

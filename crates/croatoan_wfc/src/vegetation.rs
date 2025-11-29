@@ -60,12 +60,18 @@ pub fn generate_vegetation_for_chunk(
             continue; // Skip this blade based on density
         }
 
+        // Patch Noise: Create patches of different sizes/heights
+        let patch_noise = noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) as f32; // Low frequency
+        
         // Height range increases toward forest
+        // Modulate with patch noise for variety
+        let height_mod = 1.0 + patch_noise * 0.3; // +/- 30% height variation
+        
         // Scrub: 0.4-0.8m
         // Forest edge: 0.8-1.6m
         // Deep forest: 1.2-2.4m
-        let min_height = 0.4 + biome_factor * 0.8;
-        let max_height = 0.8 + biome_factor * 1.6;
+        let min_height = (0.4 + biome_factor * 0.8) * height_mod;
+        let max_height = (0.8 + biome_factor * 1.6) * height_mod;
 
         let recipe = GrassBladeRecipe {
             height_range: (min_height, max_height),

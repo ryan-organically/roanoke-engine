@@ -15,7 +15,7 @@ pub fn generate_rocks_for_chunk(
     let noise = Perlin::new(seed + 888); // Different seed offset for rocks
 
     // Density settings
-    let rock_density = 0.01; 
+    let rock_density = 0.04; // Increased from 0.01
     let potential_rocks = (chunk_size * chunk_size * rock_density) as u32;
 
     let mut instances = Vec::new();

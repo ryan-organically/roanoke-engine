@@ -65,13 +65,29 @@ impl App {
         // Create event loop
         let event_loop = EventLoop::new()?;
 
-        // Create window
-        let window = Arc::new(
-            WindowBuilder::new()
-                .with_title(&self.title)
-                .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
-                .build(&event_loop)?
-        );
+        // Create window builder
+        let mut window_builder = WindowBuilder::new()
+            .with_title(&self.title)
+            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height));
+
+        // Load Icon
+        let icon_path = "assets/taskbar icon.jpg";
+        if let Ok(image) = image::open(icon_path) {
+            let rgba = image.to_rgba8();
+            let (width, height) = rgba.dimensions();
+            let icon_data = rgba.into_raw();
+            
+            if let Ok(icon) = winit::window::Icon::from_rgba(icon_data, width, height) {
+                window_builder = window_builder.with_window_icon(Some(icon));
+                log::info!("Loaded window icon from {}", icon_path);
+            } else {
+                log::warn!("Failed to create window icon from {}", icon_path);
+            }
+        } else {
+            log::warn!("Failed to load window icon from {}", icon_path);
+        }
+
+        let window = Arc::new(window_builder.build(&event_loop)?);
 
         log::info!("Window created: {} ({}x{})", self.title, self.width, self.height);
 

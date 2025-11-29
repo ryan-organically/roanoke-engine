@@ -142,28 +142,32 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Use comparison sampler for PCF (Percentage Closer Filtering)
         // NO bias in shader - rely entirely on hardware depth bias
         shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_depth);
-        // Make shadows MUCH darker: 1.0 = lit, 0.2 = deep shadow
-        shadow = shadow * 0.8 + 0.2;
+        // Make shadows MUCH darker: 1.0 = lit, 0.1 = deep shadow (Increased contrast)
+        shadow = shadow * 0.9 + 0.1;
     }
+
+    // Rim Lighting (Fresnel-like effect for terrain definition)
+    let view_dir_to_cam = normalize(uniforms.view_pos - input.world_pos);
+    let rim_dot = 1.0 - max(dot(view_dir_to_cam, normal), 0.0);
+    let rim = pow(rim_dot, 4.0) * 0.3 * sun_color * shadow;
 
     // Apply shadow to sun color only
     // Multiplier adjusted for more natural look
-    let diffuse_contribution = sun_color * diff * 1.2 * shadow;
-    let lighting = ambient_color + diffuse_contribution;
+    let diffuse_contribution = sun_color * diff * 1.3 * shadow; // Increased intensity
+    let lighting = ambient_color + diffuse_contribution + rim;
 
     // Apply lighting to surface color
     var final_color = input.color * lighting;
 
     // Water Specular Highlight (Sun Sparkle)
     if (is_water) {
-        let view_dir = normalize(uniforms.view_pos - input.world_pos);
         let reflect_dir = reflect(-light_dir, normal);
 
         // Tighter specular for sharp sparkles
-        let spec = pow(max(dot(view_dir, reflect_dir), 0.0), 64.0);
+        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 64.0);
 
         // Brighter sparkles for distance visibility
-        let specular = 1.5 * spec * sun_color * shadow;
+        let specular = 1.8 * spec * sun_color * shadow;
         final_color += specular;
     }
 

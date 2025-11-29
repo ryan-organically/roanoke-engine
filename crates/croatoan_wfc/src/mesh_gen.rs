@@ -154,20 +154,23 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         let blend = (t - 0.45) / 0.1;
         let h = lerp(0.0, 2.0, blend);
         let m = 0.2; // Soft dunes
-        // Warm Sandy Brown (more saturated yellow-brown)
-        let c = [0.85, 0.70, 0.45];
+        // Warm Sandy Brown (darker, less white)
+        let c = [0.76, 0.60, 0.35];
         (h, m, c)
-    } else if t < 0.75 {
+    } else if t < 0.65 {
         // Subtropical Scrub
-        let blend = (t - 0.55) / 0.2;
+        // Shortened from 0.75 to 0.65 to reduce middle ground
+        let blend = (t - 0.55) / 0.1; // Adjusted divisor for new range (0.1 width)
         let h = lerp(2.0, 6.0, blend);
         let m = 1.0; // Rougher
-        // Olive Green
-        let c = lerp_color([0.92, 0.90, 0.85], [0.4, 0.5, 0.2], blend);
+        // Olive Green - Darkened significantly
+        // Old: [0.92, 0.90, 0.85] -> [0.4, 0.5, 0.2]
+        // New: [0.55, 0.55, 0.45] -> [0.25, 0.35, 0.15]
+        let c = lerp_color([0.55, 0.55, 0.45], [0.25, 0.35, 0.15], blend);
         (h, m, c)
     } else {
         // Coastal Forest
-        let blend = (t - 0.75) / 0.25;
+        let blend = (t - 0.65) / 0.35; // Adjusted start and divisor (remainder of 1.0)
         let h = lerp(6.0, 15.0, blend);
         let m = 2.0;
         // Deep Green

@@ -1,6 +1,6 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline};
 use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -29,7 +29,10 @@ use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 
 mod water_system;
+
 use water_system::WaterSystem;
+mod weather_system;
+use weather_system::{WeatherSystem, WeatherType};
 
 // ... (Existing structs remain same) ...
 
@@ -81,6 +84,9 @@ struct SharedState {
     // Asset Registry
     mesh_registry: std::collections::HashMap<String, TreeMesh>, // For Trees/Rocks
     building_registry: std::collections::HashMap<String, Arc<BuildingMesh>>, // For Buildings
+    background_texture: Option<egui::TextureHandle>, // For Home Screen
+    loading_texture: Option<egui::TextureHandle>, // For Loading Screen
+    weather: WeatherSystem,
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -168,6 +174,9 @@ fn main() {
         },
         mesh_registry: std::collections::HashMap::new(),
         building_registry: std::collections::HashMap::new(),
+        background_texture: None,
+        loading_texture: None,
+        weather: WeatherSystem::new(),
     }));
 
     // ... (Channel setup) ...
@@ -318,6 +327,18 @@ fn main() {
                                     state.time_of_day = (state.time_of_day - 1.0 + 24.0) % 24.0;
                                     println!("[TIME] {:.1}:00", state.time_of_day);
                                 }
+                                KeyCode::KeyU => {
+                                    state.weather.set_weather(WeatherType::Clear, false);
+                                    println!("[WEATHER] Set to Clear");
+                                }
+                                KeyCode::KeyI => {
+                                    state.weather.set_weather(WeatherType::PartlyCloudy, false);
+                                    println!("[WEATHER] Set to PartlyCloudy");
+                                }
+                                KeyCode::KeyO => {
+                                    state.weather.set_weather(WeatherType::Stormy, false);
+                                    println!("[WEATHER] Set to Stormy");
+                                }
                                 _ => {}
                             }
                         }
@@ -342,13 +363,35 @@ fn main() {
                 // 1. Oak Tree (Loaded from OBJ)
                 {
                     println!("[ASSET] Loading tree model...");
-                    if let Some(template) = asset_loader::load_obj("trees/trees9.obj") {
+                    // Try multiple paths for robustness
+                    let obj_paths = ["assets/trees/trees9.obj", "trees/trees9.obj"];
+                    let mut template = None;
+                    for path in obj_paths {
+                        if let Some(t) = asset_loader::load_obj(path) {
+                            template = Some(t);
+                            break;
+                        }
+                    }
+
+                    if let Some(template) = template {
                         // Load Texture
-                        let texture_path = "trees/Texture/Bark___0.jpg";
-                        let texture_bytes = std::fs::read(texture_path).unwrap_or_else(|_| {
-                            println!("[WARN] Failed to load texture: {}, using fallback pink", texture_path);
-                            vec![255, 0, 255, 255] // Pink 1x1 fallback
-                        });
+                        let texture_paths = ["assets/trees/Texture/Bark___0.jpg", "trees/Texture/Bark___0.jpg"];
+                        let mut texture_bytes = Vec::new();
+                        let mut loaded = false;
+                        
+                        for path in texture_paths {
+                            if let Ok(bytes) = std::fs::read(path) {
+                                texture_bytes = bytes;
+                                loaded = true;
+                                println!("[ASSET] Loaded tree texture from {}", path);
+                                break;
+                            }
+                        }
+                        
+                        if !loaded {
+                            println!("[WARN] Failed to load tree texture from any path, using fallback pink");
+                            texture_bytes = vec![255, 0, 255, 255];
+                        }
 
                         let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|_| {
                              image::DynamicImage::new_rgba8(1, 1)
@@ -582,6 +625,12 @@ fn main() {
             Mutex::new(SunPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // Sky Pipeline
+        static SKY_PIPELINE: OnceLock<Mutex<SkyPipeline>> = OnceLock::new();
+        let sky_pipeline_mutex = SKY_PIPELINE.get_or_init(|| {
+            Mutex::new(SkyPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Water System
         static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
         // let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
@@ -606,7 +655,13 @@ fn main() {
             if state.time_of_day >= 24.0 {
                 state.time_of_day -= 24.0;
             }
+            if state.time_of_day >= 24.0 {
+                state.time_of_day -= 24.0;
+            }
             // Time is no longer clamped to allow night cycle
+            
+            // Update Weather
+            state.weather.update(delta);
         }
 
         // Handle Input (Player Controller)
@@ -671,6 +726,40 @@ fn main() {
             match state.game_state {
                 GameState::Loading => {
                     egui::CentralPanel::default().show(ui_ctx, |ui| {
+                        // Load loading texture if not loaded
+                        if state.loading_texture.is_none() {
+                            let path = "assets/ui/loading/loading.png";
+                            if let Ok(bytes) = std::fs::read(path) {
+                                if let Ok(image) = image::load_from_memory(&bytes) {
+                                    let size = [image.width() as usize, image.height() as usize];
+                                    let image_buffer = image.to_rgba8();
+                                    let pixels = image_buffer.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        pixels.as_slice(),
+                                    );
+                                    state.loading_texture = Some(ui.ctx().load_texture(
+                                        "loading_background",
+                                        color_image,
+                                        egui::TextureOptions::LINEAR,
+                                    ));
+                                    println!("[UI] Loaded loading image from {}", path);
+                                }
+                            }
+                        }
+
+                        // Draw Loading Background
+                        if let Some(texture) = &state.loading_texture {
+                            let screen_rect = ui.ctx().screen_rect();
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(
+                                texture.id(),
+                                screen_rect,
+                                uv,
+                                egui::Color32::WHITE,
+                            );
+                        }
+
                         ui.vertical_centered(|ui| {
                             ui.add_space(150.0);
                             ui.heading(egui::RichText::new("Loading World").size(40.0).color(egui::Color32::BLACK));
@@ -707,6 +796,45 @@ fn main() {
                 }
                 GameState::Menu => {
                     egui::CentralPanel::default().show(ui_ctx, |ui| {
+                        // Load background texture if not loaded
+                        if state.background_texture.is_none() {
+                            let path = "assets/ui/roanoke1.png";
+                            if let Ok(bytes) = std::fs::read(path) {
+                                if let Ok(image) = image::load_from_memory(&bytes) {
+                                    let size = [image.width() as usize, image.height() as usize];
+                                    let image_buffer = image.to_rgba8();
+                                    let pixels = image_buffer.as_flat_samples();
+                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        pixels.as_slice(),
+                                    );
+                                    state.background_texture = Some(ui.ctx().load_texture(
+                                        "background",
+                                        color_image,
+                                        egui::TextureOptions::LINEAR,
+                                    ));
+                                    println!("[UI] Loaded background image from {}", path);
+                                } else {
+                                    println!("[UI] Failed to decode background image");
+                                }
+                            } else {
+                                // println!("[UI] Background image not found at {}", path);
+                            }
+                        }
+
+                        // Draw Background
+                        if let Some(texture) = &state.background_texture {
+                            // Draw image covering the whole screen
+                            let screen_rect = ui.ctx().screen_rect();
+                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(
+                                texture.id(),
+                                screen_rect,
+                                uv,
+                                egui::Color32::WHITE,
+                            );
+                        }
+
                         ui.vertical_centered(|ui| {
                             ui.add_space(100.0);
                             ui.heading(egui::RichText::new("Roanoke Engine").size(40.0).color(egui::Color32::BLACK));
@@ -716,6 +844,9 @@ fn main() {
                             ui.text_edit_singleline(&mut state.seed_input);
                             
                             if ui.button(egui::RichText::new("New Game").size(20.0)).clicked() {
+                                // TODO: Play Menu Select Sound
+                                // audio.play("ui_select.wav");
+                                
                                 if let Ok(seed) = state.seed_input.parse::<u32>() {
                                     state.seed = seed;
                                     state.game_state = GameState::Loading;
@@ -756,6 +887,9 @@ fn main() {
                                 for save_name in saves {
                                     ui.horizontal(|ui| {
                                         if ui.button(format!("Load {}", save_name)).clicked() {
+                                            // TODO: Play Menu Select Sound
+                                            // audio.play("ui_select.wav");
+
                                             if let Some(data) = load_game(&save_name) {
                                                 state.seed = data.seed;
                                                 state.inventory = data.inventory;
@@ -1126,6 +1260,41 @@ fn main() {
                 }
             };
 
+            // 0.5 Sky Pass (Draw Skybox/Clouds first)
+            {
+                let sky_pipeline = sky_pipeline_mutex.lock().unwrap();
+                sky_pipeline.update_uniforms(
+                    ctx.queue(),
+                    view_proj,
+                    sun_dir,
+                    Vec3::new(1.0, 1.0, 1.0), // Sun Color (White for now)
+                    elapsed,
+                    state.weather.cloud_coverage,
+                    state.weather.cloud_color_base,
+                    state.weather.cloud_density,
+                    state.weather.cloud_color_shade,
+                    state.weather.cloud_scale,
+                    state.weather.wind_offset,
+                );
+
+                let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Sky Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(sky_color), // Clear with gradient base, then draw clouds over
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None, // Sky draws at max depth or ignores depth
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                
+                sky_pipeline.render(&mut sky_pass);
+            }
+
             // 1. Sun/Moon Pass
             {
                 // Acquire locks before starting render pass to ensure they outlive the pass
@@ -1137,8 +1306,9 @@ fn main() {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,
+
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(sky_color),
+                            load: wgpu::LoadOp::Load, // Load sky from previous pass
                             store: wgpu::StoreOp::Store,
                         },
                     })],

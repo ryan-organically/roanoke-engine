@@ -9,3 +9,4 @@ winit = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 wgpu = { workspace = true }
+image = "0.24"
