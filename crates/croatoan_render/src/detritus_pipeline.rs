@@ -14,6 +14,8 @@ struct DetritusVertex {
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    sun_dir: [f32; 3],
+    _padding: f32,
 }
 
 pub struct DetritusPipeline {
@@ -33,7 +35,7 @@ impl DetritusPipeline {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -202,9 +204,11 @@ impl DetritusPipeline {
     }
 
     /// Update camera uniform
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4) {
+    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, sun_dir: [f32; 3]) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
+            sun_dir,
+            _padding: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

@@ -61,15 +61,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Lighting
     let light_dir = normalize(uniforms.light_dir);
     let normal = normalize(in.normal);
-    
+    let sun_elevation = -light_dir.y;
+
+    // Day factor: 0 = night, 1 = full day
+    let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
+
     // Diffuse
-    let diff = max(dot(normal, light_dir), 0.0);
-    
-    // Ambient (Sky light)
-    let ambient = 0.3;
-    
+    let diff = max(dot(normal, -light_dir), 0.0);
+
+    // Night ambient (very dark)
+    let night_ambient = 0.05;
+    let day_ambient = 0.3;
+    let ambient = mix(night_ambient, day_ambient, day_factor);
+
+    // Night diffuse (moonlight)
+    let night_diffuse = 0.1;
+    let day_diffuse = 0.7;
+    let diffuse_strength = mix(night_diffuse, day_diffuse, day_factor);
+
     // Combine
-    let lighting = ambient + diff * 0.7;
+    let lighting = ambient + diff * diffuse_strength;
     let lit_color = in.color * lighting;
 
     // Fog

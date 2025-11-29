@@ -64,7 +64,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Oak,
             branch_segments: 3,
-            radial_segments: 4,
+            radial_segments: 6, // Increased from 4 for smoother cylinders
         }
     }
 
@@ -86,7 +86,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Pine,
             branch_segments: 2,
-            radial_segments: 4,
+            radial_segments: 6,
         }
     }
 
@@ -108,7 +108,7 @@ impl TreeRecipe {
             gravity: -0.5,
             species: TreeSpecies::Willow,
             branch_segments: 3,
-            radial_segments: 4,
+            radial_segments: 6,
         }
     }
 
@@ -130,7 +130,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Birch,
             branch_segments: 3,
-            radial_segments: 5,
+            radial_segments: 6,
         }
     }
 
@@ -153,7 +153,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Palm,
             branch_segments: 2,
-            radial_segments: 5,
+            radial_segments: 6,
         }
     }
 
@@ -175,7 +175,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Maple,
             branch_segments: 3,
-            radial_segments: 4,
+            radial_segments: 6,
         }
     }
 
@@ -197,7 +197,7 @@ impl TreeRecipe {
             gravity: 0.0,
             species: TreeSpecies::Spruce,
             branch_segments: 2,
-            radial_segments: 4,
+            radial_segments: 6,
         }
     }
 
@@ -327,17 +327,14 @@ pub fn generate_tree(recipe: &TreeRecipe, seed: u64) -> GeneratedTree {
                 turtle.length *= recipe.length_decay;
                 turtle.thickness *= recipe.thickness_decay;
 
-                // Possibly place a leaf
-                // DISABLED for performance/style
-                /*
-                if random() < recipe.leaf_probability && turtle.thickness < 0.05 {
+                // Place leaves on thin terminal branches
+                if random() < recipe.leaf_probability && turtle.thickness < 0.08 {
                     leaves.push(LeafInstance {
                         position: end,
                         normal: turtle.direction,
-                        size: 0.2 + random() * 0.3,
+                        size: 0.3 + random() * 0.4, // Slightly larger leaves
                     });
                 }
-                */
             }
             'f' => {
                 // Move forward without drawing
@@ -378,15 +375,12 @@ pub fn generate_tree(recipe: &TreeRecipe, seed: u64) -> GeneratedTree {
                 }
             }
             'L' => {
-                // Explicit leaf command
-                // DISABLED
-                /*
+                // Explicit leaf command (used by palm trees)
                 leaves.push(LeafInstance {
                     position: turtle.position,
                     normal: turtle.direction,
-                    size: 0.5 + random() * 0.5,
+                    size: 0.6 + random() * 0.5,
                 });
-                */
             }
             _ => {
                 // Ignore unknown characters
@@ -481,35 +475,55 @@ pub fn generate_tree_mesh(tree: &GeneratedTree) -> TreeMesh {
     }
 
     // Generate leaf billboards
-    // DISABLED for performance/style
-    /*
-    for leaf in &tree.leaves {
+    // Leaves use UV.y > 1.0 as a flag for the shader to render them green
+    for (i, leaf) in tree.leaves.iter().enumerate() {
         let base_index = vertices.len() as u32;
 
-        // Create billboard facing up
-        let right = Vec3::X;
-        let up = Vec3::Z;
+        // Create billboard oriented along branch direction with some randomization
+        // Use leaf index for pseudo-random variation
+        let seed = i as f32 * 0.7;
+        let angle = seed * 2.5; // Rotation around branch axis
+
+        // Build basis from leaf normal (branch direction)
+        let forward = leaf.normal.normalize();
+        let arbitrary = if forward.y.abs() > 0.9 { Vec3::X } else { Vec3::Y };
+        let right = forward.cross(arbitrary).normalize();
+        let up = right.cross(forward).normalize();
+
+        // Rotate the basis for variety
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let rotated_right = right * cos_a + up * sin_a;
+        let rotated_up = up * cos_a - right * sin_a;
+
         let half_size = leaf.size * 0.5;
 
+        // Offset slightly along branch direction so leaves extend outward
+        let offset = forward * half_size * 0.3;
+
         let positions = [
-            leaf.position + (-right - up) * half_size,
-            leaf.position + (right - up) * half_size,
-            leaf.position + (right + up) * half_size,
-            leaf.position + (-right + up) * half_size,
+            leaf.position + offset + (-rotated_right - rotated_up) * half_size,
+            leaf.position + offset + (rotated_right - rotated_up) * half_size,
+            leaf.position + offset + (rotated_right + rotated_up) * half_size,
+            leaf.position + offset + (-rotated_right + rotated_up) * half_size,
         ];
 
+        // UV.y = 2.0 marks this as a leaf for the shader
         let uvs = [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
+            [0.0, 2.0],
+            [1.0, 2.0],
+            [1.0, 3.0],
+            [0.0, 3.0],
         ];
 
-        for i in 0..4 {
+        // Normal points mostly up with slight variation for lighting
+        let leaf_normal = (Vec3::Y * 0.7 + forward * 0.3).normalize();
+
+        for j in 0..4 {
             vertices.push(TreeVertex {
-                position: positions[i].to_array(),
-                normal: leaf.normal.to_array(),
-                uv: uvs[i],
+                position: positions[j].to_array(),
+                normal: leaf_normal.to_array(),
+                uv: uvs[j],
             });
         }
 
@@ -522,7 +536,6 @@ pub fn generate_tree_mesh(tree: &GeneratedTree) -> TreeMesh {
         indices.push(base_index + 2);
         indices.push(base_index + 3);
     }
-    */
 
     TreeMesh {
         vertices,

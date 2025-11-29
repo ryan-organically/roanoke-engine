@@ -1,6 +1,6 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, LightShaftPipeline};
 use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -29,10 +29,12 @@ use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 
 mod water_system;
+mod atmosphere;
 
 use water_system::WaterSystem;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
+use atmosphere::AtmosphereEngine;
 
 // ... (Existing structs remain same) ...
 
@@ -87,6 +89,8 @@ struct SharedState {
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_texture: Option<egui::TextureHandle>, // For Loading Screen
     weather: WeatherSystem,
+    atmosphere: AtmosphereEngine,
+    show_load_menu: bool, // For Load Game submenu
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -133,6 +137,40 @@ fn list_saves() -> Vec<String> {
     saves
 }
 
+// --- Offscreen Render Target for Post-Process Effects ---
+
+struct OffscreenTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+impl OffscreenTarget {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Offscreen Render Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self { texture, view, width, height }
+    }
+
+    fn needs_resize(&self, width: u32, height: u32) -> bool {
+        self.width != width || self.height != height
+    }
+}
+
 // --- Main Entry Point ---
 
 fn main() {
@@ -177,6 +215,8 @@ fn main() {
         background_texture: None,
         loading_texture: None,
         weather: WeatherSystem::new(),
+        atmosphere: AtmosphereEngine::new(),
+        show_load_menu: false,
     }));
 
     // ... (Channel setup) ...
@@ -360,44 +400,54 @@ fn main() {
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Oak Tree (Loaded from OBJ)
+                // 1. Oak Tree (from Blender OBJ - bark meshes only, leaves filtered)
                 {
-                    println!("[ASSET] Loading tree model...");
-                    // Try multiple paths for robustness
+                    println!("[ASSET] ========== TREE LOADING START ==========");
                     let obj_paths = ["assets/trees/trees9.obj", "trees/trees9.obj"];
                     let mut template = None;
                     for path in obj_paths {
+                        println!("[ASSET] Trying OBJ path: {}", path);
                         if let Some(t) = asset_loader::load_obj(path) {
                             template = Some(t);
+                            println!("[ASSET] SUCCESS: Loaded tree from {}", path);
                             break;
+                        } else {
+                            println!("[ASSET] FAILED: Could not load {}", path);
                         }
                     }
 
                     if let Some(template) = template {
-                        // Load Texture
+                        // Load bark texture
+                        println!("[ASSET] Loading bark texture...");
                         let texture_paths = ["assets/trees/Texture/Bark___0.jpg", "trees/Texture/Bark___0.jpg"];
                         let mut texture_bytes = Vec::new();
-                        let mut loaded = false;
-                        
+
                         for path in texture_paths {
-                            if let Ok(bytes) = std::fs::read(path) {
-                                texture_bytes = bytes;
-                                loaded = true;
-                                println!("[ASSET] Loaded tree texture from {}", path);
-                                break;
+                            println!("[ASSET] Trying texture path: {}", path);
+                            match std::fs::read(path) {
+                                Ok(bytes) => {
+                                    texture_bytes = bytes;
+                                    println!("[ASSET] SUCCESS: Loaded bark texture ({} bytes) from {}", texture_bytes.len(), path);
+                                    break;
+                                }
+                                Err(e) => {
+                                    println!("[ASSET] FAILED: {} - {}", path, e);
+                                }
                             }
                         }
-                        
-                        if !loaded {
-                            println!("[WARN] Failed to load tree texture from any path, using fallback pink");
-                            texture_bytes = vec![255, 0, 255, 255];
+
+                        if texture_bytes.is_empty() {
+                            println!("[WARN] No bark texture found, using white fallback");
+                            texture_bytes = vec![255, 255, 255, 255];
                         }
 
-                        let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|_| {
-                             image::DynamicImage::new_rgba8(1, 1)
+                        let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|e| {
+                            println!("[WARN] Failed to decode texture: {}, using 1x1 fallback", e);
+                            image::DynamicImage::new_rgba8(1, 1)
                         });
                         let rgba = texture_image.to_rgba8();
                         let dimensions = rgba.dimensions();
+                        println!("[ASSET] Texture dimensions: {}x{}", dimensions.0, dimensions.1);
 
                         let texture_size = wgpu::Extent3d {
                             width: dimensions.0,
@@ -412,7 +462,7 @@ fn main() {
                             dimension: wgpu::TextureDimension::D2,
                             format: wgpu::TextureFormat::Rgba8UnormSrgb,
                             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            label: Some("Tree Diffuse Texture"),
+                            label: Some("Tree Bark Texture"),
                             view_formats: &[],
                         });
 
@@ -442,14 +492,6 @@ fn main() {
                             ..Default::default()
                         });
 
-                        // We need to create a dummy pipeline to get the layout... 
-                        // Or better, expose a static function or create the layout here.
-                        // TreePipeline::new creates the layout internally.
-                        // We can just create a temporary pipeline to grab the layout or duplicate the layout creation.
-                        // Since we need the bind group to CREATE the mesh, we have a chicken-and-egg if the layout is inside pipeline.
-                        // Solution: Instantiate a dummy pipeline first to get the layout? No, expensive.
-                        // Better: Create the BindGroup here using a locally created layout that MATCHES the pipeline's layout.
-                        
                         let texture_bind_group_layout = ctx.device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                             label: Some("Tree Texture Bind Group Layout"),
                             entries: &[
@@ -487,6 +529,7 @@ fn main() {
                             label: Some("Tree Texture Bind Group"),
                         });
 
+                        println!("[ASSET] Creating GPU mesh with texture bind group...");
                         let gpu_mesh = TreePipeline::create_mesh(
                             ctx.device(),
                             &template.positions,
@@ -495,13 +538,36 @@ fn main() {
                             &template.indices,
                             Some(Arc::new(bind_group)),
                         );
+                        println!("[ASSET] Tree mesh created: {} verts, {} tris",
+                            template.positions.len(), template.indices.len() / 3);
+                        println!("[ASSET] Texture bind group: ATTACHED");
                         state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                        println!("[ASSET] ========== TREE LOADING COMPLETE (OBJ) ==========");
                     } else {
-                        println!("[WARN] Failed to load OBJ, falling back to procedural");
-                        let recipe = TreeRecipe::oak();
+                        // Fallback to procedural if OBJ fails (bark only, no leaves)
+                        println!("[ASSET] ========== TREE LOADING FALLBACK ==========");
+                        println!("[WARN] OBJ load failed, using procedural tree (bark only)");
+                        let mut recipe = TreeRecipe::oak();
+                        recipe.leaf_probability = 0.0; // No procedural leaves
                         let tree = generate_tree(&recipe, 12345);
                         let mesh = generate_tree_mesh(&tree);
-                        // ... fallback code ...
+
+                        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                        let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                        let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &positions,
+                            &normals,
+                            &uvs,
+                            &mesh.indices,
+                            None,
+                        );
+                        println!("[ASSET] Procedural mesh created: {} verts", positions.len());
+                        println!("[ASSET] Texture bind group: NONE (using default white)");
+                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                        println!("[ASSET] ========== TREE LOADING COMPLETE (PROCEDURAL) ==========");
                     }
                 }
 
@@ -637,6 +703,33 @@ fn main() {
         //     Mutex::new(WaterSystem::new(ctx.device(), ctx.surface_format()))
         // });
 
+        // Light Shaft Pipeline (God Rays Post-Process)
+        static LIGHT_SHAFT_PIPELINE: OnceLock<Mutex<LightShaftPipeline>> = OnceLock::new();
+        let light_shaft_pipeline_mutex = LIGHT_SHAFT_PIPELINE.get_or_init(|| {
+            Mutex::new(LightShaftPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Offscreen Render Target (for post-process effects)
+        static OFFSCREEN_TARGET: OnceLock<Mutex<Option<OffscreenTarget>>> = OnceLock::new();
+        let offscreen_target_mutex = OFFSCREEN_TARGET.get_or_init(|| Mutex::new(None));
+
+        // Check if offscreen target needs to be created/resized
+        {
+            let mut offscreen_opt = offscreen_target_mutex.lock().unwrap();
+            let needs_create = match &*offscreen_opt {
+                None => true,
+                Some(target) => target.needs_resize(ctx.config().width, ctx.config().height),
+            };
+            if needs_create {
+                *offscreen_opt = Some(OffscreenTarget::new(
+                    ctx.device(),
+                    ctx.surface_format(),
+                    ctx.config().width,
+                    ctx.config().height,
+                ));
+            }
+        }
+
         let mut state = render_state.lock().unwrap();
 
         // Calculate FPS
@@ -662,6 +755,17 @@ fn main() {
             
             // Update Weather
             state.weather.update(delta);
+
+            // Update Atmosphere (fog, light shafts based on time/weather)
+            let weather_fog = match state.weather.current_weather {
+                WeatherType::Foggy => 0.8,
+                WeatherType::Overcast => 0.3,
+                WeatherType::Stormy => 0.5,
+                _ => 0.0,
+            };
+            let time_of_day = state.time_of_day;
+            let cloud_coverage = state.weather.cloud_coverage;
+            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage);
         }
 
         // Handle Input (Player Controller)
@@ -795,7 +899,9 @@ fn main() {
                     });
                 }
                 GameState::Menu => {
-                    egui::CentralPanel::default().show(ui_ctx, |ui| {
+                    // Transparent panel for background
+                    let frame = egui::Frame::none();
+                    egui::CentralPanel::default().frame(frame).show(ui_ctx, |ui| {
                         // Load background texture if not loaded
                         if state.background_texture.is_none() {
                             let path = "assets/ui/roanoke1.png";
@@ -817,15 +923,12 @@ fn main() {
                                 } else {
                                     println!("[UI] Failed to decode background image");
                                 }
-                            } else {
-                                // println!("[UI] Background image not found at {}", path);
                             }
                         }
 
                         // Draw Background
+                        let screen_rect = ui.ctx().screen_rect();
                         if let Some(texture) = &state.background_texture {
-                            // Draw image covering the whole screen
-                            let screen_rect = ui.ctx().screen_rect();
                             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                             ui.painter().image(
                                 texture.id(),
@@ -835,62 +938,87 @@ fn main() {
                             );
                         }
 
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(100.0);
-                            ui.heading(egui::RichText::new("Roanoke Engine").size(40.0).color(egui::Color32::BLACK));
-                            ui.add_space(50.0);
+                        // Menu styling - right side, serif-style
+                        let menu_width = 350.0;
+                        let menu_x = screen_rect.max.x - menu_width - 80.0;
+                        let menu_y = screen_rect.center().y - 60.0;
 
-                            ui.label(egui::RichText::new("Enter Seed:").color(egui::Color32::BLACK));
-                            ui.text_edit_singleline(&mut state.seed_input);
-                            
-                            if ui.button(egui::RichText::new("New Game").size(20.0)).clicked() {
-                                // TODO: Play Menu Select Sound
-                                // audio.play("ui_select.wav");
-                                
-                                if let Ok(seed) = state.seed_input.parse::<u32>() {
-                                    state.seed = seed;
-                                    state.game_state = GameState::Loading;
-                                    state.save_name_input = format!("seed_{}", seed); // Default save name
-                                    state.player = Player::new(Vec3::new(0.0, 50.0, 0.0)); // Reset player position
-                                    println!("[GAME] Starting new game with seed: {}", seed);
+                        // Colors - rich brown tones
+                        let title_color = egui::Color32::from_rgb(61, 43, 31); // Deep brown
+                        let menu_color = egui::Color32::from_rgb(101, 67, 33); // Dark brown
+                        let hover_color = egui::Color32::from_rgb(160, 100, 50); // Warm brown
+                        let disabled_color = egui::Color32::from_rgb(140, 130, 115); // Muted
 
-                                    // Initialize loading progress
-                                    // Range 3 = 7x7 = 49 chunks
-                                    let range = 3;
-                                    let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
-                                    state.loading_progress = LoadingProgress {
-                                        total_chunks: total,
-                                        chunks_generated: 0,
-                                        chunks_uploaded: 0,
-                                        current_status: "Initializing world generation...".to_string(),
-                                    };
+                        // Big bold ROANOKE title
+                        ui.painter().text(
+                            egui::pos2(menu_x + menu_width - 10.0, menu_y - 100.0),
+                            egui::Align2::RIGHT_CENTER,
+                            "ROANOKE",
+                            egui::FontId::new(96.0, egui::FontFamily::Proportional),
+                            title_color,
+                        );
+                        // Version subtitle
+                        ui.painter().text(
+                            egui::pos2(menu_x + menu_width - 10.0, menu_y - 45.0),
+                            egui::Align2::RIGHT_CENTER,
+                            "v0.0.1",
+                            egui::FontId::new(28.0, egui::FontFamily::Proportional),
+                            egui::Color32::from_rgb(120, 90, 60),
+                        );
 
-                                    // Force regeneration by clearing chunks
-                                    if let Some(manager) = CHUNK_MANAGER.get() {
-                                        let mut mgr = manager.lock().unwrap();
-                                        mgr.loaded_chunks.clear();
-                                        mgr.loading_chunks.clear();
-                                    }
-                                    
-                                    // We don't spawn a thread here anymore. 
-                                    // The render loop will detect we are in Loading state and the ChunkManager will request chunks.
-                                }
-                            }
+                        // Menu items
+                        let menu_items = [
+                            ("Continue", false), // Disabled if no saves
+                            ("New Game", true),
+                            ("Load Game", true),
+                            ("Settings", false), // Not implemented
+                            ("Marketplace", false), // Not implemented
+                        ];
 
-                            ui.add_space(20.0);
-                            ui.label(egui::RichText::new("Saved Games:").strong());
-                            ui.separator();
-                            
-                            // List Saves
-                            let saves = list_saves();
-                            egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                                for save_name in saves {
-                                    ui.horizontal(|ui| {
-                                        if ui.button(format!("Load {}", save_name)).clicked() {
-                                            // TODO: Play Menu Select Sound
-                                            // audio.play("ui_select.wav");
+                        let saves = list_saves();
+                        let has_saves = !saves.is_empty();
 
-                                            if let Some(data) = load_game(&save_name) {
+                        let mut y_offset = menu_y;
+                        for (label, base_enabled) in menu_items {
+                            let enabled = match label {
+                                "Continue" => has_saves,
+                                "Load Game" => has_saves,
+                                _ => base_enabled,
+                            };
+
+                            let btn_rect = egui::Rect::from_min_size(
+                                egui::pos2(menu_x, y_offset),
+                                egui::vec2(menu_width, 65.0),
+                            );
+
+                            let response = ui.allocate_rect(btn_rect, egui::Sense::click());
+                            let is_hovered = response.hovered() && enabled;
+
+                            // Draw text - big bold brown
+                            let text_color = if !enabled {
+                                disabled_color
+                            } else if is_hovered {
+                                hover_color
+                            } else {
+                                menu_color
+                            };
+
+                            let font_size = if is_hovered { 48.0 } else { 42.0 };
+                            ui.painter().text(
+                                egui::pos2(menu_x + menu_width - 10.0, y_offset + 32.0),
+                                egui::Align2::RIGHT_CENTER,
+                                label,
+                                egui::FontId::new(font_size, egui::FontFamily::Proportional),
+                                text_color,
+                            );
+
+                            // Handle clicks
+                            if response.clicked() && enabled {
+                                match label {
+                                    "Continue" => {
+                                        // Load most recent save
+                                        if let Some(save_name) = saves.first() {
+                                            if let Some(data) = load_game(save_name) {
                                                 state.seed = data.seed;
                                                 state.inventory = data.inventory;
                                                 state.player.position = Vec3::from_array(data.player_pos);
@@ -898,10 +1026,6 @@ fn main() {
                                                 state.player.pitch = data.player_rot[1];
                                                 state.game_state = GameState::Loading;
                                                 state.save_name_input = save_name.clone();
-
-                                                println!("[GAME] Loaded game: {}", save_name);
-
-                                                // Initialize loading progress
                                                 let range = 3;
                                                 let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
                                                 state.loading_progress = LoadingProgress {
@@ -910,8 +1034,6 @@ fn main() {
                                                     chunks_uploaded: 0,
                                                     current_status: "Loading saved world...".to_string(),
                                                 };
-
-                                                // Force regeneration by clearing chunks
                                                 if let Some(manager) = CHUNK_MANAGER.get() {
                                                     let mut mgr = manager.lock().unwrap();
                                                     mgr.loaded_chunks.clear();
@@ -919,10 +1041,116 @@ fn main() {
                                                 }
                                             }
                                         }
-                                    });
+                                    }
+                                    "New Game" => {
+                                        // Generate random seed
+                                        let seed: u32 = rand::random();
+                                        state.seed = seed;
+                                        state.seed_input = seed.to_string();
+                                        state.game_state = GameState::Loading;
+                                        state.save_name_input = format!("seed_{}", seed);
+                                        state.player = Player::new(Vec3::new(0.0, 50.0, 0.0));
+                                        println!("[GAME] Starting new game with seed: {}", seed);
+                                        let range = 3;
+                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        state.loading_progress = LoadingProgress {
+                                            total_chunks: total,
+                                            chunks_generated: 0,
+                                            chunks_uploaded: 0,
+                                            current_status: "Initializing world generation...".to_string(),
+                                        };
+                                        if let Some(manager) = CHUNK_MANAGER.get() {
+                                            let mut mgr = manager.lock().unwrap();
+                                            mgr.loaded_chunks.clear();
+                                            mgr.loading_chunks.clear();
+                                        }
+                                    }
+                                    "Load Game" => {
+                                        state.show_load_menu = true;
+                                    }
+                                    _ => {}
                                 }
-                            });
-                        });
+                            }
+
+                            y_offset += 70.0;
+                        }
+
+                        // Load Game submenu (if active)
+                        if state.show_load_menu && has_saves {
+                            let submenu_x = menu_x - 250.0;
+                            let submenu_y = menu_y + 140.0; // Align with Load Game (3rd item, 70px spacing)
+
+                            // Semi-transparent background for submenu
+                            let submenu_bg = egui::Rect::from_min_size(
+                                egui::pos2(submenu_x - 15.0, submenu_y - 15.0),
+                                egui::vec2(230.0, saves.len() as f32 * 45.0 + 30.0),
+                            );
+                            ui.painter().rect_filled(
+                                submenu_bg,
+                                8.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 248, 230, 230),
+                            );
+
+                            let mut save_y = submenu_y;
+                            for save_name in &saves {
+                                let save_rect = egui::Rect::from_min_size(
+                                    egui::pos2(submenu_x, save_y),
+                                    egui::vec2(200.0, 40.0),
+                                );
+                                let response = ui.allocate_rect(save_rect, egui::Sense::click());
+                                let text_color = if response.hovered() {
+                                    hover_color
+                                } else {
+                                    menu_color
+                                };
+
+                                ui.painter().text(
+                                    egui::pos2(submenu_x, save_y + 20.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    save_name,
+                                    egui::FontId::new(22.0, egui::FontFamily::Proportional),
+                                    text_color,
+                                );
+
+                                if response.clicked() {
+                                    if let Some(data) = load_game(save_name) {
+                                        state.seed = data.seed;
+                                        state.inventory = data.inventory;
+                                        state.player.position = Vec3::from_array(data.player_pos);
+                                        state.player.yaw = data.player_rot[0];
+                                        state.player.pitch = data.player_rot[1];
+                                        state.game_state = GameState::Loading;
+                                        state.save_name_input = save_name.clone();
+                                        state.show_load_menu = false;
+                                        let range = 3;
+                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        state.loading_progress = LoadingProgress {
+                                            total_chunks: total,
+                                            chunks_generated: 0,
+                                            chunks_uploaded: 0,
+                                            current_status: "Loading saved world...".to_string(),
+                                        };
+                                        if let Some(manager) = CHUNK_MANAGER.get() {
+                                            let mut mgr = manager.lock().unwrap();
+                                            mgr.loaded_chunks.clear();
+                                            mgr.loading_chunks.clear();
+                                        }
+                                    }
+                                }
+                                save_y += 45.0;
+                            }
+
+                            // Close submenu if clicking elsewhere
+                            if ui.input(|i| i.pointer.any_click()) && !submenu_bg.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                                let load_btn_rect = egui::Rect::from_min_size(
+                                    egui::pos2(menu_x, menu_y + 140.0),
+                                    egui::vec2(menu_width, 65.0),
+                                );
+                                if !load_btn_rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default())) {
+                                    state.show_load_menu = false;
+                                }
+                            }
+                        }
                     });
                 }
                 GameState::Playing => {
@@ -1130,6 +1358,10 @@ fn main() {
                 label: Some("Render Encoder"),
             });
 
+            // Get offscreen target view for post-process rendering
+            let offscreen_guard = offscreen_target_mutex.lock().unwrap();
+            let offscreen_view = offscreen_guard.as_ref().map(|t| &t.view);
+
             // Calculate sun direction
             let hour_angle = (state.time_of_day - 6.0) * (std::f32::consts::PI / 12.0);
             let sun_pos_x = hour_angle.cos();
@@ -1175,13 +1407,13 @@ fn main() {
                         grass.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
                     }
                     if let Some(trees) = &chunk.trees {
-                        trees.update_camera(ctx.queue(), &view_proj);
+                        trees.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
                     }
                     if let Some(detritus) = &chunk.detritus {
-                        detritus.update_camera(ctx.queue(), &view_proj);
+                        detritus.update_camera(ctx.queue(), &view_proj, sun_dir.to_array());
                     }
                     for rock in &chunk.rocks {
-                        rock.update_camera(ctx.queue(), &view_proj);
+                        rock.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
                     }
                     // for building in &chunk.buildings {
                     //     building.update_camera(ctx.queue(), &view_proj);
@@ -1260,6 +1492,9 @@ fn main() {
                 }
             };
 
+            // Determine which view to render scene to (offscreen for post-process, or direct)
+            let scene_view = offscreen_view.unwrap_or(&view);
+
             // 0.5 Sky Pass (Draw Skybox/Clouds first)
             {
                 let sky_pipeline = sky_pipeline_mutex.lock().unwrap();
@@ -1280,7 +1515,7 @@ fn main() {
                 let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sky Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: scene_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(sky_color), // Clear with gradient base, then draw clouds over
@@ -1291,7 +1526,7 @@ fn main() {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                
+
                 sky_pipeline.render(&mut sky_pass);
             }
 
@@ -1304,7 +1539,7 @@ fn main() {
                 let mut sun_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sun/Moon Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: scene_view,
                         resolve_target: None,
 
                         ops: wgpu::Operations {
@@ -1339,7 +1574,7 @@ fn main() {
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: scene_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load, // Keep sky + sun from previous pass
@@ -1358,14 +1593,11 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                // Dynamic fog color matching sky
-                let fog_color = [
-                    sky_color.r as f32 * 0.9,
-                    sky_color.g as f32 * 0.9,
-                    sky_color.b as f32 * 0.9,
-                ];
-                let fog_start = 200.0;
-                let fog_end = 600.0;
+                // Atmospheric fog from time-of-day system
+                let atmo = &state.atmosphere.state;
+                let fog_color = atmo.fog_color.to_array();
+                let fog_start = atmo.fog_start;
+                let fog_end = atmo.fog_end;
 
                 // Render chunks with frustum culling and LOD
                 let mut terrain_rendered = 0;
@@ -1459,7 +1691,98 @@ fn main() {
                 let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, buildings_rendered);
             } // End Main Pass
 
-            // 2. Egui Pass
+            // 2.5 Light Shaft Post-Process Pass
+            if offscreen_view.is_some() {
+                let light_shaft_pipeline = light_shaft_pipeline_mutex.lock().unwrap();
+                let atmo = &state.atmosphere.state;
+
+                // Calculate sun screen position
+                if let Some(sun_screen_pos) = LightShaftPipeline::calculate_sun_screen_pos(sun_dir, view_proj) {
+                    // Only render light shafts during daytime with sufficient intensity
+                    if atmo.light_shaft_intensity > 0.01 && sun_pos_y > 0.0 {
+                        light_shaft_pipeline.update_uniforms(
+                            ctx.queue(),
+                            sun_screen_pos,
+                            atmo.light_shaft_intensity,
+                            atmo.light_shaft_decay,
+                            atmo.light_shaft_density,
+                        );
+
+                        // Create bind group with offscreen texture
+                        let bind_group = light_shaft_pipeline.create_bind_group(
+                            ctx.device(),
+                            offscreen_view.unwrap(),
+                        );
+
+                        let mut light_shaft_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Light Shaft Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        light_shaft_pipeline.render(&mut light_shaft_pass, &bind_group);
+                    } else {
+                        // No light shafts - just copy offscreen to view
+                        let bind_group = light_shaft_pipeline.create_bind_group(
+                            ctx.device(),
+                            offscreen_view.unwrap(),
+                        );
+                        light_shaft_pipeline.update_uniforms(ctx.queue(), [0.5, 0.5], 0.0, 0.96, 0.5);
+
+                        let mut copy_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Copy Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        light_shaft_pipeline.render(&mut copy_pass, &bind_group);
+                    }
+                } else {
+                    // Sun off-screen - just copy offscreen to view
+                    let bind_group = light_shaft_pipeline.create_bind_group(
+                        ctx.device(),
+                        offscreen_view.unwrap(),
+                    );
+                    light_shaft_pipeline.update_uniforms(ctx.queue(), [0.5, 0.5], 0.0, 0.96, 0.5);
+
+                    let mut copy_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Copy Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    light_shaft_pipeline.render(&mut copy_pass, &bind_group);
+                }
+            }
+
+            // 3. Egui Pass
             {
                 let screen_descriptor = egui_wgpu::ScreenDescriptor {
                     size_in_pixels: [ctx.config().width, ctx.config().height],
