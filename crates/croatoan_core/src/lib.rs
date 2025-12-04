@@ -7,7 +7,7 @@ use winit::{
 use std::sync::Arc;
 
 // Re-export winit event types for use in game code
-pub use winit::event::{DeviceEvent, ElementState, KeyEvent};
+pub use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseButton};
 pub use winit::keyboard::{KeyCode, PhysicalKey};
 pub use winit::event::Event as WinitEvent;
 pub use winit::event::WindowEvent as WinitWindowEvent;

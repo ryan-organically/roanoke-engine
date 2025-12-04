@@ -1,6 +1,6 @@
-use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
+use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline};
 use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -45,6 +45,15 @@ enum GameState {
     Menu,
     Loading,
     Playing,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseMenuPage {
+    Main,
+    Settings,
+    Controls,
+    LoadGame,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -60,6 +69,13 @@ struct LoadingProgress {
     chunks_generated: usize,
     chunks_uploaded: usize,
     current_status: String,
+}
+
+// Swing animation state for viewmodel
+struct SwingAnimation {
+    is_swinging: bool,
+    swing_progress: f32,  // 0.0 to 1.0
+    swing_duration: f32,  // Total animation duration in seconds
 }
 
 struct SharedState {
@@ -87,6 +103,16 @@ struct SharedState {
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_texture: Option<egui::TextureHandle>, // For Loading Screen
     weather: WeatherSystem,
+    // Pause Menu
+    pause_menu_page: PauseMenuPage,
+    show_save_popup: bool,
+    // Game Settings
+    mouse_sensitivity: f32,
+    movement_speed: f32,
+    render_distance: f32,
+    master_volume: f32,
+    // Swing Animation
+    swing_animation: SwingAnimation,
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -177,6 +203,19 @@ fn main() {
         background_texture: None,
         loading_texture: None,
         weather: WeatherSystem::new(),
+        // Pause Menu
+        pause_menu_page: PauseMenuPage::Main,
+        show_save_popup: false,
+        // Game Settings (default values)
+        mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
+        movement_speed: 10.0,
+        render_distance: 350.0, // Default 350
+        master_volume: 80.0, // 0-100 scale, 80 = default
+        swing_animation: SwingAnimation {
+            is_swinging: false,
+            swing_progress: 0.0,
+            swing_duration: 0.35, // 350ms swing - fast like Minecraft
+        },
     }));
 
     // ... (Channel setup) ...
@@ -202,6 +241,7 @@ fn main() {
     thread::spawn(move || {
         println!("[GEN] Generation thread started.");
         while let Ok(req) = request_rx.recv() {
+            println!("[GEN] Received request for chunk ({}, {})", req.coord.x, req.coord.z);
             let chunk_world_size = 256.0;
             let chunk_resolution = 64;
             let scale = 4.0;
@@ -210,6 +250,7 @@ fn main() {
             let offset_z = offset_z as i32;
 
             // Generate terrain
+            println!("[GEN] Generating terrain...");
             let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
                 generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
 
@@ -254,6 +295,7 @@ fn main() {
             );
 
             // Send result
+            println!("[GEN] Chunk ({}, {}) generated, sending to main thread...", req.coord.x, req.coord.z);
             if chunk_tx.send((
                 terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                 grass_pos, grass_col, grass_idx,
@@ -266,6 +308,7 @@ fn main() {
                 println!("[GEN] Receiver dropped, stopping thread.");
                 break;
             }
+            println!("[GEN] Chunk ({}, {}) sent successfully!", req.coord.x, req.coord.z);
         }
     });
 
@@ -306,14 +349,36 @@ fn main() {
         if state.game_state == GameState::Playing {
             match event {
                 Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                    // Mouse Look
-                    state.player.yaw += delta.0 as f32 * 0.002;
-                    state.player.pitch -= delta.1 as f32 * 0.002;
+                    // Mouse Look - convert 0-100 scale to actual sensitivity (50 = 0.002)
+                    let sensitivity = state.mouse_sensitivity / 25000.0;
+                    state.player.yaw += delta.0 as f32 * sensitivity;
+                    state.player.pitch -= delta.1 as f32 * sensitivity;
                     state.player.pitch = state.player.pitch.clamp(-1.5, 1.5);
+                }
+                Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
+                    // Left mouse click triggers swing animation
+                    if *button == MouseButton::Left && *button_state == ElementState::Pressed {
+                        if !state.swing_animation.is_swinging {
+                            state.swing_animation.is_swinging = true;
+                            state.swing_animation.swing_progress = 0.0;
+                        }
+                    }
                 }
                 Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } => {
                     if let PhysicalKey::Code(keycode) = key_event.physical_key {
                         state.keys.insert(keycode, key_event.state);
+
+                        // ESC key toggles pause (works in both Playing and Paused states)
+                        if key_event.state == ElementState::Pressed && keycode == KeyCode::Escape {
+                            if state.game_state == GameState::Playing {
+                                state.game_state = GameState::Paused;
+                                state.pause_menu_page = PauseMenuPage::Main;
+                                println!("[PAUSE] Game paused");
+                            } else if state.game_state == GameState::Paused {
+                                state.game_state = GameState::Playing;
+                                println!("[PAUSE] Game resumed");
+                            }
+                        }
 
                         if key_event.state == ElementState::Pressed && state.game_state == GameState::Playing {
                             match keycode {
@@ -631,6 +696,12 @@ fn main() {
             Mutex::new(SkyPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // Viewmodel Pipeline (First-person arms and weapon)
+        static VIEWMODEL_PIPELINE: OnceLock<Mutex<ViewModelPipeline>> = OnceLock::new();
+        let viewmodel_pipeline_mutex = VIEWMODEL_PIPELINE.get_or_init(|| {
+            Mutex::new(ViewModelPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Water System
         static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
         // let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
@@ -662,6 +733,15 @@ fn main() {
             
             // Update Weather
             state.weather.update(delta);
+
+            // Update Swing Animation
+            if state.swing_animation.is_swinging {
+                state.swing_animation.swing_progress += delta / state.swing_animation.swing_duration;
+                if state.swing_animation.swing_progress >= 1.0 {
+                    state.swing_animation.is_swinging = false;
+                    state.swing_animation.swing_progress = 0.0;
+                }
+            }
         }
 
         // Handle Input (Player Controller)
@@ -671,10 +751,21 @@ fn main() {
             if state.keys.get(&KeyCode::KeyS) == Some(&ElementState::Pressed) { input_dir.z -= 1.0; }
             if state.keys.get(&KeyCode::KeyA) == Some(&ElementState::Pressed) { input_dir.x -= 1.0; }
             if state.keys.get(&KeyCode::KeyD) == Some(&ElementState::Pressed) { input_dir.x += 1.0; }
-            // Jump is handled in input callback to avoid continuous jumping if holding space (optional, but better)
+
+            // Sprint with Shift (70% speed boost)
+            let is_sprinting = state.keys.get(&KeyCode::ShiftLeft) == Some(&ElementState::Pressed) ||
+                               state.keys.get(&KeyCode::ShiftRight) == Some(&ElementState::Pressed);
+            let speed_multiplier = if is_sprinting { 1.7 } else { 1.0 };
+
+            // Temporarily increase player speed for sprinting
+            let original_speed = state.player.speed;
+            state.player.speed = original_speed * speed_multiplier;
 
             let seed = state.seed; // Copy seed to avoid borrow error
             state.player.update(delta, input_dir, seed);
+
+            // Restore original speed
+            state.player.speed = original_speed;
 
             // Sync Camera to Player
             state.camera.position = state.player.position;
@@ -713,13 +804,14 @@ fn main() {
 
             // Sync Cursor State with Game State
             match state.game_state {
-                GameState::Menu | GameState::Loading => {
+                GameState::Menu | GameState::Loading | GameState::Paused => {
                     ctx.window.set_cursor_visible(true);
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
                 GameState::Playing => {
-                    ctx.window.set_cursor_visible(true);
-                    let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
+                    // Lock cursor to window and hide it during gameplay
+                    ctx.window.set_cursor_visible(false);
+                    let _ = ctx.window.set_cursor_grab(CursorGrabMode::Confined);
                 }
             }
 
@@ -951,6 +1043,224 @@ fn main() {
                         }
                         ui.label(format!("Camera: {:.1?}", state.camera.position));
                     });
+                }
+                GameState::Paused => {
+                    // Pause Menu - Centered Panel
+                    egui::CentralPanel::default().show(ui_ctx, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(100.0);
+                            ui.heading(egui::RichText::new("PAUSED").size(60.0));
+                            ui.add_space(40.0);
+
+                            match state.pause_menu_page {
+                                PauseMenuPage::Main => {
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Resume")).clicked() {
+                                        state.game_state = GameState::Playing;
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Settings")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Settings;
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Controls")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Controls;
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Save Game")).clicked() {
+                                        state.show_save_popup = true;
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Load Game")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::LoadGame;
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Exit to Main Menu")).clicked() {
+                                        state.game_state = GameState::Menu;
+                                    }
+                                }
+                                PauseMenuPage::Settings => {
+                                    ui.heading("Game Settings");
+                                    ui.add_space(30.0);
+
+                                    // Customize slider style for vertical line handles
+                                    let mut style = (*ui.ctx().style()).clone();
+                                    style.spacing.slider_width = 300.0;
+                                    style.visuals.widgets.inactive.bg_stroke.width = 2.0;
+                                    style.visuals.widgets.active.bg_stroke.width = 2.0;
+                                    ui.ctx().set_style(style);
+
+                                    // Mouse Sensitivity (1-100 scale, minimum 1 so player can always look around)
+                                    ui.label(egui::RichText::new("Mouse Sensitivity:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.mouse_sensitivity, 1.0..=100.0)
+                                            .text("Sensitivity")
+                                            .custom_formatter(|n, _| format!("{:.0}", n)));
+                                    });
+                                    ui.add_space(15.0);
+
+                                    // Movement Speed
+                                    ui.label(egui::RichText::new("Movement Speed:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.movement_speed, 1.0..=30.0)
+                                            .text("Speed")
+                                            .custom_formatter(|n, _| format!("{:.0}", n)));
+                                    });
+                                    ui.add_space(15.0);
+
+                                    // Render Distance (minimum 200 to ensure chunks load)
+                                    ui.label(egui::RichText::new("Render Distance:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.render_distance, 200.0..=500.0)
+                                            .text("Distance")
+                                            .custom_formatter(|n, _| format!("{:.0}", n)));
+                                    });
+                                    ui.add_space(15.0);
+
+                                    // Master Volume (0-100 scale)
+                                    ui.label(egui::RichText::new("Master Volume:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=100.0)
+                                            .text("Volume")
+                                            .custom_formatter(|n, _| format!("{:.0}", n)));
+                                    });
+                                    ui.add_space(30.0);
+
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Main;
+                                        // Apply settings
+                                        state.player.speed = state.movement_speed;
+                                    }
+                                }
+                                PauseMenuPage::Controls => {
+                                    ui.heading("Controls");
+                                    ui.add_space(20.0);
+
+                                    ui.label(egui::RichText::new("Movement:").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.label("W/A/S/D - Move Forward/Left/Back/Right");
+                                    ui.label("Shift - Sprint (70% faster)");
+                                    ui.label("Space - Jump");
+                                    ui.label("Mouse - Look Around");
+                                    ui.add_space(15.0);
+
+                                    ui.label(egui::RichText::new("Game Controls:").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.label("ESC - Pause Menu");
+                                    ui.label("T/Y - Change Time of Day");
+                                    ui.label("U/I/O - Change Weather (Clear/Cloudy/Stormy)");
+                                    ui.add_space(30.0);
+
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Main;
+                                    }
+                                }
+                                PauseMenuPage::LoadGame => {
+                                    ui.heading("Load Game");
+                                    ui.add_space(20.0);
+
+                                    // Get list of saves
+                                    let saves = list_saves();
+
+                                    if saves.is_empty() {
+                                        ui.label(egui::RichText::new("No saved games found").size(18.0).color(egui::Color32::DARK_GRAY));
+                                    } else {
+                                        ui.label(egui::RichText::new("Select a save to load:").size(16.0).color(egui::Color32::BLACK));
+                                        ui.add_space(15.0);
+
+                                        // Display each save as a button
+                                        for save_name in saves {
+                                            if ui.add_sized([250.0, 40.0], egui::Button::new(&save_name)).clicked() {
+                                                // Load the selected save
+                                                if let Some(save_data) = load_game(&save_name) {
+                                                    println!("[LOAD] Loading save: {}", save_name);
+                                                    state.seed = save_data.seed;
+                                                    state.player.position = Vec3::from_array(save_data.player_pos);
+                                                    state.player.yaw = save_data.player_rot[0];
+                                                    state.player.pitch = save_data.player_rot[1];
+                                                    state.inventory = save_data.inventory;
+
+                                                    // Reset camera to match loaded player rotation
+                                                    state.camera.yaw = state.player.yaw;
+                                                    state.camera.pitch = state.player.pitch;
+                                                    state.camera.position = state.player.position + Vec3::new(0.0, 1.6, 0.0);
+
+                                                    // Return to game
+                                                    state.game_state = GameState::Playing;
+                                                    state.pause_menu_page = PauseMenuPage::Main;
+                                                    println!("[LOAD] Save loaded successfully!");
+                                                } else {
+                                                    println!("[LOAD] Failed to load save: {}", save_name);
+                                                }
+                                            }
+                                            ui.add_space(10.0);
+                                        }
+                                    }
+
+                                    ui.add_space(20.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Main;
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                    // Save Game Popup (appears on top of pause menu)
+                    if state.show_save_popup {
+                        egui::Window::new("Save Game")
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                            .show(ui_ctx, |ui| {
+                                ui.set_min_width(300.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(10.0);
+                                    ui.label(egui::RichText::new("Enter save name:").size(16.0));
+                                    ui.add_space(10.0);
+
+                                    ui.add(egui::TextEdit::singleline(&mut state.save_name_input)
+                                        .hint_text("Save name...")
+                                        .desired_width(250.0));
+
+                                    ui.add_space(15.0);
+
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 220.0) / 2.0);
+
+                                        if ui.add_sized([100.0, 35.0], egui::Button::new("Save")).clicked() {
+                                            // Save the current game state with custom name
+                                            let save_name = if state.save_name_input.trim().is_empty() {
+                                                "quicksave"
+                                            } else {
+                                                state.save_name_input.trim()
+                                            };
+
+                                            let save_data = SaveData {
+                                                seed: state.seed,
+                                                player_pos: state.player.position.to_array(),
+                                                player_rot: [state.player.yaw, state.player.pitch],
+                                                inventory: state.inventory.clone(),
+                                            };
+                                            save_game(save_name, &save_data);
+                                            println!("[SAVE] Game saved to {}", save_name);
+                                            state.save_name_input.clear();
+                                            state.show_save_popup = false;
+                                        }
+
+                                        ui.add_space(20.0);
+
+                                        if ui.add_sized([100.0, 35.0], egui::Button::new("Cancel")).clicked() {
+                                            state.show_save_popup = false;
+                                            state.save_name_input.clear();
+                                        }
+                                    });
+
+                                    ui.add_space(10.0);
+                                });
+                            });
+                    }
                 }
             }
         });
@@ -1374,10 +1684,11 @@ fn main() {
                 let mut trees_rendered = 0;
                 let mut buildings_rendered = 0;
 
-                let grass_max_distance = 350.0;
-                let tree_max_distance = 600.0;
-                let detritus_max_distance = 500.0;
-                let building_max_distance = 1000.0; // Buildings visible further
+                // Use render distance setting from pause menu
+                let grass_max_distance = state.render_distance * 0.5;  // Grass at 50% of max
+                let tree_max_distance = state.render_distance;
+                let detritus_max_distance = state.render_distance * 0.75;
+                let building_max_distance = state.render_distance * 1.5; // Buildings visible further
 
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
@@ -1459,7 +1770,46 @@ fn main() {
                 let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, buildings_rendered);
             } // End Main Pass
 
-            // 2. Egui Pass
+            // 3. Viewmodel Pass (First-person arms and weapon) - only in playing mode
+            if state.game_state == GameState::Playing {
+                let viewmodel_pipeline = viewmodel_pipeline_mutex.lock().unwrap();
+
+                // Update viewmodel uniforms with camera rotation and swing animation
+                viewmodel_pipeline.update_uniforms(
+                    ctx.queue(),
+                    state.camera.yaw,
+                    state.camera.pitch,
+                    state.camera.aspect_ratio,
+                    state.swing_animation.swing_progress,
+                );
+
+                // Render viewmodel on top of world but below UI
+                let mut viewmodel_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Viewmodel Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // Load existing pixels (world scene)
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: ctx.depth_view(),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0), // Clear to far plane (1.0) so viewmodel is always closest
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                viewmodel_pipeline.render(&mut viewmodel_pass);
+            } // End Viewmodel Pass
+
+            // 4. Egui Pass
             {
                 let screen_descriptor = egui_wgpu::ScreenDescriptor {
                     size_in_pixels: [ctx.config().width, ctx.config().height],
