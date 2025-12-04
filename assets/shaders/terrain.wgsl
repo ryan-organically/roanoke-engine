@@ -107,18 +107,35 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Dynamic sun color based on sun elevation (y component of light direction)
     // When sun is low (horizon), warm orange. When high, bright white-yellow.
     let sun_elevation = -light_dir.y; // Higher = sun is higher in sky
-    let sun_color = mix(
+
+    // Day factor: 0 = night, 1 = full day
+    let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
+
+    // Night lighting from moon (much dimmer, bluish)
+    let moon_color = vec3<f32>(0.15, 0.18, 0.25);
+
+    // Daytime sun color
+    let day_sun_color = mix(
         vec3<f32>(1.8, 0.6, 0.2),  // Sunrise/sunset: warm orange
         vec3<f32>(1.4, 1.3, 1.1),  // Midday: bright white-yellow
         clamp(sun_elevation * 2.0, 0.0, 1.0)
     );
 
-    // Ambient also shifts - bluer at midday, warmer at sunrise/sunset
-    let ambient_color = mix(
+    // Blend between moon and sun based on day factor
+    let sun_color = mix(moon_color, day_sun_color, day_factor);
+
+    // Night ambient (very dark, slightly blue)
+    let night_ambient = vec3<f32>(0.02, 0.03, 0.05);
+
+    // Daytime ambient - shifts bluer at midday, warmer at sunrise/sunset
+    let day_ambient = mix(
         vec3<f32>(0.15, 0.10, 0.08), // Sunrise: warm ambient
         vec3<f32>(0.12, 0.14, 0.18), // Midday: cool sky ambient
         clamp(sun_elevation * 2.0, 0.0, 1.0)
     );
+
+    // Blend ambient between night and day
+    let ambient_color = mix(night_ambient, day_ambient, day_factor);
 
     // Diffuse lighting - use the direction light is coming FROM (negate light_dir)
     // light_dir points toward scene, so -light_dir points toward light source

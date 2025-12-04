@@ -115,8 +115,8 @@ pub fn generate_detritus_for_chunk(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
     let noise = Perlin::new(seed + 555);
 
-    // Detritus density
-    let detritus_density = 0.002; // Items per square unit
+    // Detritus density - increased for more visible ground clutter
+    let detritus_density = 0.008; // Items per square unit (was 0.002)
     let potential_items = (chunk_size * chunk_size * detritus_density) as u32;
 
     let mut all_positions = Vec::new();
@@ -146,15 +146,17 @@ pub fn generate_detritus_for_chunk(
         // Determine type: Rock or Log
         // Rocks more common in scrub/open areas, Logs in forest
         let type_roll = noise.get([world_x as f64 * 1.3, world_z as f64 * 1.3]) as f32;
-        let is_log = height > 6.0 && type_roll > 0.3; // Logs mostly in forest
+        // Logs appear at forest edge (height > 4.0) and become more common deeper in
+        let log_threshold = if height > 10.0 { -0.2 } else if height > 6.0 { 0.1 } else { 0.4 };
+        let is_log = height > 4.0 && type_roll > log_threshold;
 
         let vertex_offset = all_positions.len() as u32;
 
         if is_log {
-            // Generate a simple log (horizontal cylinder-ish)
-            // 6-sided cylinder on its side
-            let radius = 0.3 + (noise.get([world_x as f64, world_z as f64]) as f32 * 0.1);
-            let length = 2.0 + (noise.get([world_x as f64 + 10.0, world_z as f64]) as f32 * 1.0);
+            // Generate a fallen log (horizontal cylinder)
+            // 6-sided cylinder on its side - made larger and more visible
+            let radius = 0.4 + (noise.get([world_x as f64, world_z as f64]) as f32 * 0.2);
+            let length = 3.0 + (noise.get([world_x as f64 + 10.0, world_z as f64]) as f32 * 2.0);
             let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * 3.14; // Random rotation
 
             let segments = 6;

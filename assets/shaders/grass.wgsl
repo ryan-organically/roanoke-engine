@@ -93,17 +93,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Dynamic sun color matching terrain shader
     let sun_elevation = -light_dir.y;
-    let sun_color = mix(
+
+    // Day factor: 0 = night, 1 = full day
+    let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
+
+    // Night lighting from moon
+    let moon_color = vec3<f32>(0.12, 0.15, 0.2);
+
+    // Daytime sun color
+    let day_sun_color = mix(
         vec3<f32>(1.8, 0.6, 0.2),  // Sunrise/sunset
         vec3<f32>(1.4, 1.3, 1.1),  // Midday
         clamp(sun_elevation * 2.0, 0.0, 1.0)
     );
 
-    let ambient_color = mix(
+    let sun_color = mix(moon_color, day_sun_color, day_factor);
+
+    // Night ambient (very dark)
+    let night_ambient = vec3<f32>(0.02, 0.025, 0.04);
+
+    let day_ambient = mix(
         vec3<f32>(0.15, 0.10, 0.08),
         vec3<f32>(0.12, 0.14, 0.18),
         clamp(sun_elevation * 2.0, 0.0, 1.0)
     );
+
+    let ambient_color = mix(night_ambient, day_ambient, day_factor);
 
     // Diffuse lighting
     let n_dot_l = max(dot(normal, -light_dir), 0.0);

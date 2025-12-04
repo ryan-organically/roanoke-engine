@@ -21,22 +21,35 @@ pub fn load_obj(path: &str) -> Option<TreeTemplate> {
             let mut indices = Vec::new();
             let mut vertex_offset = 0;
 
+            let mut skipped = Vec::new();
+            let mut loaded = Vec::new();
+
             for (i, m) in models.iter().enumerate() {
                 let mesh = &m.mesh;
-                
-                // Check material name
+                let obj_name = m.name.to_lowercase();
+
+                // Only load Bark___0 - the other bark meshes have oversized cardboard leaves
+                // Bark___0 has acceptable leaf geometry that looks good at all scales
+                let is_good_bark = obj_name == "bark___0";
+
+                if !is_good_bark {
+                    skipped.push(format!("{} ({} faces)", m.name, mesh.indices.len() / 3));
+                    continue;
+                }
+
+                // Double-check material name matches bark
                 if let Some(mat_id) = mesh.material_id {
                     if mat_id < materials.len() {
                         let mat_name = &materials[mat_id].name.to_lowercase();
-                        if mat_name.contains("leaf") || mat_name.contains("leaves") || mat_name.contains("frond") 
-                           || mat_name.contains("oak_leav") || mat_name.contains("sonnerat") || mat_name.contains("walnut_l") {
-                            println!("[ASSET] Skipping leaf mesh {}: {}", i, mat_name);
+                        // Skip if material suggests leaves/foliage
+                        if mat_name.contains("leaf") || mat_name.contains("leaves") || mat_name.contains("frond") {
+                            skipped.push(format!("{} [mat:{}] ({} faces)", m.name, mat_name, mesh.indices.len() / 3));
                             continue;
                         }
                     }
                 }
 
-                println!("[ASSET] Mesh {}: {} vertices, {} indices", i, mesh.positions.len() / 3, mesh.indices.len());
+                loaded.push(format!("{} ({} faces)", m.name, mesh.indices.len() / 3));
 
                 // Positions
                 for i in 0..mesh.positions.len() / 3 {
@@ -84,6 +97,17 @@ pub fn load_obj(path: &str) -> Option<TreeTemplate> {
                 }
 
                 vertex_offset += (mesh.positions.len() / 3) as u32;
+            }
+
+            // Print summary
+            println!("[ASSET] === TREE MESH SUMMARY ===");
+            println!("[ASSET] SKIPPED (leaves): {:?}", skipped);
+            println!("[ASSET] LOADED (bark): {:?}", loaded);
+            println!("[ASSET] Total: {} verts, {} tris", positions.len(), indices.len() / 3);
+
+            if positions.is_empty() {
+                println!("[ASSET] WARNING: No mesh data loaded!");
+                return None;
             }
 
             Some(TreeTemplate {

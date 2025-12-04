@@ -41,19 +41,19 @@ impl WeatherSystem {
             transition_timer: 0.0,
             transition_duration: 10.0,
             time_since_last_change: 0.0,
-            
-            cloud_coverage: 0.5,
-            cloud_density: 0.5,
-            cloud_scale: 1.0,
-            cloud_color_base: Vec3::new(0.8, 0.4, 0.3), // Burnt Sienna
-            cloud_color_shade: Vec3::new(0.9, 0.6, 0.6), // Pinkish
+
+            cloud_coverage: 0.45,
+            cloud_density: 0.55,
+            cloud_scale: 1.2,
+            cloud_color_base: Vec3::new(0.92, 0.90, 0.88), // Warm cream
+            cloud_color_shade: Vec3::new(0.78, 0.75, 0.82), // Soft lavender gray
             wind_offset: [0.0, 0.0],
-            
-            target_coverage: 0.5,
-            target_density: 0.5,
-            target_scale: 1.0,
-            target_color_base: Vec3::new(0.8, 0.4, 0.3),
-            target_color_shade: Vec3::new(0.9, 0.6, 0.6),
+
+            target_coverage: 0.45,
+            target_density: 0.55,
+            target_scale: 1.2,
+            target_color_base: Vec3::new(0.92, 0.90, 0.88),
+            target_color_shade: Vec3::new(0.78, 0.75, 0.82),
         };
         system.set_weather(WeatherType::PartlyCloudy, true);
         system
@@ -61,7 +61,7 @@ impl WeatherSystem {
 
     pub fn update(&mut self, dt: f32) {
         self.time_since_last_change += dt;
-        self.wind_offset[0] += dt * 0.01; // Constant wind for now
+        self.wind_offset[0] += dt * 0.002; // Very slow wind drift
         
         // Random weather change every 60-120 seconds
         if self.time_since_last_change > 60.0 {
@@ -115,40 +115,40 @@ impl WeatherSystem {
 
         match weather {
             WeatherType::Clear => {
-                self.target_coverage = 0.0;
-                self.target_density = 0.0;
-                self.target_scale = 1.0;
-                self.target_color_base = Vec3::new(0.9, 0.9, 0.9); // White
-                self.target_color_shade = Vec3::new(0.9, 0.9, 0.9);
+                self.target_coverage = 0.15;
+                self.target_density = 0.3;
+                self.target_scale = 1.5;
+                self.target_color_base = Vec3::new(0.95, 0.95, 0.97); // Soft white
+                self.target_color_shade = Vec3::new(0.85, 0.87, 0.92); // Light blue-gray
             }
             WeatherType::PartlyCloudy => {
-                self.target_coverage = 0.4;
-                self.target_density = 0.6;
+                self.target_coverage = 0.45;
+                self.target_density = 0.55;
                 self.target_scale = 1.2;
-                // Burnt Sienna & Pink
-                self.target_color_base = Vec3::new(0.91, 0.45, 0.32); // Burnt Sienna
-                self.target_color_shade = Vec3::new(1.0, 0.75, 0.8); // Pink
+                // Soft cream and lavender
+                self.target_color_base = Vec3::new(0.92, 0.90, 0.88); // Warm cream
+                self.target_color_shade = Vec3::new(0.78, 0.75, 0.82); // Soft lavender gray
             }
             WeatherType::Overcast => {
-                self.target_coverage = 0.9;
-                self.target_density = 0.8;
-                self.target_scale = 0.8;
-                self.target_color_base = Vec3::new(0.6, 0.5, 0.5); // Greyish Pink
-                self.target_color_shade = Vec3::new(0.5, 0.4, 0.4); // Darker
+                self.target_coverage = 0.85;
+                self.target_density = 0.7;
+                self.target_scale = 0.9;
+                self.target_color_base = Vec3::new(0.7, 0.7, 0.72); // Cool gray
+                self.target_color_shade = Vec3::new(0.55, 0.55, 0.58); // Darker gray
             }
             WeatherType::Stormy => {
-                self.target_coverage = 1.0;
-                self.target_density = 1.0;
-                self.target_scale = 0.6;
-                self.target_color_base = Vec3::new(0.2, 0.15, 0.15); // Dark Storm
-                self.target_color_shade = Vec3::new(0.3, 0.1, 0.1); // Deep Red/Brown
+                self.target_coverage = 0.95;
+                self.target_density = 0.9;
+                self.target_scale = 0.7;
+                self.target_color_base = Vec3::new(0.35, 0.35, 0.4); // Dark blue-gray
+                self.target_color_shade = Vec3::new(0.2, 0.2, 0.25); // Deep slate
             }
             WeatherType::Foggy => {
-                self.target_coverage = 0.3;
-                self.target_density = 0.2;
-                self.target_scale = 2.0;
-                self.target_color_base = Vec3::new(0.8, 0.8, 0.85); // Foggy White
-                self.target_color_shade = Vec3::new(0.8, 0.7, 0.7); // Slight pink tint
+                self.target_coverage = 0.4;
+                self.target_density = 0.25;
+                self.target_scale = 2.5;
+                self.target_color_base = Vec3::new(0.88, 0.88, 0.9); // Pale gray
+                self.target_color_shade = Vec3::new(0.82, 0.82, 0.86); // Misty
             }
         }
         

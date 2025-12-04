@@ -5,6 +5,7 @@ use glam::{Mat4, Vec3};
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SkyUniforms {
     view_proj: [f32; 16],
+    inv_view_proj: [f32; 16],
     sun_dir: [f32; 3],
     time: f32,
     sun_color: [f32; 3],
@@ -31,6 +32,7 @@ impl SkyPipeline {
             label: Some("Sky Uniform Buffer"),
             contents: bytemuck::cast_slice(&[SkyUniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array(),
+                inv_view_proj: Mat4::IDENTITY.to_cols_array(),
                 sun_dir: [0.0, 1.0, 0.0],
                 time: 0.0,
                 sun_color: [1.0, 1.0, 1.0],
@@ -126,8 +128,10 @@ impl SkyPipeline {
         cloud_scale: f32,
         wind_offset: [f32; 2],
     ) {
+        let inv_view_proj = view_proj.inverse();
         let uniforms = SkyUniforms {
             view_proj: view_proj.to_cols_array(),
+            inv_view_proj: inv_view_proj.to_cols_array(),
             sun_dir: sun_dir.to_array(),
             time,
             sun_color: sun_color.to_array(),

@@ -1,5 +1,6 @@
 struct Uniforms {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
     sun_dir: vec3<f32>,
     time: f32,
     sun_color: vec3<f32>,
@@ -16,8 +17,7 @@ struct Uniforms {
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_pos: vec3<f32>,
-    @location(1) uv: vec2<f32>,
+    @location(0) ndc_pos: vec2<f32>,
 }
 
 @vertex
@@ -28,11 +28,10 @@ fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
         vec2<f32>(-1.0, 3.0)
     );
     let pos = positions[in_vertex_index];
-    
+
     var output: VertexOutput;
     output.clip_position = vec4<f32>(pos, 1.0, 1.0);
-    output.world_pos = vec3<f32>(pos.x, pos.y, 1.0);
-    output.uv = pos * 0.5 + 0.5; // 0..1 range
+    output.ndc_pos = pos;
     return output;
 }
 
@@ -72,69 +71,88 @@ fn fbm(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Sky Gradient
-    let top_color = vec3<f32>(0.2, 0.4, 0.8);
-    let horizon_color = vec3<f32>(0.6, 0.7, 0.9);
-    let y = input.world_pos.y * 0.5 + 0.5;
-    var sky_color = mix(horizon_color, top_color, pow(y, 0.5));
-    
-    // Cloud Rendering
-    // Project UVs to "sky plane"
-    // We want clouds to look like they are on a plane above.
-    // Simple approximation: Use UVs + time
-    
-    let cloud_speed = 0.05;
-    let time_offset = uniforms.time * cloud_speed;
-    let wind = uniforms.wind_offset + vec2<f32>(time_offset, time_offset * 0.5);
-    
-    // Scale UVs for cloud texture
-    let uv_scaled = (input.world_pos.xy * 2.0) * uniforms.cloud_scale + wind;
-    
-    // Generate Noise
-    var n = fbm(uv_scaled);
-    
-    // Shape clouds
-    // Remap noise from [-1, 1] to [0, 1]
-    n = n * 0.5 + 0.5;
-    
-    // Apply coverage threshold
-    // coverage 0.0 = no clouds, 1.0 = full clouds
-    // We want to discard low noise values based on coverage
-    // If coverage is high, we keep more low values.
-    // Let's say threshold = 1.0 - coverage
-    let threshold = 1.0 - uniforms.cloud_coverage;
-    
-    // Soft threshold
-    let cloud_alpha = smoothstep(threshold - 0.1, threshold + 0.1, n);
-    
-    // Density
-    let density = cloud_alpha * uniforms.cloud_density;
-    
-    if (density > 0.01) {
-        // Cloud Color Gradient
-        // Mix between base (Burnt Sienna) and shade (Pink) based on noise "thickness"
-        // Thicker parts (higher n) might be lighter or darker depending on style.
-        // Let's make thicker parts the "shade" color (maybe darker pink/purple)
-        // and edges the "base" color (burnt sienna).
-        
-        let color_mix = smoothstep(threshold, threshold + 0.4, n);
-        let cloud_rgb = mix(uniforms.cloud_color_base, uniforms.cloud_color_shade, color_mix);
-        
-        // Lighting/Shading fake
-        // Add a bit of white highlight on "top" (based on sun dir? or just noise derivative?)
-        // Simple: lighter color for very high density
-        let highlight = smoothstep(0.8, 1.0, n);
-        let final_cloud_color = mix(cloud_rgb, vec3<f32>(1.0, 0.9, 0.9), highlight * 0.5);
-        
-        // Blend with sky
-        sky_color = mix(sky_color, final_cloud_color, density);
+    // Reconstruct world-space ray direction from NDC
+    let ndc = vec4<f32>(input.ndc_pos, 1.0, 1.0);
+    let world_pos = uniforms.inv_view_proj * ndc;
+    let ray_dir = normalize(world_pos.xyz / world_pos.w);
+
+    // Sun elevation determines day/night (-1 = below horizon, 1 = zenith)
+    let sun_elevation = -uniforms.sun_dir.y; // sun_dir points FROM sun, so negate
+
+    // Day/Night sky colors
+    let day_top = vec3<f32>(0.2, 0.4, 0.8);
+    let day_horizon = vec3<f32>(0.6, 0.7, 0.9);
+    let night_top = vec3<f32>(0.02, 0.02, 0.06);
+    let night_horizon = vec3<f32>(0.05, 0.05, 0.1);
+    let sunset_horizon = vec3<f32>(0.9, 0.4, 0.2);
+
+    // Calculate day factor (0 = night, 1 = day)
+    let day_factor = smoothstep(-0.2, 0.3, sun_elevation);
+
+    // Sunset factor (peaks when sun is at horizon)
+    let sunset_factor = smoothstep(-0.3, 0.0, sun_elevation) * smoothstep(0.3, 0.0, sun_elevation);
+
+    // Interpolate top and horizon colors
+    var top_color = mix(night_top, day_top, day_factor);
+    var horizon_color = mix(night_horizon, day_horizon, day_factor);
+
+    // Add sunset glow to horizon
+    horizon_color = mix(horizon_color, sunset_horizon, sunset_factor * 0.7);
+
+    // Sky gradient based on ray direction
+    let y = ray_dir.y * 0.5 + 0.5; // -1..1 to 0..1
+    var sky_color = mix(horizon_color, top_color, pow(clamp(y, 0.0, 1.0), 0.5));
+
+    // Stars at night
+    if (day_factor < 0.5 && ray_dir.y > 0.0) {
+        let star_pos = ray_dir.xz / (ray_dir.y + 0.001) * 100.0;
+        let star_hash = hash(floor(star_pos * 50.0));
+        let star_brightness = step(0.97, star_hash) * (1.0 - day_factor * 2.0);
+        let twinkle = sin(uniforms.time * 2.0 + star_hash * 100.0) * 0.3 + 0.7;
+        sky_color += vec3<f32>(star_brightness * twinkle);
     }
-    
-    // Sun Glow (Simple)
-    // We don't have exact view ray here easily for a quad, but we can approximate.
-    // Or just rely on the SunPipeline for the actual sun disk.
-    // Let's add a subtle glow if looking up?
-    // Nah, let's keep it clean.
-    
+
+    // Cloud Rendering - project ray onto sky dome
+    let cloud_height = 500.0;
+
+    // Only render clouds when looking up (ray_dir.y > 0)
+    if (ray_dir.y > 0.01) {
+        let t = cloud_height / ray_dir.y;
+        let cloud_pos = ray_dir.xz * t;
+
+        let cloud_speed = 0.008;
+        let time_offset = uniforms.time * cloud_speed;
+        let wind = uniforms.wind_offset * 20.0 + vec2<f32>(time_offset, time_offset * 0.3);
+
+        let uv_scaled = cloud_pos * 0.002 * uniforms.cloud_scale + wind;
+
+        var n = fbm(uv_scaled);
+        n = n * 0.5 + 0.5;
+
+        let threshold = 1.0 - uniforms.cloud_coverage;
+        let cloud_alpha = smoothstep(threshold - 0.1, threshold + 0.1, n);
+
+        let horizon_fade = smoothstep(0.01, 0.15, ray_dir.y);
+
+        // Fade clouds at night (but don't completely hide them - moonlit clouds)
+        let night_cloud_fade = mix(0.15, 1.0, day_factor);
+        let density = cloud_alpha * uniforms.cloud_density * horizon_fade * night_cloud_fade;
+
+        if (density > 0.01) {
+            let color_mix = smoothstep(threshold, threshold + 0.4, n);
+            var cloud_rgb = mix(uniforms.cloud_color_base, uniforms.cloud_color_shade, color_mix);
+
+            // Darken clouds at night
+            let night_cloud_color = cloud_rgb * 0.15; // Very dark at night
+            cloud_rgb = mix(night_cloud_color, cloud_rgb, day_factor);
+
+            let highlight = smoothstep(0.8, 1.0, n);
+            let highlight_color = mix(vec3<f32>(0.2, 0.2, 0.3), vec3<f32>(1.0, 0.9, 0.9), day_factor);
+            let final_cloud_color = mix(cloud_rgb, highlight_color, highlight * 0.5);
+
+            sky_color = mix(sky_color, final_cloud_color, density);
+        }
+    }
+
     return vec4<f32>(sky_color, 1.0);
 }
