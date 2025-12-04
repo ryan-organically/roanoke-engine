@@ -30,11 +30,14 @@ use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 mod water_system;
 mod atmosphere;
+mod audio_system;
+mod procedural_synth;
 
 use water_system::WaterSystem;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
 use atmosphere::AtmosphereEngine;
+use audio_system::{AudioSystem, MusicState};
 
 // ... (Existing structs remain same) ...
 
@@ -295,6 +298,8 @@ struct SharedState {
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_slideshow: LoadingSlideshow, // For Loading Screen
     weather: WeatherSystem,
+    // Audio System
+    audio_system: AudioSystem,
     // Pause Menu
     pause_menu_page: PauseMenuPage,
     show_save_popup: bool,
@@ -431,6 +436,8 @@ fn main() {
         background_texture: None,
         loading_slideshow: LoadingSlideshow::new(),
         weather: WeatherSystem::new(),
+        // Audio System
+        audio_system: AudioSystem::new(),
         // Pause Menu
         pause_menu_page: PauseMenuPage::Main,
         show_save_popup: false,
@@ -633,6 +640,9 @@ fn main() {
                                 KeyCode::KeyO => {
                                     state.weather.set_weather(WeatherType::Stormy, false);
                                     println!("[WEATHER] Set to Stormy");
+                                }
+                                KeyCode::KeyM => {
+                                    state.audio_system.toggle_enabled();
                                 }
                                 _ => {}
                             }
@@ -1016,6 +1026,20 @@ fn main() {
             
             // Update Weather
             state.weather.update(delta);
+
+            // Update Audio System (responds to weather, time, game state)
+            let time_normalized = state.time_of_day / 24.0; // Normalize to 0.0-1.0
+            let current_weather = state.weather.current_weather;
+            state.audio_system.update(delta, current_weather, time_normalized);
+
+            // Sync audio music state with game state
+            let audio_music_state = match state.game_state {
+                GameState::Menu => MusicState::MainMenu,
+                GameState::Loading => MusicState::MainMenu,
+                GameState::Playing => MusicState::Exploration,
+                GameState::Paused => MusicState::Peaceful,
+            };
+            state.audio_system.set_music_state(audio_music_state);
 
             // Update Swing Animation
             if state.swing_animation.is_swinging {
@@ -1528,6 +1552,10 @@ fn main() {
                                     });
                                     ui.add_space(15.0);
 
+                                    // Audio Settings Header
+                                    ui.label(egui::RichText::new("Audio").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.add_space(10.0);
+
                                     // Master Volume (0-100 scale)
                                     ui.label(egui::RichText::new("Master Volume:").color(egui::Color32::BLACK));
                                     ui.horizontal(|ui| {
@@ -1536,12 +1564,43 @@ fn main() {
                                             .text("Volume")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
+                                    // Sync with audio system (copy value first to avoid borrow conflict)
+                                    let master_vol = state.master_volume / 100.0;
+                                    state.audio_system.set_master_volume(master_vol);
+                                    ui.add_space(15.0);
+
+                                    // Music Volume
+                                    let mut music_vol = state.audio_system.music_volume * 100.0;
+                                    ui.label(egui::RichText::new("Music Volume:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.add(egui::Slider::new(&mut music_vol, 0.0..=100.0)
+                                            .text("Music")
+                                            .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                                            state.audio_system.set_music_volume(music_vol / 100.0);
+                                        }
+                                    });
+                                    ui.add_space(15.0);
+
+                                    // Ambience Volume
+                                    let mut amb_vol = state.audio_system.ambience_volume * 100.0;
+                                    ui.label(egui::RichText::new("Ambience Volume:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.add(egui::Slider::new(&mut amb_vol, 0.0..=100.0)
+                                            .text("Ambience")
+                                            .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                                            state.audio_system.set_ambience_volume(amb_vol / 100.0);
+                                        }
+                                    });
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
                                         state.pause_menu_page = PauseMenuPage::Main;
                                         // Apply settings
                                         state.player.speed = state.movement_speed;
+                                        let vol = state.master_volume / 100.0;
+                                        state.audio_system.set_master_volume(vol);
                                     }
                                 }
                                 PauseMenuPage::Controls => {
@@ -1559,6 +1618,7 @@ fn main() {
                                     ui.label("ESC - Pause Menu");
                                     ui.label("T/Y - Change Time of Day");
                                     ui.label("U/I/O - Change Weather (Clear/Cloudy/Stormy)");
+                                    ui.label("M - Toggle Audio On/Off");
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {

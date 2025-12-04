@@ -25,7 +25,21 @@
       "Bash(RUST_BACKTRACE=1 cargo run:*)",
       "Bash(git -C \"/mnt/c/dev/roanoke engine\" pull origin master)",
       "Bash(git -C \"/mnt/c/dev/roanoke engine\" stash show:*)",
-      "Bash(git -C \"/mnt/c/dev/roanoke engine\" stash drop:*)"
+      "Bash(git -C \"/mnt/c/dev/roanoke engine\" stash drop:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(sudo apt-get update:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(pkg-config:*)",
+      "Bash(dpkg:*)",
+      "Bash(rustfmt:*)",
+      "Bash(pactl info:*)",
+      "Bash(export PULSE_SERVER=unix:/mnt/wslg/PulseServer)",
+      "Bash(timeout 15 cargo run:*)",
+      "Bash(timeout 5:*)",
+      "Bash(./target/release/roanoke_game)",
+      "Bash(export WAYLAND_DISPLAY=\"\")",
+      "Bash(timeout 10:*)"
     ],
     "deny": [],
     "ask": []
