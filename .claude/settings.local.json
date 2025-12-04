@@ -22,7 +22,10 @@
       "Bash(timeout 120 cargo build:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(RUST_BACKTRACE=1 cargo run:*)"
+      "Bash(RUST_BACKTRACE=1 cargo run:*)",
+      "Bash(git -C \"/mnt/c/dev/roanoke engine\" pull origin master)",
+      "Bash(git -C \"/mnt/c/dev/roanoke engine\" stash show:*)",
+      "Bash(git -C \"/mnt/c/dev/roanoke engine\" stash drop:*)"
     ],
     "deny": [],
     "ask": []

@@ -73,6 +73,196 @@ struct LoadingProgress {
     current_status: String,
 }
 
+/// Slideshow state for loading screen with Ken Burns panning effect
+struct LoadingSlideshow {
+    textures: Vec<egui::TextureHandle>,
+    image_sizes: Vec<[usize; 2]>,  // Original image dimensions
+    current_index: usize,
+    next_index: usize,
+    pan_time: f32,           // Time into current pan (0.0 - PAN_DURATION)
+    transition_time: f32,    // Time into crossfade (0.0 - TRANSITION_DURATION, negative = not transitioning)
+    pan_directions: Vec<(f32, f32)>,  // Random pan direction per image (dx, dy normalized)
+    start_time: Instant,
+}
+
+impl LoadingSlideshow {
+    const PAN_DURATION: f32 = 25.0;     // Seconds per image - nice and slow
+    const TRANSITION_DURATION: f32 = 2.0; // Crossfade duration
+    const ZOOM_SCALE: f32 = 1.2;        // How much to zoom in (for pan headroom)
+    const PAN_AMOUNT: f32 = 0.08;       // How far to pan (as fraction of image) - gentle drift
+
+    fn new() -> Self {
+        Self {
+            textures: Vec::new(),
+            image_sizes: Vec::new(),
+            current_index: 0,
+            next_index: 1,
+            pan_time: 0.0,
+            transition_time: -1.0,
+            pan_directions: Vec::new(),
+            start_time: Instant::now(),
+        }
+    }
+
+    fn load_images(&mut self, ctx: &egui::Context) {
+        let loading_dir = "assets/ui/loading";
+        if let Ok(entries) = std::fs::read_dir(loading_dir) {
+            let mut image_paths: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let path = e.path();
+                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png")
+                })
+                .map(|e| e.path())
+                .collect();
+
+            // Sort for consistent ordering
+            image_paths.sort();
+
+            for (i, path) in image_paths.iter().enumerate() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(image) = image::load_from_memory(&bytes) {
+                        let size = [image.width() as usize, image.height() as usize];
+                        let image_buffer = image.to_rgba8();
+                        let pixels = image_buffer.as_flat_samples();
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            pixels.as_slice(),
+                        );
+                        let texture = ctx.load_texture(
+                            format!("loading_slide_{}", i),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.textures.push(texture);
+                        self.image_sizes.push(size);
+
+                        // Random pan direction for this image
+                        let angle = (i as f32 * 2.37) % std::f32::consts::TAU; // Pseudo-random angle
+                        self.pan_directions.push((angle.cos(), angle.sin()));
+
+                        println!("[UI] Loaded slideshow image: {:?}", path.file_name().unwrap_or_default());
+                    }
+                }
+            }
+
+            if !self.textures.is_empty() {
+                self.next_index = if self.textures.len() > 1 { 1 } else { 0 };
+                println!("[UI] Loaded {} slideshow images", self.textures.len());
+            }
+        }
+    }
+
+    fn update(&mut self, dt: f32) {
+        if self.textures.is_empty() {
+            return;
+        }
+
+        self.pan_time += dt;
+
+        // Start transition near end of pan
+        if self.pan_time > Self::PAN_DURATION - Self::TRANSITION_DURATION && self.transition_time < 0.0 {
+            self.transition_time = 0.0;
+        }
+
+        // Update transition
+        if self.transition_time >= 0.0 {
+            self.transition_time += dt;
+
+            // Transition complete - switch to next image
+            if self.transition_time >= Self::TRANSITION_DURATION {
+                self.current_index = self.next_index;
+                self.next_index = (self.next_index + 1) % self.textures.len();
+                self.pan_time = 0.0;
+                self.transition_time = -1.0;
+            }
+        }
+    }
+
+    fn calculate_uv(&self, index: usize, pan_progress: f32, screen_aspect: f32) -> egui::Rect {
+        if index >= self.image_sizes.len() {
+            return egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        }
+
+        let [img_w, img_h] = self.image_sizes[index];
+        let img_aspect = img_w as f32 / img_h as f32;
+
+        // Calculate base UV to fill screen (cover mode)
+        let (mut u_size, mut v_size) = if screen_aspect > img_aspect {
+            // Screen is wider - fit width, crop height
+            (1.0, img_aspect / screen_aspect)
+        } else {
+            // Screen is taller - fit height, crop width
+            (screen_aspect / img_aspect, 1.0)
+        };
+
+        // Apply zoom for pan headroom
+        u_size /= Self::ZOOM_SCALE;
+        v_size /= Self::ZOOM_SCALE;
+
+        // Get pan direction for this image
+        let (dx, dy) = self.pan_directions.get(index).copied().unwrap_or((1.0, 0.0));
+
+        // Calculate pan offset (ease in-out)
+        let t = pan_progress.clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t); // Smoothstep
+        let pan_offset = (eased - 0.5) * Self::PAN_AMOUNT;
+
+        // Center the UV with pan offset
+        let u_center = 0.5 + dx * pan_offset;
+        let v_center = 0.5 + dy * pan_offset;
+
+        let u_min = (u_center - u_size / 2.0).clamp(0.0, 1.0 - u_size);
+        let v_min = (v_center - v_size / 2.0).clamp(0.0, 1.0 - v_size);
+
+        egui::Rect::from_min_max(
+            egui::pos2(u_min, v_min),
+            egui::pos2(u_min + u_size, v_min + v_size),
+        )
+    }
+
+    fn render(&self, ui: &mut egui::Ui) {
+        if self.textures.is_empty() {
+            return;
+        }
+
+        let screen_rect = ui.ctx().screen_rect();
+        let screen_aspect = screen_rect.width() / screen_rect.height();
+        let pan_progress = self.pan_time / Self::PAN_DURATION;
+
+        // Draw current image
+        let current_uv = self.calculate_uv(self.current_index, pan_progress, screen_aspect);
+        let current_alpha = if self.transition_time >= 0.0 {
+            let t = (self.transition_time / Self::TRANSITION_DURATION).clamp(0.0, 1.0);
+            ((1.0 - t) * 255.0) as u8
+        } else {
+            255
+        };
+
+        ui.painter().image(
+            self.textures[self.current_index].id(),
+            screen_rect,
+            current_uv,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, current_alpha),
+        );
+
+        // Draw next image (fading in) during transition
+        if self.transition_time >= 0.0 && self.textures.len() > 1 {
+            let next_pan_progress = self.transition_time / Self::PAN_DURATION; // Start fresh pan
+            let next_uv = self.calculate_uv(self.next_index, next_pan_progress, screen_aspect);
+            let next_alpha = ((self.transition_time / Self::TRANSITION_DURATION).clamp(0.0, 1.0) * 255.0) as u8;
+
+            ui.painter().image(
+                self.textures[self.next_index].id(),
+                screen_rect,
+                next_uv,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, next_alpha),
+            );
+        }
+    }
+}
+
 // Swing animation state for viewmodel
 struct SwingAnimation {
     is_swinging: bool,
@@ -103,7 +293,7 @@ struct SharedState {
     mesh_registry: std::collections::HashMap<String, TreeMesh>, // For Trees/Rocks
     building_registry: std::collections::HashMap<String, Arc<BuildingMesh>>, // For Buildings
     background_texture: Option<egui::TextureHandle>, // For Home Screen
-    loading_texture: Option<egui::TextureHandle>, // For Loading Screen
+    loading_slideshow: LoadingSlideshow, // For Loading Screen
     weather: WeatherSystem,
     // Pause Menu
     pause_menu_page: PauseMenuPage,
@@ -239,7 +429,7 @@ fn main() {
         mesh_registry: std::collections::HashMap::new(),
         building_registry: std::collections::HashMap::new(),
         background_texture: None,
-        loading_texture: None,
+        loading_slideshow: LoadingSlideshow::new(),
         weather: WeatherSystem::new(),
         // Pause Menu
         pause_menu_page: PauseMenuPage::Main,
@@ -921,44 +1111,35 @@ fn main() {
 
             match state.game_state {
                 GameState::Loading => {
-                    egui::CentralPanel::default().show(ui_ctx, |ui| {
-                        // Load loading texture if not loaded
-                        if state.loading_texture.is_none() {
-                            let path = "assets/ui/loading/loading.png";
-                            if let Ok(bytes) = std::fs::read(path) {
-                                if let Ok(image) = image::load_from_memory(&bytes) {
-                                    let size = [image.width() as usize, image.height() as usize];
-                                    let image_buffer = image.to_rgba8();
-                                    let pixels = image_buffer.as_flat_samples();
-                                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                        size,
-                                        pixels.as_slice(),
-                                    );
-                                    state.loading_texture = Some(ui.ctx().load_texture(
-                                        "loading_background",
-                                        color_image,
-                                        egui::TextureOptions::LINEAR,
-                                    ));
-                                    println!("[UI] Loaded loading image from {}", path);
-                                }
-                            }
+                    // Use transparent frame for loading screen
+                    let frame = egui::Frame::none();
+                    egui::CentralPanel::default().frame(frame).show(ui_ctx, |ui| {
+                        // Load slideshow images if not loaded
+                        if state.loading_slideshow.textures.is_empty() {
+                            state.loading_slideshow.load_images(ui.ctx());
                         }
 
-                        // Draw Loading Background
-                        if let Some(texture) = &state.loading_texture {
-                            let screen_rect = ui.ctx().screen_rect();
-                            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                            ui.painter().image(
-                                texture.id(),
-                                screen_rect,
-                                uv,
-                                egui::Color32::WHITE,
-                            );
-                        }
+                        // Update slideshow animation
+                        let dt = 1.0 / 60.0; // Approximate dt for UI updates
+                        state.loading_slideshow.update(dt);
+
+                        // Draw slideshow background with Ken Burns effect
+                        state.loading_slideshow.render(ui);
+
+                        // Request continuous repaints for smooth animation
+                        ui.ctx().request_repaint();
+
+                        // Semi-transparent overlay for readability
+                        let screen_rect = ui.ctx().screen_rect();
+                        ui.painter().rect_filled(
+                            screen_rect,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+                        );
 
                         ui.vertical_centered(|ui| {
                             ui.add_space(150.0);
-                            ui.heading(egui::RichText::new("Loading World").size(40.0).color(egui::Color32::BLACK));
+                            ui.heading(egui::RichText::new("Loading World").size(40.0).color(egui::Color32::WHITE));
                             ui.add_space(30.0);
 
                             // Progress Bar
@@ -977,7 +1158,7 @@ fn main() {
                             // Detailed Status
                             ui.label(egui::RichText::new(&state.loading_progress.current_status)
                                 .size(16.0)
-                                .color(egui::Color32::DARK_GRAY));
+                                .color(egui::Color32::LIGHT_GRAY));
 
                             ui.add_space(10.0);
 
@@ -986,7 +1167,7 @@ fn main() {
                                 "Generated: {} | Uploaded: {}",
                                 state.loading_progress.chunks_generated,
                                 state.loading_progress.chunks_uploaded
-                            )).color(egui::Color32::DARK_GRAY));
+                            )).color(egui::Color32::LIGHT_GRAY));
                         });
                     });
                 }
