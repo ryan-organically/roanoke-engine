@@ -25,14 +25,20 @@ pub fn generate_vegetation_for_chunk(
     let mut all_colors = Vec::new();
     let mut all_indices = Vec::new();
 
+    // Small margin to prevent grass at chunk edges (prevents edge density artifacts)
+    let edge_margin = 2.0;
+    let usable_size = chunk_size - edge_margin * 2.0;
+
     for i in 0..blade_count {
         // Pseudo-random position within chunk using 2D noise
-        // Use different prime multipliers to ensure good distribution
-        let rand_x = noise.get([i as f64 * 0.7341, i as f64 * 0.9127]) as f32;
-        let rand_z = noise.get([i as f64 * 0.5813, i as f64 * 0.6719]) as f32;
+        // Include chunk offset in noise to get unique positions per chunk
+        let chunk_seed = (offset_x * 1000.0 + offset_z) as f64;
+        let rand_x = noise.get([i as f64 * 0.7341 + chunk_seed, i as f64 * 0.9127]) as f32;
+        let rand_z = noise.get([i as f64 * 0.5813, i as f64 * 0.6719 + chunk_seed]) as f32;
 
-        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
-        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+        // Keep grass away from chunk edges with margin
+        let local_x = edge_margin + (rand_x + 1.0) * 0.5 * usable_size;
+        let local_z = edge_margin + (rand_z + 1.0) * 0.5 * usable_size;
 
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;

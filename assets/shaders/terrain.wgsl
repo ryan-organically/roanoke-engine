@@ -176,6 +176,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Apply lighting to surface color
     var final_color = input.color * lighting;
 
+    // Water: Override color with proper ocean blue (vertex colors can be wrong at boundaries)
+    if (is_water) {
+        // Depth-based water color: deeper = darker teal, shallow = lighter cyan
+        let water_depth = clamp(-input.world_pos.y / 5.0, 0.0, 1.0);
+        let deep_color = vec3<f32>(0.02, 0.15, 0.25);   // Deep ocean - dark teal
+        let shallow_color = vec3<f32>(0.1, 0.4, 0.5);   // Shallow - lighter cyan
+        let water_base = mix(shallow_color, deep_color, water_depth);
+        final_color = water_base * lighting;
+    }
+
     // Water Specular Highlight (Sun Sparkle)
     if (is_water) {
         let reflect_dir = reflect(-light_dir, normal);

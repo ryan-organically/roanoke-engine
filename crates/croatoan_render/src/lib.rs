@@ -88,12 +88,25 @@ impl GraphicsContext {
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // Choose best available present mode for performance
+        // Mailbox = triple buffering (lowest latency), Fifo = vsync (fallback)
+        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            log::info!("Using Mailbox present mode (triple buffering)");
+            wgpu::PresentMode::Mailbox
+        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::AutoVsync) {
+            log::info!("Using AutoVsync present mode");
+            wgpu::PresentMode::AutoVsync
+        } else {
+            log::info!("Using Fifo present mode (vsync)");
+            wgpu::PresentMode::Fifo
+        };
+
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

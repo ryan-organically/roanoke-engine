@@ -89,8 +89,8 @@ struct LoadingSlideshow {
 }
 
 impl LoadingSlideshow {
-    const PAN_DURATION: f32 = 25.0;     // Seconds per image - nice and slow
-    const TRANSITION_DURATION: f32 = 2.0; // Crossfade duration
+    const PAN_DURATION: f32 = 12.0;      // Seconds per image
+    const TRANSITION_DURATION: f32 = 3.0; // Crossfade duration (longer for smoother blend)
     const ZOOM_SCALE: f32 = 1.2;        // How much to zoom in (for pan headroom)
     const PAN_AMOUNT: f32 = 0.08;       // How far to pan (as fraction of image) - gentle drift
 
@@ -444,7 +444,7 @@ fn main() {
         // Game Settings (default values)
         mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
         movement_speed: 10.0,
-        render_distance: 350.0, // Default 350
+        render_distance: 250.0, // Reduced from 350 for better initial performance
         master_volume: 80.0, // 0-100 scale, 80 = default
         swing_animation: SwingAnimation {
             is_swinging: false,
@@ -572,6 +572,12 @@ fn main() {
             ));
         }
 
+        // Handle CloseRequested before egui can consume it
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+            println!("[EXIT] Window close requested");
+            std::process::exit(0);
+        }
+
         // Pass event to egui
         if let Some(egui_state) = &mut state.egui_state {
             if let Event::WindowEvent { event, .. } = event {
@@ -629,17 +635,31 @@ fn main() {
                                     state.time_of_day = (state.time_of_day - 1.0 + 24.0) % 24.0;
                                     println!("[TIME] {:.1}:00", state.time_of_day);
                                 }
-                                KeyCode::KeyU => {
-                                    state.weather.set_weather(WeatherType::Clear, false);
-                                    println!("[WEATHER] Set to Clear");
+                                KeyCode::BracketLeft => {
+                                    // Cycle weather backward: Clear <- Cloudy <- Overcast <- Stormy <- Foggy
+                                    let prev = match state.weather.current_weather {
+                                        WeatherType::Clear => WeatherType::Foggy,
+                                        WeatherType::PartlyCloudy => WeatherType::Clear,
+                                        WeatherType::Overcast => WeatherType::PartlyCloudy,
+                                        WeatherType::Stormy => WeatherType::Overcast,
+                                        WeatherType::Foggy => WeatherType::Stormy,
+                                    };
+                                    state.weather.set_weather(prev, false);
+                                    state.weather.auto_weather_enabled = false; // Disable auto when manual
+                                    println!("[WEATHER] << Set to {:?} (auto disabled)", prev);
                                 }
-                                KeyCode::KeyI => {
-                                    state.weather.set_weather(WeatherType::PartlyCloudy, false);
-                                    println!("[WEATHER] Set to PartlyCloudy");
-                                }
-                                KeyCode::KeyO => {
-                                    state.weather.set_weather(WeatherType::Stormy, false);
-                                    println!("[WEATHER] Set to Stormy");
+                                KeyCode::BracketRight => {
+                                    // Cycle weather forward: Clear -> Cloudy -> Overcast -> Stormy -> Foggy
+                                    let next = match state.weather.current_weather {
+                                        WeatherType::Clear => WeatherType::PartlyCloudy,
+                                        WeatherType::PartlyCloudy => WeatherType::Overcast,
+                                        WeatherType::Overcast => WeatherType::Stormy,
+                                        WeatherType::Stormy => WeatherType::Foggy,
+                                        WeatherType::Foggy => WeatherType::Clear,
+                                    };
+                                    state.weather.set_weather(next, false);
+                                    state.weather.auto_weather_enabled = false; // Disable auto when manual
+                                    println!("[WEATHER] >> Set to {:?} (auto disabled)", next);
                                 }
                                 KeyCode::KeyM => {
                                     state.audio_system.toggle_enabled();
@@ -919,11 +939,13 @@ fn main() {
         });
 
         // Chunk Manager (Stores all loaded chunks and manages streaming)
+        // Load/unload radii are scaled dynamically based on render_distance
         static CHUNK_MANAGER: OnceLock<Mutex<ChunkManager>> = OnceLock::new();
         let chunk_manager = CHUNK_MANAGER.get_or_init(|| {
-            // Load radius 2 = 5x5 grid (visible ~500 units), Unload radius 4 = buffer zone
-            // Reduced from 4 (9x9) for performance
-            Mutex::new(ChunkManager::new(256.0, 2, 4))
+            let mut manager = ChunkManager::new(256.0, 2, 4);
+            // Initialize radius based on default render_distance (250)
+            manager.update_radius_for_render_distance(250.0);
+            Mutex::new(manager)
         });
 
         // Shadow System
@@ -1051,6 +1073,7 @@ fn main() {
             }
 
             // Update Atmosphere (fog, light shafts based on time/weather)
+            // Pass render_distance so fog_end is scaled to hide object pop-in
             let weather_fog = match state.weather.current_weather {
                 WeatherType::Foggy => 0.8,
                 WeatherType::Overcast => 0.3,
@@ -1059,7 +1082,8 @@ fn main() {
             };
             let time_of_day = state.time_of_day;
             let cloud_coverage = state.weather.cloud_coverage;
-            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage);
+            let render_dist = state.render_distance;
+            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, render_dist);
         }
 
         // Handle Input (Player Controller)
@@ -1118,6 +1142,9 @@ fn main() {
             let mut style = (*ui_ctx.style()).clone();
             style.visuals.window_fill = egui::Color32::from_rgb(244, 228, 188); // Paper Color
             style.visuals.panel_fill = egui::Color32::from_rgb(244, 228, 188);
+            // Remove window stroke/shadow to prevent outline artifacts
+            style.visuals.window_stroke = egui::Stroke::NONE;
+            style.visuals.window_shadow = egui::epaint::Shadow::NONE;
             ui_ctx.set_style(style);
 
             // Sync Cursor State with Game State
@@ -1143,9 +1170,12 @@ fn main() {
                             state.loading_slideshow.load_images(ui.ctx());
                         }
 
-                        // Update slideshow animation
-                        let dt = 1.0 / 60.0; // Approximate dt for UI updates
-                        state.loading_slideshow.update(dt);
+                        // Update slideshow animation using actual elapsed time
+                        let slideshow_dt = state.loading_slideshow.start_time.elapsed().as_secs_f32();
+                        state.loading_slideshow.start_time = Instant::now();
+                        // Clamp dt to avoid huge jumps (first frame or lag spikes)
+                        let slideshow_dt = slideshow_dt.clamp(0.0, 0.1);
+                        state.loading_slideshow.update(slideshow_dt);
 
                         // Draw slideshow background with Ken Burns effect
                         state.loading_slideshow.render(ui);
@@ -1269,7 +1299,7 @@ fn main() {
                             ("New Game", true),
                             ("Load Game", true),
                             ("Settings", false), // Not implemented
-                            ("Marketplace", false), // Not implemented
+                            ("Exit", true),
                         ];
 
                         let saves = list_saves();
@@ -1365,6 +1395,10 @@ fn main() {
                                     "Load Game" => {
                                         state.show_load_menu = true;
                                     }
+                                    "Exit" => {
+                                        println!("[EXIT] User requested exit from menu");
+                                        std::process::exit(0);
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1458,7 +1492,23 @@ fn main() {
                         ui.label(format!("Time: {:02}:{:02}", hours, minutes));
                         ui.label("T/Y keys: Change time");
                         ui.separator();
-                        
+
+                        // Dev Stats - Weather/Fog/Render
+                        ui.collapsing("Dev Stats", |ui| {
+                            ui.label(format!("Weather: {:?}", state.weather.current_weather));
+                            ui.label(format!("Render Dist: {:.0}", state.render_distance));
+                            let fog = state.atmosphere.fog_params();
+                            ui.label(format!("Fog: d={:.2} s={:.0} e={:.0}", fog[0], fog[1], fog[2]));
+                            if let Some(manager) = CHUNK_MANAGER.get() {
+                                if let Ok(mgr) = manager.lock() {
+                                    let (loaded, loading) = mgr.get_stats();
+                                    ui.label(format!("Chunks: {} loaded, {} loading", loaded, loading));
+                                    ui.label(format!("Load radius: {}", mgr.load_radius));
+                                }
+                            }
+                        });
+                        ui.separator();
+
                         ui.label("Save Name:");
                         ui.text_edit_singleline(&mut state.save_name_input);
 
@@ -1544,12 +1594,21 @@ fn main() {
 
                                     // Render Distance (minimum 200 to ensure chunks load)
                                     ui.label(egui::RichText::new("Render Distance:").color(egui::Color32::BLACK));
+                                    let old_render_dist = state.render_distance;
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 300.0) / 2.0);
                                         ui.add(egui::Slider::new(&mut state.render_distance, 200.0..=500.0)
                                             .text("Distance")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
+                                    // Update chunk load radius when render distance changes
+                                    if (state.render_distance - old_render_dist).abs() > 0.1 {
+                                        if let Some(manager) = CHUNK_MANAGER.get() {
+                                            if let Ok(mut mgr) = manager.lock() {
+                                                mgr.update_radius_for_render_distance(state.render_distance);
+                                            }
+                                        }
+                                    }
                                     ui.add_space(15.0);
 
                                     // Audio Settings Header
@@ -1595,6 +1654,56 @@ fn main() {
                                     });
                                     ui.add_space(30.0);
 
+                                    // Developer Controls Header
+                                    ui.label(egui::RichText::new("Developer").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.add_space(10.0);
+
+                                    // Time of Day
+                                    ui.label(egui::RichText::new("Time of Day:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.time_of_day, 0.0..=24.0)
+                                            .text("Hour")
+                                            .custom_formatter(|n, _| {
+                                                let h = n as i32;
+                                                let m = ((n - h as f64) * 60.0) as i32;
+                                                format!("{:02}:{:02}", h % 24, m)
+                                            }));
+                                    });
+                                    ui.add_space(10.0);
+
+                                    // Weather Controls
+                                    ui.label(egui::RichText::new("Weather:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.button("Clear").clicked() {
+                                            state.weather.set_weather(WeatherType::Clear, false);
+                                        }
+                                        if ui.button("Cloudy").clicked() {
+                                            state.weather.set_weather(WeatherType::PartlyCloudy, false);
+                                        }
+                                        if ui.button("Overcast").clicked() {
+                                            state.weather.set_weather(WeatherType::Overcast, false);
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.button("Stormy").clicked() {
+                                            state.weather.set_weather(WeatherType::Stormy, false);
+                                        }
+                                        if ui.button("Foggy").clicked() {
+                                            state.weather.set_weather(WeatherType::Foggy, false);
+                                        }
+                                    });
+                                    ui.add_space(5.0);
+                                    let current_weather = format!("Current: {:?}", state.weather.current_weather);
+                                    ui.label(egui::RichText::new(current_weather).size(12.0).color(egui::Color32::DARK_GRAY));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.checkbox(&mut state.weather.auto_weather_enabled, "Auto Weather Changes");
+                                    });
+                                    ui.add_space(30.0);
+
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
                                         state.pause_menu_page = PauseMenuPage::Main;
                                         // Apply settings
@@ -1616,9 +1725,12 @@ fn main() {
 
                                     ui.label(egui::RichText::new("Game Controls:").size(18.0).strong().color(egui::Color32::BLACK));
                                     ui.label("ESC - Pause Menu");
-                                    ui.label("T/Y - Change Time of Day");
-                                    ui.label("U/I/O - Change Weather (Clear/Cloudy/Stormy)");
+                                    ui.label("T/Y - Change Time of Day (+/- 1 hour)");
                                     ui.label("M - Toggle Audio On/Off");
+                                    ui.add_space(10.0);
+
+                                    ui.label(egui::RichText::new("Weather Controls:").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.label("[ / ] - Cycle Weather");
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
@@ -2144,11 +2256,11 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                // Atmospheric fog from time-of-day system
-                let atmo = &state.atmosphere.state;
-                let fog_color = atmo.fog_color.to_array();
-                let fog_start = atmo.fog_start;
-                let fog_end = atmo.fog_end;
+                // Atmospheric fog from time-of-day system (use validated params)
+                let fog_params = state.atmosphere.fog_params();
+                let fog_color = state.atmosphere.fog_color();
+                let fog_start = fog_params[1];
+                let fog_end = fog_params[2];
 
                 // Render chunks with frustum culling and LOD
                 let mut terrain_rendered = 0;
@@ -2158,7 +2270,7 @@ fn main() {
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
-                let grass_max_distance = state.render_distance * 0.5;  // Grass at 50% of max
+                let grass_max_distance = state.render_distance * 0.75;  // Grass at 75% of max
                 let tree_max_distance = state.render_distance;
                 let detritus_max_distance = state.render_distance * 0.75;
                 let building_max_distance = state.render_distance * 1.5; // Buildings visible further
@@ -2196,13 +2308,14 @@ fn main() {
                         }
                     }
 
-                    // Trees
-                    if let Some(trees) = &chunk.trees {
-                        if dist <= tree_max_distance {
-                            trees_rendered += 1;
-                            trees.render(&mut render_pass);
-                        }
-                    }
+                    // Trees - TEMPORARILY DISABLED (94K tris per instance kills FPS)
+                    // TODO: Need LOD system or simpler tree mesh
+                    // if let Some(trees) = &chunk.trees {
+                    //     if dist <= tree_max_distance {
+                    //         trees_rendered += 1;
+                    //         trees.render(&mut render_pass);
+                    //     }
+                    // }
 
                     // Detritus
                     if let Some(detritus) = &chunk.detritus {
@@ -2211,12 +2324,12 @@ fn main() {
                         }
                     }
 
-                    // Rocks (Same LOD as trees for now)
-                    for rock in &chunk.rocks {
-                        if dist <= tree_max_distance {
-                            rock.render(&mut render_pass);
-                        }
-                    }
+                    // Rocks - TEMPORARILY DISABLED (unknown rock types in log)
+                    // for rock in &chunk.rocks {
+                    //     if dist <= tree_max_distance {
+                    //         rock.render(&mut render_pass);
+                    //     }
+                    // }
 
                     // Buildings
                     for building in &chunk.buildings {

@@ -101,12 +101,17 @@ impl AtmosphereEngine {
     }
 
     /// Update atmosphere based on time and weather
-    pub fn update(&mut self, time_of_day: f32, weather_fog: f32, cloud_coverage: f32) {
+    /// render_distance: player's current render distance setting, used to ensure fog masks pop-in
+    pub fn update(&mut self, time_of_day: f32, weather_fog: f32, cloud_coverage: f32, render_distance: f32) {
         self.time_of_day = time_of_day;
         self.weather_fog_modifier = weather_fog;
         self.weather_cloud_coverage = cloud_coverage;
 
         let period = TimePeriod::from_hour(time_of_day);
+
+        // Minimum fog_end based on render distance to hide object pop-in
+        // Add 10% buffer so fog is fully opaque before objects appear
+        let min_fog_end = render_distance * 1.1;
 
         // Calculate sun position
         let sun_angle = (time_of_day - 6.0) / 12.0 * std::f32::consts::PI;
@@ -205,15 +210,25 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(0.6, 0.4, 0.5);
             }
         }
+
+        // Clamp fog_end to hide chunk pop-in:
+        // - Minimum: render_distance * 0.9 (fog starts fading before pop-in)
+        // - Maximum: render_distance * 1.1 (fully fogged at pop-in distance)
+        // This ensures chunks pop in while already hidden by fog
+        let target_fog_end = render_distance * 0.95;
+        self.state.fog_end = target_fog_end;
+        // Scale fog_start to be 30-50% of fog_end for natural gradient
+        self.state.fog_start = (target_fog_end * 0.4).max(20.0);
     }
 
     /// Get fog uniforms for shaders [density, start, end, height_falloff]
+    /// Values are clamped to safe ranges to prevent shader issues
     pub fn fog_params(&self) -> [f32; 4] {
         [
-            self.state.fog_density,
-            self.state.fog_start,
-            self.state.fog_end,
-            self.state.fog_height_falloff,
+            self.state.fog_density.clamp(0.0, 1.0),
+            self.state.fog_start.clamp(1.0, 1000.0),
+            self.state.fog_end.clamp(self.state.fog_start + 10.0, 2000.0), // End must be > start
+            self.state.fog_height_falloff.clamp(0.001, 0.5),
         ]
     }
 

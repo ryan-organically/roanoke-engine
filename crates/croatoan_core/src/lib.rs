@@ -68,38 +68,43 @@ impl App {
         // Create window builder
         let mut window_builder = WindowBuilder::new()
             .with_title(&self.title)
-            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height));
+            .with_inner_size(winit::dpi::PhysicalSize::new(self.width, self.height))
+            .with_resizable(true)
+            .with_decorations(true);
 
-        // Load Icon
-        let icon_path = "assets/taskbar icon.jpg";
-        if let Ok(image) = image::open(icon_path) {
-            let rgba = image.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            let icon_data = rgba.into_raw();
-            
-            if let Ok(icon) = winit::window::Icon::from_rgba(icon_data, width, height) {
-                window_builder = window_builder.with_window_icon(Some(icon));
-                log::info!("Loaded window icon from {}", icon_path);
-            } else {
-                log::warn!("Failed to create window icon from {}", icon_path);
+        // Load Icon - try multiple paths
+        let icon_paths = [
+            "assets/taskbar icon.jpg",
+            "./assets/taskbar icon.jpg",
+            "assets/icon.png",
+            "assets/icon.jpg",
+        ];
+
+        let mut icon_loaded = false;
+        for icon_path in &icon_paths {
+            if let Ok(image) = image::open(icon_path) {
+                let rgba = image.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                let icon_data = rgba.into_raw();
+
+                if let Ok(icon) = winit::window::Icon::from_rgba(icon_data, width, height) {
+                    window_builder = window_builder.with_window_icon(Some(icon));
+                    log::info!("Loaded window icon from {}", icon_path);
+                    icon_loaded = true;
+                    break;
+                }
             }
-        } else {
-            log::warn!("Failed to load window icon from {}", icon_path);
+        }
+        if !icon_loaded {
+            log::warn!("Could not load window icon from any path");
         }
 
         let window = Arc::new(window_builder.build(&event_loop)?);
 
         log::info!("Window created: {} ({}x{})", self.title, self.width, self.height);
 
-        // Set cursor grab mode to confine cursor to window
-        if let Err(e) = window.set_cursor_grab(CursorGrabMode::Confined) {
-            log::warn!("Failed to confine cursor: {}", e);
-            // Try locked mode as fallback
-            if let Err(e) = window.set_cursor_grab(CursorGrabMode::Locked) {
-                log::warn!("Failed to lock cursor: {}", e);
-            }
-        }
-        window.set_cursor_visible(false);
+        // NOTE: Cursor grab/hide is now handled by the game when entering Playing state
+        // Don't grab cursor on startup - let the menu be usable
 
         // Initialize graphics context
         let mut graphics_context = GraphicsContext::new(window.clone());
