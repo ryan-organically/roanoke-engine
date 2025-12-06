@@ -91,23 +91,104 @@ fn process_single_attack(
     })
 }
 
+/// Combat context from player progression
+#[derive(Debug, Clone, Default)]
+pub struct CombatContext {
+    /// Damage multiplier from skills (e.g., Beast Slayer +50%)
+    pub damage_bonus: f32,
+    /// Critical hit chance from skills
+    pub crit_chance: f32,
+    /// Critical hit damage multiplier
+    pub crit_multiplier: f32,
+    /// Whether this is a stealth attack
+    pub is_stealth: bool,
+    /// Whether player has predator sense (warns of ambushes)
+    pub has_predator_sense: bool,
+    /// Detection range reduction from skills
+    pub detection_reduction: f32,
+    /// Armor/damage reduction
+    pub damage_reduction: f32,
+}
+
+impl CombatContext {
+    /// Create combat context from player progression skills
+    pub fn from_skills(
+        species_name: &str,
+        is_stealth: bool,
+        hunting_damage_bonus: f32,
+        detection_reduction: f32,
+        has_apex_predator: bool,
+        has_shadow_hunter: bool,
+        has_predator_sense: bool,
+    ) -> Self {
+        let mut ctx = Self {
+            damage_bonus: hunting_damage_bonus,
+            crit_chance: 0.05, // Base 5% crit
+            crit_multiplier: 1.5,
+            is_stealth,
+            has_predator_sense,
+            detection_reduction,
+            damage_reduction: 0.0,
+        };
+
+        // Shadow Hunter: +100% stealth damage, +20% crit chance on stealth
+        if is_stealth && has_shadow_hunter {
+            ctx.damage_bonus += 1.0;
+            ctx.crit_chance += 0.20;
+        }
+
+        // Apex Predator: +25% crit multiplier, +10% base crit
+        if has_apex_predator {
+            ctx.crit_chance += 0.10;
+            ctx.crit_multiplier += 0.25;
+        }
+
+        ctx
+    }
+}
+
 /// Player attacks an animal - returns true if killed
 pub fn player_attack_animal(
     manager: &mut AnimalManager,
     animal_id: AnimalId,
-    damage: f32,
-    _weapon_type: Option<&str>, // For weakness checking later
+    base_damage: f32,
+    weapon_type: Option<&str>,
+    combat_ctx: &CombatContext,
 ) -> Option<AnimalAttackResult> {
     let animal = manager.get(animal_id)?;
     let species = animal.species;
+    let species_name = format!("{:?}", species);
     let was_alive = animal.is_alive();
     let pos = animal.position;
+    let was_alert = animal.awareness > 0.5;
 
-    // TODO: Check weapon vs weakness for bonus damage
-    let final_damage = damage;
+    // Calculate final damage with skill bonuses
+    let mut final_damage = base_damage * (1.0 + combat_ctx.damage_bonus);
+
+    // Stealth bonus if enemy wasn't aware
+    if combat_ctx.is_stealth && !was_alert {
+        final_damage *= 1.5; // 50% bonus for true stealth hit
+    }
+
+    // Check for critical hit
+    let is_critical = rand_crit(combat_ctx.crit_chance);
+    if is_critical {
+        final_damage *= combat_ctx.crit_multiplier;
+    }
+
+    // Check weapon vs weakness for bonus damage
+    if let Some(weapon) = weapon_type {
+        final_damage *= get_weapon_effectiveness(weapon, &species_name);
+    }
 
     // Apply damage
     let killed = manager.damage_animal(animal_id, final_damage);
+
+    // If this was a stealth kill or headshot, update animal aggro
+    if combat_ctx.is_stealth && killed {
+        // Stealth kill doesn't alert nearby animals as much
+        manager.reduce_nearby_awareness(pos, 30.0, 0.3);
+    }
 
     Some(AnimalAttackResult {
         hit: true,
@@ -116,7 +197,54 @@ pub fn player_attack_animal(
         was_alive,
         species,
         position: pos,
+        was_stealth: combat_ctx.is_stealth && !was_alert,
+        was_critical: is_critical,
     })
+}
+
+/// Simple random for critical hits
+fn rand_crit(chance: f32) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let frame = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let hash = frame.wrapping_mul(0x517cc1b727220a95);
+    (hash as f32 / u64::MAX as f32) < chance
+}
+
+/// Get weapon effectiveness against species
+fn get_weapon_effectiveness(weapon: &str, species: &str) -> f32 {
+    // Weapons have different effectiveness vs different animals
+    match (weapon, species) {
+        // Bows are great vs most animals
+        ("bow", _) => 1.2,
+        ("hunter_bow", _) => 1.3,
+        ("hunter_bow_improved", _) => 1.4,
+
+        // Spears are good vs large game
+        ("spear", "BlackBear" | "AmericanAlligator") => 1.4,
+        ("spear", _) => 1.1,
+
+        // Knives for finishing/small game
+        ("knife", "TimberRattlesnake" | "Copperhead") => 1.5,
+        ("hunter_knife", _) => 1.2,
+
+        // Clubs/blunt for knockdown
+        ("club", _) => 0.9, // Less damage but more stagger
+
+        // Default
+        _ => 1.0,
+    }
+}
+
+/// Player attack result with extended info
+pub fn player_attack_animal_simple(
+    manager: &mut AnimalManager,
+    animal_id: AnimalId,
+    damage: f32,
+    _weapon_type: Option<&str>,
+) -> Option<AnimalAttackResult> {
+    // Simple version without combat context for backward compatibility
+    player_attack_animal(manager, animal_id, damage, _weapon_type, &CombatContext::default())
 }
 
 /// Result of player attacking an animal
@@ -128,6 +256,8 @@ pub struct AnimalAttackResult {
     pub was_alive: bool,
     pub species: super::types::AnimalSpecies,
     pub position: Vec3,
+    pub was_stealth: bool,
+    pub was_critical: bool,
 }
 
 /// Find the closest animal to a position within range
@@ -148,7 +278,7 @@ pub fn find_closest_animal(
                 }
             })
         })
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 /// Check if player is being targeted by any nearby predators

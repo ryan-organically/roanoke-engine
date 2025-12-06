@@ -8,6 +8,7 @@ use crate::progression::reputation::{Faction, ReputationLevel};
 use crate::npc::NpcManager;
 use crate::animals::{PlayerWildlifeReputation, LegendaryAnimal, AnimalSpecies};
 use crate::animals::player_tracking::create_legendary_animals;
+use crate::economy::{PlayerEconomy, EconomyManager, LootNotification, CombatLootResult};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -16,6 +17,10 @@ pub struct GameProgression {
     // Player systems
     pub player_progression: PlayerProgression,
     pub wildlife_reputation: PlayerWildlifeReputation,
+
+    // Economy system (dual currency, inventory, loot)
+    pub player_economy: PlayerEconomy,
+    pub economy_manager: EconomyManager,
 
     // World systems
     pub quest_manager: QuestManager,
@@ -36,6 +41,9 @@ pub struct GameProgression {
 
     // Notification queue for UI
     pub pending_notifications: Vec<GameNotification>,
+
+    // Pending loot notifications (separate from general notifications for UI)
+    pub pending_loot: Vec<LootNotification>,
 }
 
 impl GameProgression {
@@ -43,6 +51,8 @@ impl GameProgression {
         let mut state = Self {
             player_progression: PlayerProgression::new(),
             wildlife_reputation: PlayerWildlifeReputation::new(),
+            player_economy: PlayerEconomy::new(),
+            economy_manager: EconomyManager::new(),
             quest_manager: QuestManager::new(),
             event_manager: EventManager::new(),
             npc_manager: NpcManager::new(),
@@ -53,6 +63,7 @@ impl GameProgression {
             current_hour: 8,
             session_start: std::time::Instant::now(),
             pending_notifications: Vec::new(),
+            pending_loot: Vec::new(),
         };
 
         // Initialize starting reputation
@@ -100,7 +111,17 @@ impl GameProgression {
     }
 
     /// Handle player killing an animal
-    pub fn on_animal_killed(&mut self, species: AnimalSpecies, position: Vec3, was_stealth: bool, was_perfect: bool) {
+    pub fn on_animal_killed(
+        &mut self,
+        species: AnimalSpecies,
+        position: Vec3,
+        was_stealth: bool,
+        was_perfect: bool,
+        was_critical: bool,
+        weapon_used: &str,
+        kill_time_seconds: f32,
+        player_health: f32,
+    ) {
         let species_name = species.name();
 
         // Update wildlife reputation
@@ -130,6 +151,45 @@ impl GameProgression {
             self.player_progression.modify_reputation(Faction::Hunters, 5);
         }
 
+        // ========== ECONOMY: Process loot drops ==========
+        let hunting_level = self.player_progression.hunting.effective_level();
+        let luck = self.player_progression.hunting.calculate_luck_bonus();
+
+        let loot_notifications = self.economy_manager.process_animal_kill(
+            &mut self.player_economy,
+            species,
+            position,
+            was_stealth,
+            was_perfect,
+            was_critical,
+            weapon_used,
+            kill_time_seconds,
+            player_health,
+            hunting_level,
+            luck,
+        );
+
+        // Add loot notifications
+        for notification in &loot_notifications {
+            // Push to loot queue for UI
+            self.pending_loot.push(notification.clone());
+
+            // Check for rare drop notifications
+            if notification.item.rarity >= crate::economy::Rarity::Rare {
+                self.pending_notifications.push(GameNotification::RareLootDrop(
+                    notification.item.full_name(),
+                    notification.item.rarity,
+                ));
+            }
+
+            // First discovery of template
+            if notification.is_new_template {
+                self.pending_notifications.push(GameNotification::NewItemDiscovered(
+                    notification.item.template_id.clone(),
+                ));
+            }
+        }
+
         // Track legendary kills
         for legendary in &mut self.legendary_animals {
             if legendary.species == species && legendary.is_spawned && !legendary.is_killed {
@@ -140,9 +200,27 @@ impl GameProgression {
                     // Award legendary rewards
                     self.player_progression.stats.legendary_kills.push(legendary.name.clone());
                     self.player_progression.hunting.points += 500;
+
+                    // Bonus wampum for legendary kill
+                    self.player_economy.wallet.add_wampum(5000);
+                    self.player_economy.wallet.add_tobacco(100);
                 }
             }
         }
+    }
+
+    /// Simplified version for backward compatibility
+    pub fn on_animal_killed_simple(&mut self, species: AnimalSpecies, position: Vec3, was_stealth: bool, was_perfect: bool) {
+        self.on_animal_killed(
+            species,
+            position,
+            was_stealth,
+            was_perfect,
+            false,  // was_critical
+            "unknown",
+            5.0,    // default kill time
+            100.0,  // full health
+        );
     }
 
     /// Handle player taking damage from animal
@@ -305,6 +383,7 @@ impl GameProgression {
         ProgressionSaveData {
             player_progression: self.player_progression.clone(),
             wildlife_reputation: self.wildlife_reputation.clone(),
+            player_economy: self.player_economy.clone(),
             game_time: self.game_time,
             days_passed: self.days_passed,
             world_phase: self.event_manager.world_phase,
@@ -317,6 +396,8 @@ impl GameProgression {
     pub fn load_save(&mut self, data: ProgressionSaveData) {
         self.player_progression = data.player_progression;
         self.wildlife_reputation = data.wildlife_reputation;
+        self.player_economy = data.player_economy;
+        self.player_economy.on_load(); // Rebuild inventory indices
         self.game_time = data.game_time;
         self.days_passed = data.days_passed;
         self.event_manager.world_phase = data.world_phase;
@@ -515,6 +596,7 @@ pub enum GameNotification {
     LocationDiscovered(u64),
     SpeciesDiscovered(String),
     FossilDiscovered(String),
+    NewItemDiscovered(String),
 
     // Event notifications
     EventStarted(String),
@@ -530,6 +612,13 @@ pub enum GameNotification {
     CriticalHit,
     StealthKill,
     PerfectKill,
+
+    // Economy notifications
+    RareLootDrop(String, crate::economy::Rarity),
+    WampumEarned(u64),
+    TobaccoEarned(u64),
+    InventoryFull,
+    PityTriggered(crate::economy::Rarity),
 }
 
 /// Save game data for progression system
@@ -537,9 +626,38 @@ pub enum GameNotification {
 pub struct ProgressionSaveData {
     pub player_progression: PlayerProgression,
     pub wildlife_reputation: PlayerWildlifeReputation,
+    pub player_economy: PlayerEconomy,
     pub game_time: f64,
     pub days_passed: u32,
     pub world_phase: WorldPhase,
     pub completed_quests: Vec<String>,
     pub active_quests: Vec<String>,
+}
+
+// Economy helper methods
+impl GameProgression {
+    /// Get player's current wampum balance
+    pub fn wampum(&self) -> u64 {
+        self.player_economy.wallet.wampum
+    }
+
+    /// Get player's current tobacco balance
+    pub fn tobacco(&self) -> u64 {
+        self.player_economy.wallet.tobacco
+    }
+
+    /// Get player's inventory value
+    pub fn inventory_value(&self) -> u64 {
+        self.player_economy.inventory.total_value()
+    }
+
+    /// Get number of free inventory slots
+    pub fn free_inventory_slots(&self) -> usize {
+        self.player_economy.inventory.free_slots()
+    }
+
+    /// Drain pending loot notifications
+    pub fn drain_loot_notifications(&mut self) -> Vec<LootNotification> {
+        std::mem::take(&mut self.pending_loot)
+    }
 }

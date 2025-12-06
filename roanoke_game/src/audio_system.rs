@@ -128,11 +128,11 @@ pub struct WeatherAmbience {
     pub crickets_volume: f32,
 
     // Target values for smooth transitions
-    target_wind: f32,
-    target_rain: f32,
-    target_thunder: f32,
-    target_birds: f32,
-    target_crickets: f32,
+    pub target_wind: f32,
+    pub target_rain: f32,
+    pub target_thunder: f32,
+    pub target_birds: f32,
+    pub target_crickets: f32,
 }
 
 impl WeatherAmbience {

@@ -46,7 +46,8 @@
       "Bash(timeout 15 ./target/release/roanoke_game:*)",
       "Bash(timeout:*)",
       "Bash(cargo fix:*)",
-      "Bash(1)"
+      "Bash(1)",
+      "Bash(wc:*)"
     ],
     "deny": [],
     "ask": []

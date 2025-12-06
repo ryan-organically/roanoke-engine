@@ -305,4 +305,37 @@ impl Animal {
             }
         }
     }
+
+    /// Get the damage flash intensity (0.0 = no flash, 1.0 = full flash)
+    /// Flash lasts 0.3 seconds and fades out
+    pub fn damage_flash_intensity(&self) -> f32 {
+        const FLASH_DURATION: f32 = 0.3; // seconds
+
+        match &self.last_damage_time {
+            Some(time) => {
+                let elapsed = time.elapsed().as_secs_f32();
+                if elapsed < FLASH_DURATION {
+                    // Fade out over the duration
+                    1.0 - (elapsed / FLASH_DURATION)
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Get color and emissive multipliers for damage flash effect
+    /// Returns (color_tint: [f32; 3], emissive_boost: f32)
+    pub fn damage_flash_effect(&self) -> ([f32; 3], f32) {
+        let intensity = self.damage_flash_intensity();
+        if intensity > 0.0 {
+            // Blend towards white/red with intensity
+            let red_boost = 1.0 + intensity * 0.5;   // More red
+            let other_boost = 1.0 + intensity * 0.3; // White-ish flash
+            ([red_boost, other_boost, other_boost], intensity * 1.5)
+        } else {
+            ([1.0, 1.0, 1.0], 0.0)
+        }
+    }
 }

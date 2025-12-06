@@ -2,6 +2,16 @@ use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroup, util::DeviceExt};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
+use crate::pipeline_validation::{
+    MeshValidator, PipelineResult,
+    log_pipeline_error, sanitize_vec3, sanitize_float,
+};
+
+/// Maximum vertices per detritus mesh
+const MAX_DETRITUS_VERTICES: usize = 1_000_000;
+/// Maximum indices per detritus mesh
+const MAX_DETRITUS_INDICES: usize = 3_000_000;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct DetritusVertex {
@@ -155,7 +165,26 @@ impl DetritusPipeline {
         }
     }
 
-    /// Upload detritus mesh data to GPU
+    /// Upload detritus mesh data to GPU with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if mesh data is invalid
+    pub fn try_upload_mesh(
+        &mut self,
+        device: &Device,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+    ) -> PipelineResult<()> {
+        let validator = MeshValidator::new(MAX_DETRITUS_VERTICES, MAX_DETRITUS_INDICES);
+        validator.validate_model(positions, normals, uvs, indices)?;
+
+        self.upload_mesh_unchecked(device, positions, normals, uvs, indices);
+        Ok(())
+    }
+
+    /// Upload detritus mesh data to GPU (skips rendering on invalid data)
     pub fn upload_mesh(
         &mut self,
         device: &Device,
@@ -165,26 +194,36 @@ impl DetritusPipeline {
         uvs: &[[f32; 2]],
         indices: &[u32],
     ) {
-        // Safety check: GPU has 256 MB max buffer size
-        const MAX_VERTICES: usize = 1_000_000; // ~80 MB vertex buffer
-        const MAX_INDICES: usize = 3_000_000;  // ~12 MB index buffer
-
-        if positions.len() > MAX_VERTICES {
-            log::warn!("Detritus mesh too large ({} vertices), skipping. Max: {}", positions.len(), MAX_VERTICES);
-            return;
+        match self.try_upload_mesh(device, positions, normals, uvs, indices) {
+            Ok(()) => {}
+            Err(e) => {
+                log_pipeline_error("DetritusPipeline", &e);
+                // Don't panic - just skip rendering detritus
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+            }
         }
+    }
 
-        if indices.len() > MAX_INDICES {
-            log::warn!("Detritus mesh too large ({} indices), skipping. Max: {}", indices.len(), MAX_INDICES);
-            return;
-        }
+    /// Upload mesh without validation (internal use)
+    fn upload_mesh_unchecked(
+        &mut self,
+        device: &Device,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+    ) {
+        let vertex_count = positions.len().min(MAX_DETRITUS_VERTICES);
+        let index_count = indices.len().min(MAX_DETRITUS_INDICES);
 
-        // Interleave vertex data
-        let vertices: Vec<DetritusVertex> = (0..positions.len())
+        // Interleave vertex data with NaN/Inf sanitization
+        let vertices: Vec<DetritusVertex> = (0..vertex_count)
             .map(|i| DetritusVertex {
-                position: positions[i],
-                normal: normals[i],
-                uv: uvs[i],
+                position: sanitize_vec3(positions[i]),
+                normal: sanitize_vec3(normals[i]),
+                uv: [sanitize_float(uvs[i][0]), sanitize_float(uvs[i][1])],
             })
             .collect();
 
@@ -198,13 +237,13 @@ impl DetritusPipeline {
         // Create index buffer
         self.index_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Detritus Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices[..index_count]),
             usage: wgpu::BufferUsages::INDEX,
         }));
 
-        self.index_count = indices.len() as u32;
+        self.index_count = index_count as u32;
 
-        log::info!("Uploaded detritus mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
+        log::debug!("Uploaded detritus mesh: {} vertices, {} triangles", vertices.len(), index_count / 3);
     }
 
     /// Update camera uniform with fog parameters
@@ -231,13 +270,41 @@ impl DetritusPipeline {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
+    /// Render the detritus
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        if let (Some(vertex_buffer), Some(index_buffer)) = (&self.vertex_buffer, &self.index_buffer) {
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+        // Early exit if no triangles to render
+        if self.index_count == 0 {
+            return;
         }
+
+        // Defensive: require both buffers to be present
+        let (vertex_buffer, index_buffer) = match (&self.vertex_buffer, &self.index_buffer) {
+            (Some(vb), Some(ib)) => (vb, ib),
+            _ => {
+                log::trace!("Detritus render skipped: missing vertex or index buffer");
+                return;
+            }
+        };
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+
+    /// Check if the pipeline has valid mesh data ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.vertex_buffer.is_some() && self.index_buffer.is_some() && self.index_count > 0
+    }
+
+    /// Get the current triangle count
+    #[inline]
+    pub fn triangle_count(&self) -> u32 {
+        self.index_count / 3
     }
 }

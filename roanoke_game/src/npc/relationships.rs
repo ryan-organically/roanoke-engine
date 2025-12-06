@@ -167,7 +167,7 @@ impl NpcRelationship {
             // Remove oldest low-impact memories first
             self.memories.sort_by(|a, b| b.impact.abs().cmp(&a.impact.abs()));
             self.memories.truncate(20);
-            self.memories.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+            self.memories.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
         }
     }
 

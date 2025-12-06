@@ -153,7 +153,7 @@ impl EventManager {
     /// Schedule a future event
     pub fn schedule_event(&mut self, scheduled: ScheduledEvent) {
         self.scheduled.push(scheduled);
-        self.scheduled.sort_by(|a, b| a.trigger_time.partial_cmp(&b.trigger_time).unwrap());
+        self.scheduled.sort_by(|a, b| a.trigger_time.partial_cmp(&b.trigger_time).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     /// Schedule a random event

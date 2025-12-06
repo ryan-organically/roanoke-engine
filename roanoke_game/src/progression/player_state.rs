@@ -3,7 +3,12 @@
 //! Central tracking for all player advancement, skills, and world relationships.
 
 use super::skills::{HuntingSkills, ArchaeologySkills};
-use super::reputation::{Reputation, Faction, ReputationLevel};
+use super::reputation::{Reputation, Faction as LegacyFaction, ReputationLevel};
+use super::faction_manager::FactionManager;
+use super::faction_integration::{FactionEventProcessor, FactionEvent, VillageFaction, NpcFactionData};
+use super::faction::{Faction, Standing};
+use super::faction_skills::FactionSkillId;
+use super::faction_pipeline::{FactionPipelineCoordinator, ReputationSource, PipelineResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -35,8 +40,20 @@ pub struct PlayerProgression {
     pub total_experience: u32,
     pub current_level: u32,
 
-    // Reputation with factions
-    pub reputation: HashMap<Faction, Reputation>,
+    // Legacy reputation with factions (kept for backward compatibility)
+    pub reputation: HashMap<LegacyFaction, Reputation>,
+
+    // New faction system
+    #[serde(default)]
+    pub faction_manager: FactionManager,
+    #[serde(skip)]
+    pub faction_events: FactionEventProcessor,
+    #[serde(skip)]
+    pub faction_pipeline: FactionPipelineCoordinator,
+    #[serde(default)]
+    pub village_factions: HashMap<u32, VillageFaction>,
+    #[serde(default)]
+    pub npc_factions: HashMap<u32, NpcFactionData>,
 
     // Discovery tracking
     pub discovered_locations: HashSet<LocationId>,
@@ -197,6 +214,11 @@ impl Default for PlayerProgression {
             total_experience: 0,
             current_level: 1,
             reputation: HashMap::new(),
+            faction_manager: FactionManager::new(),
+            faction_events: FactionEventProcessor::new(),
+            faction_pipeline: FactionPipelineCoordinator::new(),
+            village_factions: HashMap::new(),
+            npc_factions: HashMap::new(),
             discovered_locations: HashSet::new(),
             discovered_species: HashSet::new(),
             discovered_fossils: HashSet::new(),
@@ -236,6 +258,18 @@ impl Default for PlayerProgression {
 impl PlayerProgression {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get the player's hunting skill level (0-100)
+    pub fn get_hunting_level(&self) -> u32 {
+        // Calculate from hunting skill points, capped at 100
+        self.hunting.points.min(100)
+    }
+
+    /// Get the player's current luck stat (0.0-1.0)
+    pub fn get_luck_stat(&self) -> f32 {
+        // Base luck + bonus from skills and equipment
+        0.0 + if self.hunting.legendary_hunter { 0.15 } else { 0.0 }
     }
 
     /// Record a kill for skill progression
@@ -413,13 +447,13 @@ impl PlayerProgression {
         }
     }
 
-    /// Get reputation with a faction
-    pub fn get_reputation(&self, faction: &Faction) -> i32 {
+    /// Get reputation with a legacy faction
+    pub fn get_reputation(&self, faction: &LegacyFaction) -> i32 {
         self.reputation.get(faction).map(|r| r.value).unwrap_or(0)
     }
 
-    /// Modify reputation with a faction
-    pub fn modify_reputation(&mut self, faction: Faction, delta: i32) {
+    /// Modify reputation with a legacy faction
+    pub fn modify_reputation(&mut self, faction: LegacyFaction, delta: i32) {
         let rep = self.reputation.entry(faction).or_insert(Reputation::default());
         rep.modify(delta);
     }
@@ -513,18 +547,18 @@ impl PlayerProgression {
         rate
     }
 
-    /// Check if player can access trading with NPCs
-    pub fn can_trade(&self, faction: &Faction) -> bool {
+    /// Check if player can access trading with NPCs (legacy)
+    pub fn can_trade(&self, faction: &LegacyFaction) -> bool {
         self.get_reputation(faction) >= -50
     }
 
-    /// Check if player can access quests from faction
-    pub fn can_accept_quests(&self, faction: &Faction) -> bool {
+    /// Check if player can access quests from faction (legacy)
+    pub fn can_accept_quests(&self, faction: &LegacyFaction) -> bool {
         self.get_reputation(faction) >= 0
     }
 
-    /// Check if player has unlocked skill training
-    pub fn can_train_skills(&self, faction: &Faction) -> bool {
+    /// Check if player has unlocked skill training (legacy)
+    pub fn can_train_skills(&self, faction: &LegacyFaction) -> bool {
         self.get_reputation(faction) >= 100
     }
 
@@ -834,7 +868,9 @@ impl PlayerProgression {
     pub fn meets_requirements(&self, req: &ProgressionRequirement) -> bool {
         match req {
             ProgressionRequirement::Level(min_level) => self.current_level >= *min_level,
-            ProgressionRequirement::Reputation(faction, min_rep) => self.get_reputation(faction) >= *min_rep,
+            ProgressionRequirement::Reputation(faction, min_rep) => {
+                self.faction_manager.get_reputation(*faction) >= *min_rep
+            }
             ProgressionRequirement::Skill(skill_name) => self.has_skill(skill_name),
             ProgressionRequirement::Quest(quest_id) => self.completed_quests.contains(quest_id),
             ProgressionRequirement::Achievement(achievement_id) => self.achievements.contains(achievement_id),
@@ -873,6 +909,265 @@ impl PlayerProgression {
             "ancient_lore" => self.archaeology.ancient_lore,
             "master_antiquarian" => self.archaeology.master_antiquarian,
             _ => false,
+        }
+    }
+
+    // ============================================================================
+    // FACTION SYSTEM INTEGRATION
+    // ============================================================================
+
+    /// Process pending faction events and update state
+    pub fn update_faction_system(&mut self, game_time: f64) {
+        // Process legacy event system
+        self.faction_events.process_events(&mut self.faction_manager, game_time);
+
+        // Process pipeline reputation changes - flush to faction manager
+        let _results = self.faction_pipeline.flush_reputation_changes(&mut self.faction_manager, game_time);
+
+        // Dispatch notifications
+        let _dispatched = self.faction_pipeline.dispatch_notifications();
+
+        // Process sync operations (logged but not acted upon here - handled by coordinator)
+        let _sync_ops = self.faction_pipeline.sync.take_pending();
+    }
+
+    /// Queue a faction event for processing
+    pub fn queue_faction_event(&mut self, event: FactionEvent) {
+        self.faction_events.queue_event(event);
+    }
+
+    /// Queue a reputation change through the hardened pipeline
+    pub fn queue_reputation_change(
+        &mut self,
+        faction: Faction,
+        delta: i32,
+        reason: &str,
+        source: ReputationSource,
+        game_time: f64,
+    ) -> PipelineResult<u64> {
+        self.faction_pipeline.process_reputation_change(faction, delta, reason, source, game_time)
+    }
+
+    /// Get standing with a specific faction
+    pub fn get_faction_standing(&self, faction: Faction) -> Standing {
+        self.faction_manager.get_standing(faction)
+    }
+
+    /// Get reputation points with a faction
+    pub fn get_faction_reputation(&self, faction: Faction) -> i32 {
+        self.faction_manager.get_reputation(faction)
+    }
+
+    /// Modify reputation with a faction directly (bypasses pipeline)
+    pub fn modify_faction_reputation(&mut self, faction: Faction, delta: i32, reason: &str, game_time: f64) {
+        self.faction_manager.modify_reputation(faction, delta, reason, game_time);
+    }
+
+    /// Modify reputation through the validated pipeline
+    pub fn modify_faction_reputation_validated(
+        &mut self,
+        faction: Faction,
+        delta: i32,
+        reason: &str,
+        source: ReputationSource,
+        game_time: f64,
+    ) -> PipelineResult<u64> {
+        self.faction_pipeline.process_reputation_change(faction, delta, reason, source, game_time)
+    }
+
+    /// Get pipeline health report
+    pub fn get_pipeline_health(&self) -> super::faction_pipeline::PipelineHealthReport {
+        self.faction_pipeline.health_report()
+    }
+
+    /// Pause all faction pipelines
+    pub fn pause_faction_pipelines(&mut self) {
+        self.faction_pipeline.pause();
+    }
+
+    /// Resume all faction pipelines
+    pub fn resume_faction_pipelines(&mut self) {
+        self.faction_pipeline.resume();
+    }
+
+    /// Check if player can trade with faction
+    pub fn can_trade_with_faction(&self, faction: Faction) -> bool {
+        self.faction_manager.can_trade(faction)
+    }
+
+    /// Check if player can access faction quests
+    pub fn can_access_faction_quests(&self, faction: Faction) -> bool {
+        self.faction_manager.can_access_quests(faction)
+    }
+
+    /// Check if player can train faction skills
+    pub fn can_train_faction_skills(&self, faction: Faction) -> bool {
+        self.faction_manager.can_train_skills(faction)
+    }
+
+    /// Get trade price modifier for faction
+    pub fn get_faction_trade_modifier(&self, faction: Faction) -> f32 {
+        self.faction_manager.get_trade_modifier(faction)
+    }
+
+    /// Unlock a faction skill
+    pub fn unlock_faction_skill(&mut self, skill_id: FactionSkillId) -> Result<(), super::faction_manager::SkillUnlockError> {
+        self.faction_manager.unlock_skill(skill_id)
+    }
+
+    /// Check if a faction skill is unlocked
+    pub fn has_faction_skill(&self, skill_id: FactionSkillId) -> bool {
+        self.faction_manager.has_skill(skill_id)
+    }
+
+    /// Get available skills for a faction
+    pub fn get_available_faction_skills(&self, faction: Faction) -> Vec<FactionSkillId> {
+        self.faction_manager.get_available_skills(faction)
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Register a village's faction affiliation
+    pub fn register_village_faction(&mut self, village_id: u32, village_faction: VillageFaction) {
+        self.village_factions.insert(village_id, village_faction);
+    }
+
+    /// Get a village's faction data
+    pub fn get_village_faction(&self, village_id: u32) -> Option<&VillageFaction> {
+        self.village_factions.get(&village_id)
+    }
+
+    /// Get a mutable reference to village faction data
+    pub fn get_village_faction_mut(&mut self, village_id: u32) -> Option<&mut VillageFaction> {
+        self.village_factions.get_mut(&village_id)
+    }
+
+    /// Register an NPC's faction data
+    pub fn register_npc_faction(&mut self, npc_id: u32, npc_data: NpcFactionData) {
+        self.npc_factions.insert(npc_id, npc_data);
+    }
+
+    /// Get an NPC's faction data
+    pub fn get_npc_faction(&self, npc_id: u32) -> Option<&NpcFactionData> {
+        self.npc_factions.get(&npc_id)
+    }
+
+    /// Get pending faction notifications
+    pub fn get_faction_notifications(&mut self) -> Vec<super::faction_integration::FactionNotification> {
+        self.faction_events.get_notifications()
+    }
+
+    /// Set player's primary faction
+    pub fn set_primary_faction(&mut self, faction: Faction) {
+        self.faction_manager.primary_faction = Some(faction);
+    }
+
+    /// Get player's primary faction
+    pub fn get_primary_faction(&self) -> Option<Faction> {
+        self.faction_manager.primary_faction
+    }
+
+    /// Get all factions the player is hostile with
+    pub fn get_hostile_factions(&self) -> Vec<Faction> {
+        self.faction_manager.get_hostile_factions()
+    }
+
+    /// Get all factions the player is allied with
+    pub fn get_allied_factions(&self) -> Vec<Faction> {
+        self.faction_manager.get_allied_factions()
+    }
+
+    /// Check relationship between two factions
+    pub fn get_faction_relationship(&self, a: Faction, b: Faction) -> Standing {
+        self.faction_manager.get_faction_relationship(a, b)
+    }
+
+    // ============================================================================
+    // CROSS-FILE SYNC & VERSIONING
+    // ============================================================================
+
+    /// Sync legacy reputation system with new faction system
+    /// Call this when loading old save files
+    pub fn sync_legacy_to_faction(&mut self) {
+        // Map legacy factions to new factions where possible
+        for (legacy_faction, rep) in &self.reputation {
+            let new_faction = match legacy_faction {
+                LegacyFaction::EnglishSettlers => Some(Faction::English),
+                LegacyFaction::SpanishExplorers => Some(Faction::Spanish),
+                LegacyFaction::FrenchTraders => Some(Faction::French),
+                LegacyFaction::NativeCouncil => Some(Faction::Powhatan),
+                _ => None,
+            };
+
+            if let Some(faction) = new_faction {
+                // Only sync if not already set
+                if self.faction_manager.get_reputation(faction) == 0 {
+                    self.faction_manager.modify_reputation(
+                        faction,
+                        rep.value,
+                        "Migrated from legacy save",
+                        0.0,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Sync new faction system to legacy for backward compatibility
+    pub fn sync_faction_to_legacy(&mut self) {
+        let mappings = [
+            (Faction::English, LegacyFaction::EnglishSettlers),
+            (Faction::Spanish, LegacyFaction::SpanishExplorers),
+            (Faction::French, LegacyFaction::FrenchTraders),
+            (Faction::Powhatan, LegacyFaction::NativeCouncil),
+        ];
+
+        for (new_faction, legacy_faction) in mappings {
+            let rep_value = self.faction_manager.get_reputation(new_faction);
+            let legacy_rep = self.reputation.entry(legacy_faction).or_default();
+            legacy_rep.value = rep_value;
+            legacy_rep.level = ReputationLevel::from_value(rep_value);
+        }
+    }
+
+    /// Get faction save data for serialization
+    pub fn get_faction_save_data(&self, game_time: f64) -> super::faction_integration::FactionSaveData {
+        super::faction_integration::FactionSaveData::from_state(
+            &self.faction_manager,
+            &self.village_factions,
+            &self.npc_factions,
+            &self.faction_events,
+            game_time,
+        )
+    }
+
+    /// Restore faction state from save data
+    pub fn restore_faction_save_data(&mut self, save_data: &super::faction_integration::FactionSaveData) {
+        save_data.restore(&mut self.faction_manager);
+        self.village_factions = save_data.village_factions.clone();
+        self.npc_factions = save_data.npc_faction_data.clone();
+    }
+
+    /// Get the current version of the progression system
+    pub const fn progression_version() -> u32 {
+        2 // Bumped for faction system integration
+    }
+
+    /// Migrate from older save format
+    pub fn migrate_from_version(&mut self, version: u32) {
+        match version {
+            0 | 1 => {
+                // Old saves before faction system - sync legacy data
+                self.sync_legacy_to_faction();
+                log::info!("Migrated save from version {} to {}", version, Self::progression_version());
+            }
+            2 => {
+                // Current version, no migration needed
+            }
+            _ => {
+                log::warn!("Unknown save version {}, attempting best-effort load", version);
+            }
         }
     }
 }

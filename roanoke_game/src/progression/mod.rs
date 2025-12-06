@@ -5,7 +5,9 @@
 
 pub mod events;
 pub mod faction;
+pub mod faction_integration;
 pub mod faction_manager;
+pub mod faction_pipeline;
 pub mod faction_skills;
 pub mod player_state;
 pub mod quests;
@@ -29,4 +31,13 @@ pub use faction_manager::{
 pub use faction_skills::{
     get_faction_skill_tree, FactionSkill, FactionSkillId, PlayerFactionSkills, SkillEffect,
     UnlockCondition,
+};
+pub use faction_integration::{
+    FactionEvent, FactionEventProcessor, FactionNotification, FactionSaveData, FactionUIData,
+    NpcFactionData, VillageFaction, VillageStatus,
+};
+pub use faction_pipeline::{
+    FactionPipelineCoordinator, PersistencePipeline, ReputationPipeline, ReputationSource,
+    NotificationDispatcher, EventValidator, FactionSyncPipeline, PipelineError, PipelineResult,
+    PipelineHealthReport, SyncOperation,
 };

@@ -173,6 +173,37 @@ impl HuntingSkills {
 
         bonus
     }
+
+    /// Get effective level based on skills and points
+    pub fn effective_level(&self) -> u32 {
+        let tier = self.current_tier() as u32;
+        let point_bonus = (self.points / 500).min(10);
+        tier + point_bonus
+    }
+
+    /// Calculate luck bonus for rare drops/finds
+    pub fn calculate_luck_bonus(&self) -> f32 {
+        let mut bonus = 0.0;
+
+        // Each tier adds luck
+        bonus += self.current_tier() as f32 * 0.02;
+
+        // Specific skill bonuses
+        if self.wilderness_scout {
+            bonus += 0.05;
+        }
+        if self.predator_sense {
+            bonus += 0.03;
+        }
+        if self.prey_instinct {
+            bonus += 0.03;
+        }
+        if self.legendary_hunter {
+            bonus += 0.10;
+        }
+
+        bonus.min(0.5) // Cap at 50% bonus
+    }
 }
 
 /// Archaeology skill tree

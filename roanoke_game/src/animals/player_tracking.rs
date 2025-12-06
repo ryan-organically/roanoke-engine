@@ -178,7 +178,7 @@ impl PlayerWildlifeReputation {
         self.scent_trail.iter()
             .filter(|(_, time)| current_time - time < max_age)
             .min_by(|(pos, _), (pos2, _)| {
-                pos.distance(position).partial_cmp(&pos2.distance(position)).unwrap()
+                pos.distance(position).partial_cmp(&pos2.distance(position)).unwrap_or(std::cmp::Ordering::Equal)
             })
             .filter(|(pos, _)| pos.distance(position) < 20.0)
             .map(|(pos, _)| *pos)

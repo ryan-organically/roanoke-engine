@@ -42,15 +42,30 @@ mod village_manager;
 mod progression;
 mod npc;
 mod game_state;
+mod economy;
+mod audio_events;
+mod data_pipeline;
+mod safe_ops;
+
+// New systems for discovery, ecology, flora, naval, and weather
+mod encyclopedia;
+mod flora;
+mod ecology;
+mod naval;
+mod weather;
+mod systems_manager;
 
 use water_system::WaterSystem;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
 use atmosphere::AtmosphereEngine;
 use audio_system::{AudioSystem, MusicState};
-use animals::{AnimalManager, AnimalSpawner, Difficulty, TimeOfDay as AnimalTimeOfDay};
+use audio_events::{AudioEventProcessor, AudioEvent, AudioBiome, ThreatLevel, species_threat_profile, wfc_biome_to_audio};
+use data_pipeline::{DataPipeline, GameEvent, NpcAudioIntegration, ProgressionAudioBridge, FactionAudioBridge};
+use animals::{AnimalManager, AnimalSpawner, Difficulty, TimeOfDay as AnimalTimeOfDay, BehaviorState};
 use village_manager::VillageManager;
 use game_state::GameProgression;
+use safe_ops::{SafeMutex, saturating_range_area}; // Safe mutex and overflow protection
 
 // ... (Existing structs remain same) ...
 
@@ -284,6 +299,7 @@ struct SwingAnimation {
     is_swinging: bool,
     swing_progress: f32,  // 0.0 to 1.0
     swing_duration: f32,  // Total animation duration in seconds
+    hit_processed: bool,  // Whether hit was processed this swing
 }
 
 struct SharedState {
@@ -313,6 +329,7 @@ struct SharedState {
     weather: WeatherSystem,
     // Audio System
     audio_system: AudioSystem,
+    audio_event_processor: AudioEventProcessor,
     // Pause Menu
     pause_menu_page: PauseMenuPage,
     show_save_popup: bool,
@@ -332,9 +349,89 @@ struct SharedState {
     village_manager: VillageManager,
     // Progression System
     game_progression: GameProgression,
+    // Economy System
+    economy_manager: economy::EconomyManager,
+    player_economy: economy::PlayerEconomy,
+    dropped_items: economy::DroppedItemManager,
+    // Hotbar (quick-slot for inventory access)
+    active_hotbar_slot: usize, // 0-9, maps to first 10 inventory slots
+    // Combat state
+    combat_kill_time: f32, // Tracks time spent fighting current target
     // Debug
     debug_timer: f32,
     fog_level: u8, // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
+    // Audio state tracking
+    was_in_village: bool,
+    // Data Pipeline
+    data_pipeline: DataPipeline,
+    npc_audio: NpcAudioIntegration,
+    progression_audio: ProgressionAudioBridge,
+    faction_audio: FactionAudioBridge,
+    // Systems Manager (encyclopedia, flora, ecology, weather coordination)
+    systems_manager: systems_manager::SystemsManager,
+}
+
+impl SharedState {
+    /// Helper method to process audio event with proper split borrow
+    fn process_audio_event(&mut self, event: AudioEvent) {
+        self.audio_event_processor.process_event(event, &mut self.audio_system);
+    }
+
+    /// Helper method to update audio event processor with proper split borrow
+    fn update_audio_processor(&mut self, delta: f32) {
+        self.audio_event_processor.update(delta, &mut self.audio_system);
+    }
+
+    /// Helper method to update systems manager with proper split borrow
+    fn update_systems_manager(&mut self, delta: f32) {
+        let player_pos = self.player.position;
+        let look_dir = self.camera.forward();
+        self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+
+    /// Helper method to process combat loot with proper split borrow
+    fn process_combat_loot(
+        &mut self,
+        result: &crate::animals::combat::AnimalAttackResult,
+        weapon_used: &str,
+    ) -> economy::CombatLootResult {
+        use economy::CombatEconomyExt;
+        let combat_kill_time = self.combat_kill_time;
+        let hunting_level = self.game_progression.player_progression.get_hunting_level();
+        result.process_loot(
+            &mut self.economy_manager,
+            &mut self.player_economy,
+            weapon_used,
+            combat_kill_time,
+            100.0, // Player health
+            hunting_level,
+            0.0, // Luck stat
+        )
+    }
+
+    /// Helper method to update systems manager with proper split borrow
+    fn update_systems(&mut self, delta: f32) {
+        let player_pos = self.player.position;
+        let look_dir = self.camera.forward();
+        // Split borrow: systems_manager and animal_manager are separate fields
+        // Within a method on SharedState, Rust can see they're distinct
+        self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+}
+
+/// Register village factions with player progression
+/// Uses collect_faction_data to avoid borrow conflicts
+fn register_village_factions(state: &mut SharedState) {
+    // Collect data first (immutable borrow of village_manager)
+    let (village_factions, npc_factions) = state.village_manager.collect_faction_data();
+
+    // Then register (mutable borrow of player_progression)
+    for (id, faction) in village_factions {
+        state.game_progression.player_progression.register_village_faction(id, faction);
+    }
+    for (id, npc_data) in npc_factions {
+        state.game_progression.player_progression.register_npc_faction(id, npc_data);
+    }
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -461,6 +558,7 @@ fn main() {
         weather: WeatherSystem::new(),
         // Audio System
         audio_system: AudioSystem::new(),
+        audio_event_processor: AudioEventProcessor::new(),
         // Pause Menu
         pause_menu_page: PauseMenuPage::Main,
         show_save_popup: false,
@@ -473,6 +571,7 @@ fn main() {
             is_swinging: false,
             swing_progress: 0.0,
             swing_duration: 0.35, // 350ms swing - fast like Minecraft
+            hit_processed: false,
         },
         atmosphere: AtmosphereEngine::new(),
         show_load_menu: false,
@@ -483,9 +582,26 @@ fn main() {
         village_manager: VillageManager::new(12345), // Will be re-seeded when game starts
         // Progression System
         game_progression: GameProgression::new(),
+        // Economy System
+        economy_manager: economy::EconomyManager::new(),
+        player_economy: economy::PlayerEconomy::new(),
+        dropped_items: economy::DroppedItemManager::new(),
+        // Hotbar
+        active_hotbar_slot: 0,
+        // Combat state
+        combat_kill_time: 0.0,
         // Debug
         debug_timer: 0.0,
         fog_level: 2, // Start with medium fog
+        // Audio state tracking
+        was_in_village: false,
+        // Data Pipeline
+        data_pipeline: DataPipeline::new(),
+        npc_audio: NpcAudioIntegration::new(),
+        progression_audio: ProgressionAudioBridge::new(),
+        faction_audio: FactionAudioBridge::new(),
+        // Systems Manager (will be re-seeded when game starts)
+        systems_manager: systems_manager::SystemsManager::new(12345),
     }));
 
     // ... (Channel setup) ...
@@ -591,7 +707,7 @@ fn main() {
     // --- Input Callback ---
     let input_state = Arc::clone(&shared_state);
     app.set_input_callback(move |event, window| {
-        let mut state = input_state.lock().unwrap();
+        let mut state = input_state.safe_lock();
 
         // Initialize egui state if needed
         if state.egui_state.is_none() {
@@ -637,6 +753,7 @@ fn main() {
                         if !state.swing_animation.is_swinging {
                             state.swing_animation.is_swinging = true;
                             state.swing_animation.swing_progress = 0.0;
+                            state.swing_animation.hit_processed = false;
                         }
                     }
                 }
@@ -750,6 +867,53 @@ fn main() {
                                     }
                                     println!("[DEBUG] Cleared {} animals", count);
                                 }
+                                // E = Pickup closest item
+                                KeyCode::KeyE => {
+                                    let pickup_range = 3.0;
+                                    if let Some(closest) = state.dropped_items.closest_drop(
+                                        state.player.position,
+                                        pickup_range,
+                                    ) {
+                                        let item_name = closest.item.name.clone();
+                                        let rarity = closest.item.rarity;
+                                        let drop_id = closest.id;
+
+                                        // Pick up the item
+                                        if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
+                                            // Add to player inventory
+                                            if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
+                                                log::warn!("Failed to add item to inventory: {:?}", e);
+                                            } else {
+                                                log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Q = Drop item from current hotbar slot
+                                KeyCode::KeyQ => {
+                                    let slot = state.active_hotbar_slot;
+                                    if let Some(item) = state.player_economy.inventory.get_slot(slot).cloned() {
+                                        // Remove from inventory
+                                        let item_id = item.id;
+                                        if let Some(removed) = state.player_economy.inventory.remove_item(item_id) {
+                                            // Drop in front of player
+                                            let drop_pos = state.player.position + state.camera.forward() * 1.5 + Vec3::new(0.0, 1.0, 0.0);
+                                            state.dropped_items.spawn_drop(removed, drop_pos);
+                                            log::info!("[DROP] {} from hotbar slot {}", item.name, slot + 1);
+                                        }
+                                    }
+                                }
+                                // Number keys 1-9, 0 = Select hotbar slot
+                                KeyCode::Digit1 => state.active_hotbar_slot = 0,
+                                KeyCode::Digit2 => state.active_hotbar_slot = 1,
+                                KeyCode::Digit3 => state.active_hotbar_slot = 2,
+                                KeyCode::Digit4 => state.active_hotbar_slot = 3,
+                                KeyCode::Digit5 => state.active_hotbar_slot = 4,
+                                KeyCode::Digit6 => state.active_hotbar_slot = 5,
+                                KeyCode::Digit7 => state.active_hotbar_slot = 6,
+                                KeyCode::Digit8 => state.active_hotbar_slot = 7,
+                                KeyCode::Digit9 => state.active_hotbar_slot = 8,
+                                KeyCode::Digit0 => state.active_hotbar_slot = 9,
                                 _ => {}
                             }
                         }
@@ -767,7 +931,7 @@ fn main() {
     app.set_render_callback(move |ctx| {
         // Initialize Asset Registry if empty
         {
-            let mut state = render_state.lock().unwrap();
+            let mut state = render_state.safe_lock();
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
@@ -915,7 +1079,7 @@ fn main() {
         // Grass System (requires shadow map)
         static GRASS_PIPELINE: OnceLock<Mutex<GrassPipeline>> = OnceLock::new();
         let _grass_pipeline_mutex = GRASS_PIPELINE.get_or_init(|| {
-            let shadow_map = shadow_map_mutex.lock().unwrap();
+            let shadow_map = shadow_map_mutex.safe_lock();
             let grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
             drop(shadow_map);  // Release lock
             Mutex::new(grass_pipeline)
@@ -970,7 +1134,7 @@ fn main() {
 
         // Check if offscreen target needs to be created/resized
         {
-            let mut offscreen_opt = offscreen_target_mutex.lock().unwrap();
+            let mut offscreen_opt = offscreen_target_mutex.safe_lock();
             let needs_create = match &*offscreen_opt {
                 None => true,
                 Some(target) => target.needs_resize(ctx.config().width, ctx.config().height),
@@ -985,7 +1149,7 @@ fn main() {
             }
         }
 
-        let mut state = render_state.lock().unwrap();
+        let mut state = render_state.safe_lock();
 
         // Calculate FPS
         let now = Instant::now();
@@ -1011,6 +1175,13 @@ fn main() {
             // Update Weather
             state.weather.update(delta);
 
+            // Update dropped items (despawn timer)
+            state.dropped_items.update(delta);
+
+            // Update Systems Manager (encyclopedia, flora, ecology pipelines)
+            // This coordinates data flow between weather, ecology, observations
+            state.update_systems(delta);
+
             // Update Audio System (responds to weather, time, game state)
             let time_normalized = state.time_of_day / 24.0; // Normalize to 0.0-1.0
             let current_weather = state.weather.current_weather;
@@ -1025,9 +1196,77 @@ fn main() {
             };
             state.audio_system.set_music_state(audio_music_state);
 
-            // Update Swing Animation
+            // Update Swing Animation & Combat
             if state.swing_animation.is_swinging {
                 state.swing_animation.swing_progress += delta / state.swing_animation.swing_duration;
+
+                // Process hit at midpoint of swing (when weapon makes contact)
+                if state.swing_animation.swing_progress >= 0.4 && !state.swing_animation.hit_processed {
+                    state.swing_animation.hit_processed = true;
+                    state.combat_kill_time += delta;
+
+                    // Find closest animal in attack range
+                    let attack_range = 3.0; // Melee range in world units
+                    if let Some((animal_id, dist)) = animals::combat::find_closest_animal(
+                        &state.animal_manager,
+                        state.player.position,
+                        attack_range,
+                    ) {
+                        // Base damage from weapon (could be modified by equipped weapon)
+                        let base_damage = 25.0;
+                        let combat_ctx = animals::combat::CombatContext::default();
+
+                        // Process the attack
+                        if let Some(result) = animals::combat::player_attack_animal(
+                            &mut state.animal_manager,
+                            animal_id,
+                            base_damage,
+                            Some("hunter_knife"), // TODO: Get from equipped weapon
+                            &combat_ctx,
+                        ) {
+                            // Process loot if killed
+                            if result.killed {
+                                let loot_result = state.process_combat_loot(&result, "hunter_knife");
+
+                                // Spawn dropped items in the world
+                                let drop_pos = result.position + Vec3::new(0.0, 0.5, 0.0);
+                                for notification in &loot_result.loot {
+                                    state.dropped_items.spawn_drop(
+                                        notification.item.clone(),
+                                        drop_pos + Vec3::new(
+                                            (rand::random::<f32>() - 0.5) * 1.0,
+                                            0.0,
+                                            (rand::random::<f32>() - 0.5) * 1.0,
+                                        ),
+                                    );
+                                }
+
+                                // Spawn currency drops if any
+                                if loot_result.total_wampum > 0 || loot_result.total_tobacco > 0 {
+                                    state.dropped_items.spawn_currency(
+                                        loot_result.total_wampum,
+                                        loot_result.total_tobacco,
+                                        drop_pos,
+                                    );
+                                }
+
+                                // Log loot for debugging
+                                if !loot_result.loot.is_empty() || loot_result.total_wampum > 0 {
+                                    log::info!(
+                                        "Killed {:?}! Spawned {} drops, {} wampum",
+                                        loot_result.species,
+                                        loot_result.loot.len(),
+                                        loot_result.total_wampum
+                                    );
+                                }
+
+                                // Reset combat timer
+                                state.combat_kill_time = 0.0;
+                            }
+                        }
+                    }
+                }
+
                 if state.swing_animation.swing_progress >= 1.0 {
                     state.swing_animation.is_swinging = false;
                     state.swing_animation.swing_progress = 0.0;
@@ -1076,6 +1315,105 @@ fn main() {
             let player_vel = state.player.velocity;
             state.animal_manager.update(delta, player_pos, player_vel);
 
+            // === AUDIO EVENTS INTEGRATION ===
+            // Collect audio events to avoid borrow conflicts
+            let audio_events: Vec<AudioEvent> = {
+                let mut events = Vec::new();
+
+                // Process animal encounters for audio
+                let mut in_combat = false;
+                for animal in state.animal_manager.animals_near(player_pos, 50.0) {
+                    let distance = (animal.position - player_pos).length();
+                    let species_name = animal.species.name().to_string();
+                    let threat = species_threat_profile(&species_name);
+
+                    match animal.behavior_state {
+                        BehaviorState::Attack(_) => {
+                            if !in_combat {
+                                events.push(AudioEvent::AnimalCombatStart { species: species_name });
+                                in_combat = true;
+                            }
+                        }
+                        BehaviorState::Pursue(_) | BehaviorState::Alert(_) => {
+                            events.push(AudioEvent::AnimalDetected {
+                                species: species_name,
+                                threat,
+                                distance
+                            });
+                        }
+                        BehaviorState::Flee(_) => {
+                            events.push(AudioEvent::AnimalFleeing { species: species_name });
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Time-of-day audio events
+                let prev_hour = ((state.time_of_day - delta * 0.1) + 24.0) % 24.0;
+                let curr_hour = state.time_of_day;
+
+                if prev_hour < 6.0 && curr_hour >= 6.0 {
+                    events.push(AudioEvent::SunriseBegins);
+                }
+                if prev_hour < 18.0 && curr_hour >= 18.0 {
+                    events.push(AudioEvent::SunsetBegins);
+                }
+
+                // Storm approaching
+                if state.weather.target_weather == WeatherType::Stormy &&
+                   state.weather.transition_progress < 0.1 {
+                    events.push(AudioEvent::StormApproaching);
+                }
+
+                events
+            };
+
+            // Collect village events
+            let (is_in_village, population) = state.village_manager.is_player_in_village(player_pos);
+            let village_event = if is_in_village && !state.was_in_village {
+                Some(AudioEvent::VillageEntered { population })
+            } else if !is_in_village && state.was_in_village {
+                Some(AudioEvent::VillageExited)
+            } else {
+                None
+            };
+            state.was_in_village = is_in_village;
+
+            // Process all audio events - use std::mem::take to avoid borrow conflicts
+            {
+                let mut audio_processor = std::mem::take(&mut state.audio_event_processor);
+                for event in audio_events {
+                    audio_processor.process_event(event, &mut state.audio_system);
+                }
+                if let Some(event) = village_event {
+                    audio_processor.process_event(event, &mut state.audio_system);
+                }
+                audio_processor.update(delta, &mut state.audio_system);
+                state.audio_event_processor = audio_processor;
+            }
+
+            // === DATA PIPELINE PROCESSING ===
+            // Process game events through the unified data pipeline
+            {
+                // Process data pipeline and collect audio events
+                let mut pipeline = std::mem::take(&mut state.data_pipeline);
+                let pipeline_audio_events = pipeline.process(delta);
+                state.data_pipeline = pipeline;
+
+                // Send pipeline-generated audio events to audio processor
+                if !pipeline_audio_events.is_empty() {
+                    let mut audio_processor = std::mem::take(&mut state.audio_event_processor);
+                    for event in pipeline_audio_events {
+                        audio_processor.process_event(event, &mut state.audio_system);
+                    }
+                    state.audio_event_processor = audio_processor;
+                }
+
+                // Cleanup NPC audio integration periodically
+                let cleanup_time = state.data_pipeline.stats().events_processed as f32 * 0.016;
+                state.npc_audio.cleanup(cleanup_time);
+            }
+
             // Update Game Progression System
             {
                 use crate::progression::reputation::Faction;
@@ -1099,6 +1437,17 @@ fn main() {
 
                 // Validate progression state periodically
                 state.game_progression.player_progression.validate();
+
+                // Update faction system and process faction events
+                state.game_progression.player_progression.update_faction_system(game_time);
+
+                // Display faction notifications
+                let notifications = state.game_progression.player_progression.get_faction_notifications();
+                for notification in notifications {
+                    if notification.importance >= crate::progression::faction_integration::NotificationImportance::Medium {
+                        println!("[FACTION] {}", notification.message);
+                    }
+                }
             }
 
             // Update animal orb visual representation - only render nearby animals
@@ -1110,7 +1459,7 @@ fn main() {
                     let scale = animal.species.orb_scale();
 
                     // Modify color based on behavior state
-                    let (color, emissive) = match &animal.behavior_state {
+                    let (mut color, mut emissive) = match &animal.behavior_state {
                         animals::BehaviorState::Attack(_) => {
                             // Red tint and strong glow when attacking
                             ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
@@ -1136,6 +1485,15 @@ fn main() {
                             (base_color, 0.0)
                         }
                     };
+
+                    // Apply damage flash effect (bright white/red flash when hit)
+                    let (flash_tint, flash_emissive) = animal.damage_flash_effect();
+                    color = [
+                        (color[0] * flash_tint[0]).min(2.0),
+                        (color[1] * flash_tint[1]).min(2.0),
+                        (color[2] * flash_tint[2]).min(2.0),
+                    ];
+                    emissive = (emissive + flash_emissive).min(2.0);
 
                     // Create transform matrix (position + scale, orbs hover slightly above ground)
                     let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
@@ -1168,8 +1526,26 @@ fn main() {
                 });
             }
 
+            // Add dropped item orbs
+            let game_time = state.time_of_day; // For bounce animation
+            for drop in state.dropped_items.all_drops() {
+                let scale = drop.scale();
+                let bounce = drop.bounce_offset(game_time);
+                let pos = drop.position + Vec3::new(0.0, scale * 0.5 + bounce + 0.2, 0.0);
+                let model_matrix = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    glam::Quat::from_rotation_y(drop.rotation),
+                    pos,
+                );
+                orb_instances.push(OrbInstance {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    color: drop.color(),
+                    emissive: drop.glow_intensity + if drop.is_highlighted { 0.5 } else { 0.0 },
+                });
+            }
+
             // Upload instances to GPU
-            let mut orb_pipeline = animal_orb_pipeline_mutex.lock().unwrap();
+            let mut orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
             orb_pipeline.upload_instances(ctx.device(), &orb_instances);
         }
 
@@ -1441,7 +1817,7 @@ fn main() {
                                                 state.game_state = GameState::Loading;
                                                 state.save_name_input = save_name.clone();
                                                 let range = 3;
-                                                let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                                let total = saturating_range_area(range);
                                                 state.loading_progress = LoadingProgress {
                                                     total_chunks: total,
                                                     chunks_generated: 0,
@@ -1449,7 +1825,7 @@ fn main() {
                                                     current_status: "Loading saved world...".to_string(),
                                                 };
                                                 if let Some(manager) = CHUNK_MANAGER.get() {
-                                                    let mut mgr = manager.lock().unwrap();
+                                                    let mut mgr = manager.safe_lock();
                                                     mgr.loaded_chunks.clear();
                                                     mgr.loading_chunks.clear();
                                                 }
@@ -1461,6 +1837,8 @@ fn main() {
                                                     2000.0, // 2km radius
                                                     10,     // max 10 villages
                                                 );
+                                                // Register village factions
+                                                register_village_factions(&mut *state);
                                             }
                                         }
                                     }
@@ -1474,7 +1852,7 @@ fn main() {
                                         state.player = Player::new(Vec3::new(0.0, 50.0, 0.0));
                                         println!("[GAME] Starting new game with seed: {}", seed);
                                         let range = 3;
-                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        let total = saturating_range_area(range);
                                         state.loading_progress = LoadingProgress {
                                             total_chunks: total,
                                             chunks_generated: 0,
@@ -1482,7 +1860,7 @@ fn main() {
                                             current_status: "Initializing world generation...".to_string(),
                                         };
                                         if let Some(manager) = CHUNK_MANAGER.get() {
-                                            let mut mgr = manager.lock().unwrap();
+                                            let mut mgr = manager.safe_lock();
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
@@ -1494,6 +1872,8 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Register village factions
+                                        register_village_factions(&mut *state);
                                     }
                                     "Load Game" => {
                                         state.show_load_menu = true;
@@ -1557,7 +1937,7 @@ fn main() {
                                         state.save_name_input = save_name.clone();
                                         state.show_load_menu = false;
                                         let range = 3;
-                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        let total = saturating_range_area(range);
                                         state.loading_progress = LoadingProgress {
                                             total_chunks: total,
                                             chunks_generated: 0,
@@ -1565,7 +1945,7 @@ fn main() {
                                             current_status: "Loading saved world...".to_string(),
                                         };
                                         if let Some(manager) = CHUNK_MANAGER.get() {
-                                            let mut mgr = manager.lock().unwrap();
+                                            let mut mgr = manager.safe_lock();
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
@@ -1577,6 +1957,8 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Register village factions
+                                        register_village_factions(&mut *state);
                                     }
                                 }
                                 save_y += 45.0;
@@ -1985,7 +2367,7 @@ fn main() {
 
         // Handle Pipeline Updates (scoped to release locks early)
         {
-            let mut manager = chunk_manager.lock().unwrap();
+            let mut manager = chunk_manager.safe_lock();
 
             // Update Chunk Streaming (Request new chunks / Unload old ones)
             if state.game_state == GameState::Loading || state.game_state == GameState::Playing {
@@ -2035,7 +2417,7 @@ fn main() {
 
                             // Create Pipelines
                             let terrain_pipeline = {
-                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                let shadow_map = shadow_map_mutex.safe_lock();
                                 TerrainPipeline::new(
                                     ctx.device(),
                                     ctx.surface_format(),
@@ -2046,7 +2428,7 @@ fn main() {
 
                             let mut grass_pipeline = None;
                             if !grass_pos.is_empty() {
-                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                let shadow_map = shadow_map_mutex.safe_lock();
                                 let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                                 drop(shadow_map);
                                 gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
@@ -2224,7 +2606,7 @@ fn main() {
         } // Release manager lock
 
         // Render frame (re-acquire locks as needed)
-        let manager = chunk_manager.lock().unwrap();
+        let manager = chunk_manager.safe_lock();
         if state.game_state == GameState::Playing && manager.chunk_count() > 0 {
             let elapsed = start_time.elapsed().as_secs_f32();
 
@@ -2245,7 +2627,7 @@ fn main() {
             });
 
             // Get offscreen target view for post-process rendering
-            let offscreen_guard = offscreen_target_mutex.lock().unwrap();
+            let offscreen_guard = offscreen_target_mutex.safe_lock();
             let offscreen_view = offscreen_guard.as_ref().map(|t| &t.view);
 
             // Calculate sun direction
@@ -2356,7 +2738,7 @@ fn main() {
 
             // Update Water & Dispatch Compute
             // {
-            //     let mut water = water_system_mutex.lock().unwrap();
+            //     let mut water = water_system_mutex.safe_lock();
             //     water.update(ctx.queue(), elapsed, delta);
             //     water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
             //     water.dispatch(&mut encoder);
@@ -2364,8 +2746,8 @@ fn main() {
 
             // 0. Shadow Pass
             {
-                let shadow_map = shadow_map_mutex.lock().unwrap();
-                let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
+                let shadow_map = shadow_map_mutex.safe_lock();
+                let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2430,7 +2812,7 @@ fn main() {
 
             // 0.5 Sky Pass (Draw Skybox/Clouds first)
             {
-                let sky_pipeline = sky_pipeline_mutex.lock().unwrap();
+                let sky_pipeline = sky_pipeline_mutex.safe_lock();
                 sky_pipeline.update_uniforms(
                     ctx.queue(),
                     view_proj,
@@ -2466,8 +2848,8 @@ fn main() {
             // 1. Sun/Moon Pass
             {
                 // Acquire locks before starting render pass to ensure they outlive the pass
-                let sun_pipeline = sun_pipeline_mutex.lock().unwrap();
-                let moon_pipeline = moon_pipeline_mutex.lock().unwrap();
+                let sun_pipeline = sun_pipeline_mutex.safe_lock();
+                let moon_pipeline = moon_pipeline_mutex.safe_lock();
 
                 let mut sun_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sun/Moon Pass"),
@@ -2503,8 +2885,8 @@ fn main() {
 
             // 2. Main Render Pass
             {
-                // let water_system_guard = water_system_mutex.lock().unwrap();
-                let orb_pipeline = animal_orb_pipeline_mutex.lock().unwrap();
+                // let water_system_guard = water_system_mutex.safe_lock();
+                let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2637,7 +3019,7 @@ fn main() {
 
             // 2.5 Light Shaft Post-Process Pass
             if offscreen_view.is_some() {
-                let light_shaft_pipeline = light_shaft_pipeline_mutex.lock().unwrap();
+                let light_shaft_pipeline = light_shaft_pipeline_mutex.safe_lock();
                 let atmo = &state.atmosphere.state;
 
                 // Calculate sun screen position
@@ -2728,7 +3110,7 @@ fn main() {
 
             // 3. Viewmodel Pass (First-person arms and weapon) - only in playing mode
             if state.game_state == GameState::Playing {
-                let viewmodel_pipeline = viewmodel_pipeline_mutex.lock().unwrap();
+                let viewmodel_pipeline = viewmodel_pipeline_mutex.safe_lock();
 
                 // Update viewmodel uniforms with camera rotation and swing animation
                 viewmodel_pipeline.update_uniforms(
@@ -2774,7 +3156,7 @@ fn main() {
 
                 let tris = state.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let mut renderer = egui_renderer_mutex.lock().unwrap();
+                let mut renderer = egui_renderer_mutex.safe_lock();
                 for (id, image_delta) in &full_output.textures_delta.set {
                     renderer.update_texture(ctx.device(), ctx.queue(), *id, image_delta);
                 }
@@ -2854,7 +3236,7 @@ fn main() {
 
                 let tris = state.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let mut renderer = egui_renderer_mutex.lock().unwrap();
+                let mut renderer = egui_renderer_mutex.safe_lock();
                 for (id, image_delta) in &full_output.textures_delta.set {
                     renderer.update_texture(ctx.device(), ctx.queue(), *id, image_delta);
                 }

@@ -34,6 +34,23 @@ impl AnimalSpecies {
         }
     }
 
+    /// Parse species from name string
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "black bear" | "blackbear" => Some(Self::BlackBear),
+            "eastern cougar" | "easterncougar" | "cougar" => Some(Self::EasternCougar),
+            "gray wolf" | "graywolf" | "wolf" => Some(Self::GrayWolf),
+            "timber rattlesnake" | "timberrattlesnake" | "rattlesnake" => Some(Self::TimberRattlesnake),
+            "american alligator" | "americanalligator" | "alligator" => Some(Self::AmericanAlligator),
+            "wild boar" | "wildboar" | "boar" => Some(Self::WildBoar),
+            "copperhead" | "copperhead snake" => Some(Self::Copperhead),
+            "red wolf" | "redwolf" => Some(Self::RedWolf),
+            "bobcat" => Some(Self::Bobcat),
+            "cottonmouth" => Some(Self::Cottonmouth),
+            _ => None,
+        }
+    }
+
     /// Get the base stats for this species
     pub fn base_stats(&self) -> AnimalStats {
         match self {
@@ -662,3 +679,5 @@ impl Difficulty {
         }
     }
 }
+
+// Pipeline helper methods are defined in the main impl block above

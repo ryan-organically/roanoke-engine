@@ -284,6 +284,27 @@ impl FactionManager {
         modifier
     }
 
+    /// Check if player can trade with this faction
+    pub fn can_trade(&self, faction: Faction) -> bool {
+        let standing = self.get_standing(faction);
+        // Can't trade if hostile or at war
+        standing >= Standing::Suspicious
+    }
+
+    /// Check if player can access quests from this faction
+    pub fn can_access_quests(&self, faction: Faction) -> bool {
+        let standing = self.get_standing(faction);
+        // Need at least neutral standing
+        standing >= Standing::Neutral
+    }
+
+    /// Check if player can train skills with this faction
+    pub fn can_train_skills(&self, faction: Faction) -> bool {
+        let standing = self.get_standing(faction);
+        // Need at least friendly standing
+        standing >= Standing::Friendly
+    }
+
     // ========== SKILL MANAGEMENT ==========
 
     /// Check if player has a specific faction skill
@@ -596,7 +617,7 @@ impl NpcDisposition {
 }
 
 /// NPC roles affecting disposition
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NpcRole {
     Warrior,
     Chief,

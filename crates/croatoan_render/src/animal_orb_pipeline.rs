@@ -8,6 +8,13 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use wgpu::{BindGroup, Buffer, Device, Queue, RenderPipeline};
 
+use crate::pipeline_validation::{
+    PipelineError, PipelineResult, sanitize_float, sanitize_vec3,
+};
+
+/// Maximum animal orb instances per frame (safety limit)
+const MAX_ORB_INSTANCES: usize = 5_000;
+
 /// Instance data for a single animal orb
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -221,19 +228,68 @@ impl AnimalOrbPipeline {
         }
     }
 
-    /// Upload instance data for all visible animal orbs
-    pub fn upload_instances(&mut self, device: &Device, instances: &[OrbInstance]) {
-        self.instance_count = instances.len() as u32;
+    /// Upload instance data with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if instance count exceeds limit
+    pub fn try_upload_instances(&mut self, device: &Device, instances: &[OrbInstance]) -> PipelineResult<()> {
+        if instances.len() > MAX_ORB_INSTANCES {
+            return Err(PipelineError::TooManyInstances {
+                count: instances.len(),
+                max: MAX_ORB_INSTANCES,
+            });
+        }
+        self.upload_instances_unchecked(device, instances);
+        Ok(())
+    }
 
-        if self.instance_count == 0 {
+    /// Upload instance data for all visible animal orbs (clamps if too many)
+    pub fn upload_instances(&mut self, device: &Device, instances: &[OrbInstance]) {
+        if instances.is_empty() {
+            self.instance_count = 0;
             self.instance_buffer = None;
             return;
         }
 
+        // Safety check: clamp instance count
+        if instances.len() > MAX_ORB_INSTANCES {
+            log::warn!("Too many animal orb instances ({} requested), clamping to {}", instances.len(), MAX_ORB_INSTANCES);
+        }
+
+        self.upload_instances_unchecked(device, &instances[..instances.len().min(MAX_ORB_INSTANCES)]);
+    }
+
+    /// Upload instances without validation (internal use)
+    fn upload_instances_unchecked(&mut self, device: &Device, instances: &[OrbInstance]) {
+        if instances.is_empty() {
+            self.instance_count = 0;
+            self.instance_buffer = None;
+            return;
+        }
+
+        self.instance_count = instances.len() as u32;
+
+        // Sanitize instance data to prevent GPU undefined behavior
+        let sanitized: Vec<OrbInstance> = instances.iter()
+            .map(|inst| {
+                let m = inst.model_matrix;
+                OrbInstance {
+                    model_matrix: [
+                        [sanitize_float(m[0][0]), sanitize_float(m[0][1]), sanitize_float(m[0][2]), sanitize_float(m[0][3])],
+                        [sanitize_float(m[1][0]), sanitize_float(m[1][1]), sanitize_float(m[1][2]), sanitize_float(m[1][3])],
+                        [sanitize_float(m[2][0]), sanitize_float(m[2][1]), sanitize_float(m[2][2]), sanitize_float(m[2][3])],
+                        [sanitize_float(m[3][0]), sanitize_float(m[3][1]), sanitize_float(m[3][2]), sanitize_float(m[3][3])],
+                    ],
+                    color: sanitize_vec3(inst.color),
+                    emissive: sanitize_float(inst.emissive),
+                }
+            })
+            .collect();
+
         self.instance_buffer = Some(device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("Animal Orb Instance Buffer"),
-                contents: bytemuck::cast_slice(instances),
+                contents: bytemuck::cast_slice(&sanitized),
                 usage: wgpu::BufferUsages::VERTEX,
             },
         ));
@@ -250,17 +306,36 @@ impl AnimalOrbPipeline {
     }
 
     /// Render all animal orbs
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        if self.instance_buffer.is_none() || self.instance_count == 0 {
+        // Early exit if no instances to render
+        if self.instance_count == 0 {
             return;
         }
+
+        // Defensive: require instance buffer
+        let instance_buffer = match &self.instance_buffer {
+            Some(ib) => ib,
+            None => {
+                log::trace!("Animal orb render skipped: no instance buffer");
+                return;
+            }
+        };
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, self.instance_buffer.as_ref().unwrap().slice(..));
+        render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..self.instance_count);
+    }
+
+    /// Check if the pipeline has instances ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.instance_buffer.is_some() && self.instance_count > 0
     }
 
     /// Get the number of instances currently uploaded

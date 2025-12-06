@@ -3,6 +3,8 @@ use winit::window::Window;
 use std::sync::Arc;
 
 pub mod camera;
+pub mod pipeline_validation;
+pub mod security;
 pub mod terrain_pipeline;
 pub mod grass_pipeline;
 pub mod tree_pipeline;
@@ -29,6 +31,8 @@ pub use building_pipeline::{BuildingPipeline, BuildingMesh, BuildingVertex};
 pub use viewmodel_pipeline::ViewModelPipeline;
 pub use light_shaft_pipeline::LightShaftPipeline;
 pub use animal_orb_pipeline::{AnimalOrbPipeline, OrbInstance};
+pub use pipeline_validation::{PipelineError, PipelineResult, MeshValidator};
+pub use security::{SecurityError, SecurityResult, SecurityStatus, get_security_status};
 
 pub struct GraphicsContext {
     pub surface: Surface<'static>,

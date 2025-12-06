@@ -1,6 +1,16 @@
 use wgpu::util::DeviceExt;
 use glam::Mat4;
 
+use crate::pipeline_validation::{
+    MeshValidator, PipelineResult,
+    log_pipeline_error, sanitize_vec3,
+};
+
+/// Maximum vertices per terrain chunk (safety limit)
+const MAX_TERRAIN_VERTICES: usize = 100_000;
+/// Maximum indices per terrain chunk (safety limit)
+const MAX_TERRAIN_INDICES: usize = 600_000;
+
 /// Uniform data structure matching WGSL layout
 /// Must match the shader struct exactly!
 #[repr(C)]
@@ -35,8 +45,49 @@ pub struct TerrainPipeline {
 }
 
 impl TerrainPipeline {
-    /// Create a new terrain pipeline
+    /// Create a new terrain pipeline with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if mesh data is invalid (mismatched arrays, out-of-bounds indices, etc.)
+    pub fn try_new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        positions: &[[f32; 3]],
+        colors: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+        shadow_map: &crate::shadows::ShadowMap,
+    ) -> PipelineResult<Self> {
+        // Validate mesh data before GPU allocation
+        let validator = MeshValidator::new(MAX_TERRAIN_VERTICES, MAX_TERRAIN_INDICES);
+        validator.validate_terrain(positions, colors, normals, indices)?;
+
+        Ok(Self::new_unchecked(device, surface_format, positions, colors, normals, indices, shadow_map))
+    }
+
+    /// Create a new terrain pipeline (panics on invalid data)
+    ///
+    /// For production code, prefer `try_new()` which returns a Result.
     pub fn new(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        positions: &[[f32; 3]],
+        colors: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+        shadow_map: &crate::shadows::ShadowMap,
+    ) -> Self {
+        match Self::try_new(device, surface_format, positions, colors, normals, indices, shadow_map) {
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                log_pipeline_error("TerrainPipeline", &e);
+                panic!("Failed to create terrain pipeline: {}", e);
+            }
+        }
+    }
+
+    /// Create pipeline without validation (internal use)
+    fn new_unchecked(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         positions: &[[f32; 3]],
@@ -206,6 +257,9 @@ impl TerrainPipeline {
     }
 
     /// Create vertex and index buffers
+    ///
+    /// Assumes data has been pre-validated by `try_new()`.
+    /// Sanitizes NaN/Inf values to prevent GPU undefined behavior.
     fn create_buffers(
         device: &wgpu::Device,
         positions: &[[f32; 3]],
@@ -213,12 +267,16 @@ impl TerrainPipeline {
         normals: &[[f32; 3]],
         indices: &[u32],
     ) -> (wgpu::Buffer, wgpu::Buffer) {
-        // Interleave position, color, and normal data
-        let mut vertex_data = Vec::with_capacity(positions.len() * 9);
-        for i in 0..positions.len() {
-            vertex_data.extend_from_slice(&positions[i]);
-            vertex_data.extend_from_slice(&colors[i]);
-            vertex_data.extend_from_slice(&normals[i]);
+        let vertex_count = positions.len().min(MAX_TERRAIN_VERTICES);
+        let index_count = indices.len().min(MAX_TERRAIN_INDICES);
+
+        // Interleave position, color, and normal data with NaN/Inf sanitization
+        let mut vertex_data = Vec::with_capacity(vertex_count * 9);
+        for i in 0..vertex_count {
+            // Sanitize each component to prevent GPU undefined behavior
+            vertex_data.extend_from_slice(&sanitize_vec3(positions[i]));
+            vertex_data.extend_from_slice(&sanitize_vec3(colors[i]));
+            vertex_data.extend_from_slice(&sanitize_vec3(normals[i]));
         }
 
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -229,9 +287,11 @@ impl TerrainPipeline {
 
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Terrain Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices[..index_count]),
             usage: wgpu::BufferUsages::INDEX,
         });
+
+        log::debug!("Created terrain buffers: {} vertices, {} indices", vertex_count, index_count / 3);
 
         (vertex_buffer, index_buffer)
     }
@@ -256,11 +316,32 @@ impl TerrainPipeline {
     }
 
     /// Render the terrain
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        // Early exit if no triangles to render
+        if self.index_count == 0 {
+            log::trace!("Terrain render skipped: no indices");
+            return;
+        }
+
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+
+    /// Check if the pipeline has valid mesh data ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.index_count > 0
+    }
+
+    /// Get the current triangle count
+    #[inline]
+    pub fn triangle_count(&self) -> u32 {
+        self.index_count / 3
     }
 }

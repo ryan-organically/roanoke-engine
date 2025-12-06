@@ -207,6 +207,76 @@ impl VillageManager {
         self.instances_dirty = true;
     }
 
+    /// Collect village faction data for registration
+    /// Returns vectors of (village_id, VillageFaction) and (npc_id, NpcFactionData)
+    pub fn collect_faction_data(&self) -> (
+        Vec<(u32, crate::progression::faction_integration::VillageFaction)>,
+        Vec<(u32, crate::progression::faction_integration::NpcFactionData)>
+    ) {
+        use crate::progression::faction_integration::{VillageFaction, VillageStatus, NpcFactionData, determine_village_faction};
+
+        let mut village_factions = Vec::new();
+        let mut npc_factions = Vec::new();
+
+        for village in &self.villages {
+            let village_id = village.id.0 as u32;
+
+            // Determine faction based on village name and location
+            let faction = determine_village_faction(
+                &village.layout.name,
+                village.center,
+                self.seed,
+            );
+
+            // Croatoan is special - starts with bonus reputation
+            let (status, local_rep) = if village.layout.name == "Croatoan" {
+                (VillageStatus::Capital, 50) // Player starts with good standing
+            } else {
+                (VillageStatus::Normal, 0)
+            };
+
+            let village_faction = VillageFaction {
+                primary_faction: faction,
+                influences: Vec::new(),
+                local_reputation: local_rep,
+                independent: false,
+                status,
+                clan_name: Some(village.layout.name.clone()),
+            };
+
+            village_factions.push((village_id, village_faction));
+
+            // Also collect NPC faction data for each NPC in the village
+            for (npc_idx, npc) in village.layout.npcs.iter().enumerate() {
+                let npc_id = (village_id * 1000) + npc_idx as u32;
+                let npc_role = match npc.role {
+                    croatoan_procgen::NpcRole::Elder => crate::npc::npc_manager::NpcRole::Elder,
+                    croatoan_procgen::NpcRole::Chief => crate::npc::npc_manager::NpcRole::Chief,
+                    croatoan_procgen::NpcRole::Shaman => crate::npc::npc_manager::NpcRole::Shaman,
+                    croatoan_procgen::NpcRole::Warrior => crate::npc::npc_manager::NpcRole::Warrior,
+                    croatoan_procgen::NpcRole::Hunter => crate::npc::npc_manager::NpcRole::Hunter,
+                    croatoan_procgen::NpcRole::Farmer => crate::npc::npc_manager::NpcRole::Farmer,
+                    croatoan_procgen::NpcRole::Craftsperson => crate::npc::npc_manager::NpcRole::Craftsperson,
+                    croatoan_procgen::NpcRole::Child => crate::npc::npc_manager::NpcRole::Child,
+                    croatoan_procgen::NpcRole::Villager => crate::npc::npc_manager::NpcRole::Villager,
+                };
+
+                let npc_faction_data = NpcFactionData::from_role(
+                    npc_id,
+                    npc_role,
+                    faction,
+                );
+
+                npc_factions.push((npc_id, npc_faction_data));
+            }
+        }
+
+        println!("[FACTION] Collected faction data for {} villages, {} NPCs",
+            village_factions.len(), npc_factions.len());
+
+        (village_factions, npc_factions)
+    }
+
     /// Get all village structures that fall within a chunk
     pub fn get_structures_for_chunk(
         &self,
@@ -294,6 +364,31 @@ impl VillageManager {
     /// Get total NPC count across all villages
     pub fn total_npc_count(&self) -> usize {
         self.npc_orbs.len()
+    }
+
+    /// Check if the player is inside any village bounds
+    /// Returns (is_in_village, village_population)
+    pub fn is_player_in_village(&self, player_pos: Vec3) -> (bool, u32) {
+        for village in &self.villages {
+            if player_pos.x >= village.bounds_min.x && player_pos.x <= village.bounds_max.x &&
+               player_pos.z >= village.bounds_min.z && player_pos.z <= village.bounds_max.z {
+                // Count NPCs in this village
+                let npc_count = village.layout.npcs.len() as u32;
+                return (true, npc_count);
+            }
+        }
+        (false, 0)
+    }
+
+    /// Get the name of the village the player is in, if any
+    pub fn get_current_village_name(&self, player_pos: Vec3) -> Option<String> {
+        for village in &self.villages {
+            if player_pos.x >= village.bounds_min.x && player_pos.x <= village.bounds_max.x &&
+               player_pos.z >= village.bounds_min.z && player_pos.z <= village.bounds_max.z {
+                return Some(village.layout.name.clone());
+            }
+        }
+        None
     }
 
     /// Get statistics string for debug display

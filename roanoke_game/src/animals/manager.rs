@@ -154,7 +154,7 @@ impl Pack {
             .members
             .iter()
             .filter_map(|id| animals.get(id).map(|a| (*id, a.current_health)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(id, _)| id);
 
         // Clear dirty flag
@@ -446,5 +446,27 @@ impl AnimalManager {
             self.total_spawned,
             self.total_killed
         )
+    }
+
+    /// Reduce awareness of nearby animals (for stealth kills)
+    pub fn reduce_nearby_awareness(&mut self, position: Vec3, radius: f32, multiplier: f32) {
+        let nearby_ids: Vec<AnimalId> = self.spatial.query_radius(position, radius);
+        for id in nearby_ids {
+            if let Some(animal) = self.animals.get_mut(&id) {
+                animal.awareness *= multiplier;
+            }
+        }
+    }
+
+    /// Increase awareness of nearby animals (for loud actions)
+    pub fn alert_nearby_animals(&mut self, position: Vec3, radius: f32, alert_amount: f32) {
+        let nearby_ids: Vec<AnimalId> = self.spatial.query_radius(position, radius);
+        for id in nearby_ids {
+            if let Some(animal) = self.animals.get_mut(&id) {
+                animal.awareness = (animal.awareness + alert_amount).min(1.0);
+                // Make them look toward the sound
+                animal.look_at(position);
+            }
+        }
     }
 }
