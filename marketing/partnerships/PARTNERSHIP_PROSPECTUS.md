@@ -3,9 +3,30 @@
 
 ---
 
-**Document Classification:** Business Development
+<!--
+@document-metadata
+doc_id: BD-001
+title: Partnership Prospectus
+version: 1.0.0
+status: ACTIVE
+owner: Business Development
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: External - Business
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | BD-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Business Development |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | External - Business |
+
 **Contact:** partnerships@playroanoke.com
-**Version:** 1.0
 
 ---
 

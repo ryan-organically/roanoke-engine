@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Strategic Business Document
-**Version:** 1.0
-**Authors:** Roanoke Strategy Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-010
+title: Platform Economics & Network Effects
+version: 1.0.0
+status: ACTIVE
+owner: Strategy
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Confidential - Strategic
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-010 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Strategy |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Confidential - Strategic |
+
 **Abstract:** This whitepaper analyzes the economic dynamics of gaming platforms and details Roanoke's strategy to create sustainable competitive advantages through network effects, multi-sided marketplace design, and ecosystem lock-in. We present our economic model, pricing strategy, and path to platform dominance.
 
 ---

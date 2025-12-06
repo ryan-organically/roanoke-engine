@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Public Technical Documentation
-**Version:** 1.0
-**Authors:** Roanoke Engine Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-003
+title: AI Behavior System
+version: 1.0.0
+status: ACTIVE
+owner: CTO
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-06-05
+classification: Public Technical Documentation
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-003 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | CTO / Engine Team |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Public Technical Documentation |
+
 **Abstract:** This whitepaper describes the Roanoke Engine's AI behavior system, which enables thousands of autonomous agents (wildlife, NPCs) to exhibit believable, emergent behaviors. We present our utility-based decision architecture, hierarchical goal system, and optimization strategies that create living ecosystems without scripted interactions.
 
 ---

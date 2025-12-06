@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Internal Marketing Strategy
-**Version:** 1.0
-**Authors:** Roanoke Marketing & Community Teams
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-025
+title: Meme Marketing & Viral Culture Playbook
+version: 1.0.0
+status: ACTIVE
+owner: Marketing
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Internal - Strategy
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-025 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Marketing |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal - Strategy |
+
 **Abstract:** This playbook details Roanoke's approach to meme culture, viral marketing, and Gen Z engagement. We document the strategy behind organic cultural moments, templates for participatory content, and the delicate balance between authentic community expression and strategic amplification.
 
 ---

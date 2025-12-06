@@ -3,7 +3,29 @@
 
 ---
 
-**Last Updated:** 2025
+<!--
+@document-metadata
+doc_id: PRESS-001
+title: Press Kit
+version: 1.0.0
+status: ACTIVE
+owner: Communications
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Public
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | PRESS-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Communications |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Public |
+
 **Press Contact:** press@playroanoke.com
 **Website:** playroanoke.com/press
 

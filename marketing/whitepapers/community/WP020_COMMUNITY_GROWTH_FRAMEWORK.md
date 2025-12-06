@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Community Strategy Document
-**Version:** 1.0
-**Authors:** Roanoke Community Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-020
+title: Community Growth Framework
+version: 1.0.0
+status: ACTIVE
+owner: Community
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Internal - Strategy
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-020 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Community |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal - Strategy |
+
 **Abstract:** This whitepaper outlines Roanoke's community growth strategy, detailing our approach to building, nurturing, and empowering a self-sustaining player community. We present frameworks for community health measurement, engagement programs, and the cultural development that transforms players into advocates.
 
 ---

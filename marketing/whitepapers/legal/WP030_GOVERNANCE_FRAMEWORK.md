@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Policy Document
-**Version:** 1.0
-**Authors:** Roanoke Policy Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-030
+title: Platform Governance Framework
+version: 1.0.0
+status: ACTIVE
+owner: Legal
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Internal - Policy
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-030 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Legal |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal - Policy |
+
 **Abstract:** This whitepaper establishes the governance framework for the Roanoke platform, defining policies for content moderation, user rights, dispute resolution, and community standards. We detail our commitment to transparency, fairness, and user empowerment while maintaining platform safety and integrity.
 
 ---

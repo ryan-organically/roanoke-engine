@@ -3,9 +3,28 @@
 
 ---
 
-**Version:** 1.0
-**Last Updated:** 2025
-**Classification:** Internal / Partner Confidential
+<!--
+@document-metadata
+doc_id: CORE-001
+title: Master Index
+version: 1.0.0
+status: ACTIVE
+owner: Marketing Operations
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Internal / Partner Confidential
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | CORE-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Marketing Operations |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal / Partner Confidential |
 
 ---
 

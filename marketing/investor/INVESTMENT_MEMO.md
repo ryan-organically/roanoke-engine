@@ -4,6 +4,31 @@
 
 ---
 
+<!--
+@document-metadata
+doc_id: IR-002
+title: Investment Memorandum
+version: 1.0.0
+status: ACTIVE
+owner: Executive
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Confidential - Investor
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | IR-002 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Executive |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Confidential - Investor |
+
+---
+
 ## EXECUTIVE SUMMARY
 
 Roanoke Interactive, Inc. ("Roanoke" or the "Company") is seeking to raise $[X] million in Series A financing to accelerate the development of its full-stack interactive entertainment platform. The Company has developed a proprietary game engine, flagship survival game, and nascent creator ecosystem that positions it to capture significant market share in the $300B+ gaming industry and adjacent markets.

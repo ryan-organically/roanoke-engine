@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Public Technical Documentation
-**Version:** 1.0
-**Authors:** Roanoke Engine Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-002
+title: Multiplayer Synchronization
+version: 1.0.0
+status: ACTIVE
+owner: CTO
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-06-05
+classification: Public Technical Documentation
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-002 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | CTO / Engine Team |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Public Technical Documentation |
+
 **Abstract:** This whitepaper presents the Roanoke Engine's approach to multiplayer synchronization at scale. We detail our hybrid authority model, interest management system, and state synchronization protocols that enable thousands of concurrent players in a persistent, modifiable world while maintaining sub-100ms perceived latency.
 
 ---

@@ -1,5 +1,30 @@
 # ROANOKE Brand Identity Guidelines
-## Version 1.0 | Institutional Document
+## Institutional Document
+
+---
+
+<!--
+@document-metadata
+doc_id: BRAND-001
+title: Brand Identity Guidelines
+version: 1.0.0
+status: ACTIVE
+owner: Brand Director
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-12-05
+classification: Internal / Partner
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | BRAND-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Brand Director |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal / Partner |
 
 ---
 

@@ -4,6 +4,31 @@
 
 ---
 
+<!--
+@document-metadata
+doc_id: IR-001
+title: Investor Pitch Deck
+version: 1.0.0
+status: ACTIVE
+owner: Executive
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Confidential - Investor
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | IR-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Executive |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Confidential - Investor |
+
+---
+
 ## Slide 1: Cover
 
 # ROANOKE

@@ -3,10 +3,28 @@
 
 ---
 
-**Document Classification:** Internal Operations
-**Version:** 1.0
-**Department:** Operations / Finance
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: OPS-001
+title: Procurement Guide
+version: 1.0.0
+status: ACTIVE
+owner: Operations
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-03-05
+classification: Internal - Operations
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | OPS-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | Operations |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Internal - Operations |
 
 ---
 

@@ -4,10 +4,29 @@
 
 ---
 
-**Document Classification:** Public Technical Documentation
-**Version:** 1.0
-**Authors:** Roanoke Engine Team
-**Date:** 2025
+<!--
+@document-metadata
+doc_id: WP-001
+title: Procedural Generation Architecture
+version: 1.0.0
+status: ACTIVE
+owner: CTO
+created: 2025-12-05
+updated: 2025-12-05
+review_date: 2026-06-05
+classification: Public Technical Documentation
+changelog: See /marketing/CHANGELOG.md
+-->
+
+| Field | Value |
+|-------|-------|
+| **Document ID** | WP-001 |
+| **Version** | 1.0.0 |
+| **Status** | ACTIVE |
+| **Owner** | CTO / Engine Team |
+| **Last Updated** | 2025-12-05 |
+| **Classification** | Public Technical Documentation |
+
 **Abstract:** This whitepaper details the technical architecture of the Roanoke Engine's procedural generation system, including terrain synthesis, biome distribution, point-of-interest placement, and runtime streaming. We present our multi-layered noise composition approach, historical data integration methodology, and performance optimization strategies that enable infinite, coherent world generation at 60+ FPS on consumer hardware.
 
 ---
