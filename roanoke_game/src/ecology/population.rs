@@ -236,6 +236,14 @@ impl AnimalSpecies {
 
             // Prolific breeders
             Self::WildBoar => (8.0, 0.6, 0.7, 4),
+
+            // Docile animals - herbivores and domesticated species
+            Self::WhitetailDeer => (2.0, 0.5, 0.8, 5),
+            Self::Stag => (2.0, 0.5, 0.82, 4),
+            Self::Horse => (1.0, 0.8, 0.9, 6),
+            Self::Donkey => (1.0, 0.8, 0.92, 4),
+            Self::Fox => (5.0, 0.4, 0.7, 3),
+            Self::Husky => (6.0, 0.7, 0.85, 4),
         }
     }
 }

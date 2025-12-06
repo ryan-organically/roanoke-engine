@@ -5,7 +5,7 @@
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -38,6 +38,7 @@ mod atmosphere;
 mod audio_system;
 mod procedural_synth;
 mod animals;
+mod gltf_loader;
 mod village_manager;
 mod progression;
 mod npc;
@@ -370,6 +371,8 @@ struct SharedState {
     faction_audio: FactionAudioBridge,
     // Systems Manager (encyclopedia, flora, ecology, weather coordination)
     systems_manager: systems_manager::SystemsManager,
+    // Dialogue UI state
+    current_dialogue: Option<npc::interaction::DialogueUIData>,
 }
 
 impl SharedState {
@@ -603,6 +606,8 @@ fn main() {
         faction_audio: FactionAudioBridge::new(),
         // Systems Manager (will be re-seeded when game starts)
         systems_manager: systems_manager::SystemsManager::new(12345),
+        // Dialogue state
+        current_dialogue: None,
     }));
 
     // ... (Channel setup) ...
@@ -762,12 +767,19 @@ fn main() {
                     if let PhysicalKey::Code(keycode) = key_event.physical_key {
                         state.keys.insert(keycode, key_event.state);
 
-                        // ESC key toggles pause (works in both Playing and Paused states)
+                        // ESC key: close dialogue first, then toggle pause
                         if key_event.state == ElementState::Pressed && keycode == KeyCode::Escape {
                             if state.game_state == GameState::Playing {
-                                state.game_state = GameState::Paused;
-                                state.pause_menu_page = PauseMenuPage::Main;
-                                println!("[PAUSE] Game paused");
+                                // If in dialogue, close it instead of pausing
+                                if state.current_dialogue.is_some() {
+                                    state.current_dialogue = None;
+                                    state.game_progression.interaction_system.interacting_npc = None;
+                                    log::info!("[DIALOGUE] Closed with ESC");
+                                } else {
+                                    state.game_state = GameState::Paused;
+                                    state.pause_menu_page = PauseMenuPage::Main;
+                                    println!("[PAUSE] Game paused");
+                                }
                             } else if state.game_state == GameState::Paused {
                                 state.game_state = GameState::Playing;
                                 println!("[PAUSE] Game resumed");
@@ -868,24 +880,62 @@ fn main() {
                                     }
                                     println!("[DEBUG] Cleared {} animals", count);
                                 }
-                                // E = Pickup closest item
+                                // E = Interact with NPC or pickup closest item
                                 KeyCode::KeyE => {
-                                    let pickup_range = 3.0;
-                                    if let Some(closest) = state.dropped_items.closest_drop(
-                                        state.player.position,
-                                        pickup_range,
-                                    ) {
-                                        let item_name = closest.item.name.clone();
-                                        let rarity = closest.item.rarity;
-                                        let drop_id = closest.id;
-
-                                        // Pick up the item
-                                        if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
-                                            // Add to player inventory
-                                            if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
-                                                log::warn!("Failed to add item to inventory: {:?}", e);
+                                    // Check if we're in an active dialogue - select choice 0 (or close if no choices)
+                                    if let Some(dialogue) = &state.current_dialogue {
+                                        if dialogue.choices.is_empty() {
+                                            // End dialogue
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                            log::info!("[DIALOGUE] Ended");
+                                        } else {
+                                            // Make choice 0 by pressing E (1-4 for specific choices)
+                                            let game_time = state.game_progression.game_time;
+                                            if let Some(next) = state.game_progression.interaction_system.make_choice(0, game_time) {
+                                                state.current_dialogue = Some(next);
+                                                log::info!("[DIALOGUE] Selected choice 1");
                                             } else {
-                                                log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                                // Dialogue ended
+                                                state.current_dialogue = None;
+                                                state.game_progression.interaction_system.interacting_npc = None;
+                                                log::info!("[DIALOGUE] Ended");
+                                            }
+                                        }
+                                    }
+                                    // Check if looking at an NPC to start dialogue
+                                    else if let Some(focused) = state.village_manager.focused_npc.clone() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(dialogue_data) = state.game_progression.interaction_system.start_interaction(
+                                            focused.index,
+                                            &focused.name,
+                                            &focused.role,
+                                            focused.position,
+                                            game_time,
+                                        ) {
+                                            state.current_dialogue = Some(dialogue_data);
+                                            log::info!("[DIALOGUE] Started with {} ({})", focused.name, focused.role);
+                                        }
+                                    }
+                                    // Otherwise pickup closest item
+                                    else {
+                                        let pickup_range = 3.0;
+                                        if let Some(closest) = state.dropped_items.closest_drop(
+                                            state.player.position,
+                                            pickup_range,
+                                        ) {
+                                            let item_name = closest.item.name.clone();
+                                            let rarity = closest.item.rarity;
+                                            let drop_id = closest.id;
+
+                                            // Pick up the item
+                                            if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
+                                                // Add to player inventory
+                                                if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
+                                                    log::warn!("Failed to add item to inventory: {:?}", e);
+                                                } else {
+                                                    log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                                }
                                             }
                                         }
                                     }
@@ -904,11 +954,63 @@ fn main() {
                                         }
                                     }
                                 }
-                                // Number keys 1-9, 0 = Select hotbar slot
-                                KeyCode::Digit1 => state.active_hotbar_slot = 0,
-                                KeyCode::Digit2 => state.active_hotbar_slot = 1,
-                                KeyCode::Digit3 => state.active_hotbar_slot = 2,
-                                KeyCode::Digit4 => state.active_hotbar_slot = 3,
+                                // Number keys 1-4 = Dialogue choices (when in dialogue), otherwise hotbar
+                                KeyCode::Digit1 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(0, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 1");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 0;
+                                    }
+                                }
+                                KeyCode::Digit2 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(1, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 2");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 1;
+                                    }
+                                }
+                                KeyCode::Digit3 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(2, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 3");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 2;
+                                    }
+                                }
+                                KeyCode::Digit4 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(3, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 4");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 3;
+                                    }
+                                }
                                 KeyCode::Digit5 => state.active_hotbar_slot = 4,
                                 KeyCode::Digit6 => state.active_hotbar_slot = 5,
                                 KeyCode::Digit7 => state.active_hotbar_slot = 6,
@@ -936,37 +1038,120 @@ fn main() {
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Oak Tree - USING SIMPLE LOW-POLY MESH (not OBJ)
-                // The OBJ file has 247K faces which destroys FPS
-                // Simple tree: ~36 triangles (cylinder trunk + icosphere canopy)
+                // 1. Foliage - Load GLTF plant models with textures
+                // Falls back to simple procedural tree if GLTF loading fails
                 {
-                    println!("[ASSET] ========== TREE LOADING START ==========");
-                    println!("[ASSET] Using SIMPLE LOW-POLY tree mesh (~36 tris)");
-                    println!("[ASSET] Skipping OBJ (247K faces = unplayable FPS)");
+                    println!("[ASSET] ========== FOLIAGE LOADING START ==========");
 
-                    // Generate simple tree mesh: trunk height, trunk radius, canopy radius, seed
-                    let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                    let foliage_path = "assets/models/foliage/scene.gltf";
 
-                    let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                    let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                    let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+                    // Try loading GLTF foliage with scale normalization
+                    // The models are ~300-800 units, we scale to ~5 units and center
+                    match gltf_loader::load_gltf_with_options(
+                        foliage_path,
+                        0.01,  // Scale down 100x
+                        [200.0, -550.0, 0.0],  // Offset to center (model Y is 500-800)
+                    ) {
+                        Ok(model) => {
+                            println!("[ASSET] Loaded GLTF foliage: {} meshes", model.meshes.len());
 
-                    let gpu_mesh = TreePipeline::create_mesh(
-                        ctx.device(),
-                        &positions,
-                        &normals,
-                        &uvs,
-                        &mesh.indices,
-                        None, // No texture - shader uses procedural colors
-                    );
+                            // Load the first mesh with a texture as our tree
+                            // Find a mesh that has leaves (typically larger meshes)
+                            let mut loaded_foliage = false;
 
-                    println!("[ASSET] Simple tree mesh: {} vertices, {} triangles",
-                        positions.len(), mesh.indices.len() / 3);
-                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                    println!("[ASSET] ========== TREE LOADING COMPLETE ==========");
+                            for (i, mesh) in model.meshes.iter().enumerate() {
+                                // Skip tiny meshes (decorative)
+                                if mesh.positions.len() < 100 {
+                                    continue;
+                                }
 
-                    // OBJ loading code removed - was loading 247K face tree mesh
-                    // Simple low-poly tree (~36 tris) already registered above
+                                println!("[ASSET] Processing mesh {}: '{}' ({} verts, texture: {:?})",
+                                    i, mesh.name, mesh.positions.len(),
+                                    mesh.material.base_color_texture.as_ref().map(|s| s.split('/').last().unwrap_or(s)));
+
+                                // Try to load the texture
+                                let texture_bind_group = if let Some(tex_path) = &mesh.material.base_color_texture {
+                                    match gltf_loader::load_texture(tex_path) {
+                                        Ok(tex_data) => {
+                                            let (_, tex_view) = gltf_loader::create_gpu_texture(
+                                                ctx.device(),
+                                                ctx.queue(),
+                                                &tex_data,
+                                                Some(&format!("Foliage Texture {}", i)),
+                                            );
+                                            // Create a temporary pipeline just to get the bind group layout
+                                            let temp_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                            let bind_group = temp_pipeline.create_texture_bind_group(
+                                                ctx.device(),
+                                                &tex_view,
+                                                Some(&format!("Foliage Bind Group {}", i)),
+                                            );
+                                            println!("[ASSET] Loaded texture: {}x{}", tex_data.width, tex_data.height);
+                                            Some(Arc::new(bind_group))
+                                        }
+                                        Err(e) => {
+                                            println!("[ASSET] Failed to load texture: {}", e);
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                // Create GPU mesh
+                                let gpu_mesh = TreePipeline::create_mesh(
+                                    ctx.device(),
+                                    &mesh.positions,
+                                    &mesh.normals,
+                                    &mesh.uvs,
+                                    &mesh.indices,
+                                    texture_bind_group,
+                                );
+
+                                // Register first valid foliage mesh as tree_oak (main tree)
+                                if !loaded_foliage {
+                                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh.clone());
+                                    println!("[ASSET] Registered '{}' as tree_oak", mesh.name);
+                                    loaded_foliage = true;
+                                }
+
+                                // Also register with original name for variety
+                                let safe_name = format!("foliage_{}", i);
+                                state.mesh_registry.insert(safe_name.clone(), gpu_mesh);
+                                println!("[ASSET] Registered foliage mesh: {}", safe_name);
+
+                                // Only load first few meshes to avoid memory issues
+                                if i >= 3 {
+                                    println!("[ASSET] Limiting to 4 foliage meshes for performance");
+                                    break;
+                                }
+                            }
+
+                            if !loaded_foliage {
+                                println!("[ASSET] No suitable foliage meshes found, using procedural fallback");
+                                let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                                let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                                let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                                let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+                                let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &mesh.indices, None);
+                                state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                            }
+                        }
+                        Err(e) => {
+                            println!("[ASSET] Failed to load GLTF foliage: {}", e);
+                            println!("[ASSET] Falling back to procedural tree");
+
+                            // Fallback: Generate simple procedural tree
+                            let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                            let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                            let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                            let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+                            let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &mesh.indices, None);
+                            state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                        }
+                    }
+
+                    println!("[ASSET] ========== FOLIAGE LOADING COMPLETE ==========");
                 }
 
                 // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
@@ -1123,10 +1308,25 @@ fn main() {
             Mutex::new(LightShaftPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
-        // Animal Orb Pipeline (Visual representation of animals)
+        // Animal Orb Pipeline (Visual representation of animals - fallback for species without models)
         static ANIMAL_ORB_PIPELINE: OnceLock<Mutex<AnimalOrbPipeline>> = OnceLock::new();
         let animal_orb_pipeline_mutex = ANIMAL_ORB_PIPELINE.get_or_init(|| {
             Mutex::new(AnimalOrbPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Animal Model Pipeline (3D models for animals)
+        static ANIMAL_MODEL_PIPELINE: OnceLock<Mutex<AnimalModelPipeline>> = OnceLock::new();
+        let animal_model_pipeline_mutex = ANIMAL_MODEL_PIPELINE.get_or_init(|| {
+            Mutex::new(AnimalModelPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Animal Model Cache (loads GLTF models)
+        static ANIMAL_MODEL_CACHE: OnceLock<Mutex<gltf_loader::ModelCache>> = OnceLock::new();
+        let animal_model_cache_mutex = ANIMAL_MODEL_CACHE.get_or_init(|| {
+            let mut cache = gltf_loader::ModelCache::new("assets/models/animals");
+            // Preload available models
+            cache.preload(&["Wolf", "Deer", "Stag", "Horse", "Donkey", "Fox", "Husky"]);
+            Mutex::new(cache)
         });
 
         // Offscreen Render Target (for post-process effects)
@@ -1431,7 +1631,8 @@ fn main() {
 
                 // Update village NPC movement and communication
                 let game_hour = (state.game_progression.game_time % 24.0) as f32;
-                state.village_manager.update(delta, game_hour, player_pos);
+                let player_look_dir = state.camera.forward();
+                state.village_manager.update(delta, game_hour, player_pos, player_look_dir);
 
                 // Check for achievements
                 let game_time = state.game_progression.game_time;
@@ -1453,68 +1654,188 @@ fn main() {
                         println!("[FACTION] {}", notification.message);
                     }
                 }
+
+                // Process pending dialogue effects
+                let pending_effects = std::mem::take(&mut state.game_progression.interaction_system.pending_effects);
+                for effect in pending_effects {
+                    match effect {
+                        npc::interaction::PendingEffect::ModifyReputation { faction, delta } => {
+                            state.game_progression.player_progression.modify_reputation(faction, delta);
+                            log::info!("[DIALOGUE EFFECT] Reputation {:?} {:+}", faction, delta);
+                        }
+                        npc::interaction::PendingEffect::GiveItem { item, count } => {
+                            // Create item and add to inventory
+                            let new_item = economy::Item::new(
+                                &item,
+                                &item,
+                                economy::item::ItemType::Material,
+                                10, // Base value
+                            );
+                            if let Err(e) = state.player_economy.inventory.add_item(new_item) {
+                                log::warn!("[DIALOGUE EFFECT] Failed to give item {}: {:?}", item, e);
+                            } else {
+                                log::info!("[DIALOGUE EFFECT] Received {} x{}", item, count);
+                            }
+                        }
+                        npc::interaction::PendingEffect::TakeItem { item, count } => {
+                            // Find and remove item from inventory
+                            if let Some(item_in_inv) = state.player_economy.inventory.slots.iter()
+                                .filter_map(|s| s.as_ref())
+                                .find(|i| i.name == item)
+                                .map(|i| i.id) {
+                                state.player_economy.inventory.remove_item(item_in_inv);
+                                log::info!("[DIALOGUE EFFECT] Gave away {} x{}", item, count);
+                            }
+                        }
+                        npc::interaction::PendingEffect::StartQuest(quest_id) => {
+                            log::info!("[DIALOGUE EFFECT] Quest started: {}", quest_id);
+                            // Quest system integration would go here
+                        }
+                        npc::interaction::PendingEffect::CompleteObjective { quest, objective } => {
+                            log::info!("[DIALOGUE EFFECT] Objective completed: {} - {}", quest, objective);
+                        }
+                        npc::interaction::PendingEffect::SetFlag { flag, value } => {
+                            log::info!("[DIALOGUE EFFECT] Flag set: {} = {}", flag, value);
+                        }
+                        npc::interaction::PendingEffect::UnlockTrading(npc_id) => {
+                            log::info!("[DIALOGUE EFFECT] Trading unlocked with NPC #{}", npc_id);
+                        }
+                        npc::interaction::PendingEffect::TeachSkill(skill) => {
+                            log::info!("[DIALOGUE EFFECT] Learned skill: {}", skill);
+                        }
+                        npc::interaction::PendingEffect::Heal(amount) => {
+                            log::info!("[DIALOGUE EFFECT] Healed for {}", amount);
+                            // Player health system integration would go here
+                        }
+                        npc::interaction::PendingEffect::ModifyRelationship { npc_id, affinity, trust, respect } => {
+                            // Already handled by interaction system
+                            log::info!("[DIALOGUE EFFECT] Relationship modified: NPC#{} A{:+} T{:+} R{:+}",
+                                npc_id, affinity, trust, respect);
+                        }
+                        npc::interaction::PendingEffect::SpreadRumor { positive, radius } => {
+                            log::info!("[DIALOGUE EFFECT] Rumor spread ({}) in {}m radius",
+                                if positive { "positive" } else { "negative" }, radius);
+                        }
+                    }
+                }
             }
 
-            // Update animal orb visual representation - only render nearby animals
+            // Update animal visual representation - only render nearby animals
+            // Animals with 3D models use the model pipeline, others use orbs as fallback
             let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 0.5);
-            let mut orb_instances: Vec<OrbInstance> = nearby_animals
-                .iter()
-                .map(|animal| {
-                    let base_color = animal.species.orb_color();
-                    let scale = animal.species.orb_scale();
 
-                    // Modify color based on behavior state
-                    let (mut color, mut emissive) = match &animal.behavior_state {
-                        animals::BehaviorState::Attack(_) => {
-                            // Red tint and strong glow when attacking
-                            ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
-                        }
-                        animals::BehaviorState::Pursue(_) => {
-                            // Orange-ish tint and moderate glow when pursuing
-                            ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
-                        }
-                        animals::BehaviorState::Alert(_) => {
-                            // Slight yellow tint when alert
-                            ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
-                        }
-                        animals::BehaviorState::Flee(_) => {
-                            // Pale/washed out when fleeing
-                            ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
-                        }
-                        animals::BehaviorState::Dead => {
-                            // Dark gray when dead
-                            ([0.2, 0.2, 0.2], 0.0)
-                        }
-                        _ => {
-                            // Normal color for idle/patrol
-                            (base_color, 0.0)
-                        }
-                    };
+            // Separate animals by whether they have 3D models
+            let mut orb_instances: Vec<OrbInstance> = Vec::new();
+            let mut model_instances: std::collections::HashMap<&'static str, Vec<AnimalInstance>> = std::collections::HashMap::new();
 
-                    // Apply damage flash effect (bright white/red flash when hit)
-                    let (flash_tint, flash_emissive) = animal.damage_flash_effect();
-                    color = [
-                        (color[0] * flash_tint[0]).min(2.0),
-                        (color[1] * flash_tint[1]).min(2.0),
-                        (color[2] * flash_tint[2]).min(2.0),
-                    ];
-                    emissive = (emissive + flash_emissive).min(2.0);
+            for animal in &nearby_animals {
+                let base_color = animal.species.orb_color();
+                let scale = animal.species.orb_scale();
 
-                    // Create transform matrix (position + scale, orbs hover slightly above ground)
+                // Modify color based on behavior state
+                let (mut color, mut emissive) = match &animal.behavior_state {
+                    animals::BehaviorState::Attack(_) => {
+                        // Red tint and strong glow when attacking
+                        ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
+                    }
+                    animals::BehaviorState::Pursue(_) => {
+                        // Orange-ish tint and moderate glow when pursuing
+                        ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
+                    }
+                    animals::BehaviorState::Alert(_) => {
+                        // Slight yellow tint when alert
+                        ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
+                    }
+                    animals::BehaviorState::Flee(_) => {
+                        // Pale/washed out when fleeing
+                        ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
+                    }
+                    animals::BehaviorState::Dead => {
+                        // Dark gray when dead
+                        ([0.2, 0.2, 0.2], 0.0)
+                    }
+                    _ => {
+                        // Normal color for idle/patrol
+                        (base_color, 0.0)
+                    }
+                };
+
+                // Apply damage flash effect (bright white/red flash when hit)
+                let (flash_tint, flash_emissive) = animal.damage_flash_effect();
+                color = [
+                    (color[0] * flash_tint[0]).min(2.0),
+                    (color[1] * flash_tint[1]).min(2.0),
+                    (color[2] * flash_tint[2]).min(2.0),
+                ];
+                emissive = (emissive + flash_emissive).min(2.0);
+
+                // Check if this species has a 3D model
+                if let Some(model_name) = animal.species.model_name() {
+                    // Use 3D model pipeline
+                    let model_scale = animal.species.model_scale();
+                    let model_matrix = Mat4::from_scale_rotation_translation(
+                        Vec3::splat(model_scale),
+                        animal.rotation,
+                        animal.position,
+                    );
+                    let instance = AnimalInstance::new(model_matrix, color, emissive);
+                    model_instances.entry(model_name).or_insert_with(Vec::new).push(instance);
+                } else {
+                    // Fall back to orb rendering
                     let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         Vec3::splat(scale),
                         glam::Quat::IDENTITY,
                         pos,
                     );
-
-                    OrbInstance {
+                    orb_instances.push(OrbInstance {
                         model_matrix: model_matrix.to_cols_array_2d(),
                         color,
                         emissive,
+                    });
+                }
+            }
+
+            // Upload model instances to model pipeline
+            {
+                let mut model_pipeline = animal_model_pipeline_mutex.safe_lock();
+                let model_cache = animal_model_cache_mutex.safe_lock();
+
+                // Upload meshes for any new species (only once per species)
+                for (model_name, instances) in &model_instances {
+                    if !model_pipeline.has_mesh(model_name) {
+                        if let Some(loaded_model) = model_cache.get(model_name) {
+                            // Combine all meshes into one for this species
+                            let mut all_vertices: Vec<AnimalVertex> = Vec::new();
+                            let mut all_indices: Vec<u32> = Vec::new();
+
+                            for mesh in &loaded_model.meshes {
+                                let vertex_offset = all_vertices.len() as u32;
+                                for i in 0..mesh.positions.len() {
+                                    all_vertices.push(AnimalVertex {
+                                        position: mesh.positions[i],
+                                        normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                                        uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                                    });
+                                }
+                                for idx in &mesh.indices {
+                                    all_indices.push(*idx + vertex_offset);
+                                }
+                            }
+
+                            model_pipeline.upload_species_mesh(
+                                ctx.device(),
+                                model_name,
+                                &all_vertices,
+                                &all_indices,
+                            );
+                        }
                     }
-                })
-                .collect();
+
+                    // Upload instances for this species
+                    model_pipeline.upload_instances(ctx.device(), model_name, instances);
+                }
+            }
 
             // Add village NPC orbs
             for npc_orb in &state.village_manager.npc_orbs {
@@ -2076,6 +2397,114 @@ fn main() {
                                 });
                             });
                         });
+
+                    // === "E to interact" prompt when looking at NPC ===
+                    if state.current_dialogue.is_none() {
+                        if let Some((name, role, distance)) = state.village_manager.get_focused_npc_info() {
+                            egui::Area::new(egui::Id::new("npc_interact_prompt"))
+                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 100.0))
+                                .show(ui_ctx, |ui| {
+                                    let bg = egui::Frame::none()
+                                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
+                                        .rounding(egui::Rounding::same(8.0))
+                                        .inner_margin(egui::Margin::same(12.0));
+                                    bg.show(ui, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(egui::RichText::new(format!("{} - {}", name, role))
+                                                .color(egui::Color32::WHITE)
+                                                .size(18.0));
+                                            ui.label(egui::RichText::new(format!("{:.1}m away", distance))
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new("[E] Talk")
+                                                .color(egui::Color32::from_rgb(100, 200, 255))
+                                                .size(14.0));
+                                        });
+                                    });
+                                });
+                        }
+                    }
+
+                    // === Dialogue UI ===
+                    if let Some(dialogue) = &state.current_dialogue {
+                        egui::Area::new(egui::Id::new("dialogue_window"))
+                            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -100.0))
+                            .show(ui_ctx, |ui| {
+                                let bg = egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(20, 15, 10, 240))
+                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(139, 90, 43)))
+                                    .rounding(egui::Rounding::same(10.0))
+                                    .inner_margin(egui::Margin::same(16.0));
+                                bg.show(ui, |ui| {
+                                    ui.set_min_width(500.0);
+                                    ui.set_max_width(600.0);
+
+                                    // Speaker name
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&dialogue.speaker_name)
+                                            .color(egui::Color32::from_rgb(255, 220, 150))
+                                            .size(20.0)
+                                            .strong());
+                                        // Relationship status if available
+                                        if let Some(rel) = &dialogue.relationship_status {
+                                            ui.label(egui::RichText::new(format!("({})", rel.relationship_type))
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                        }
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    // Dialogue text
+                                    ui.label(egui::RichText::new(&dialogue.text)
+                                        .color(egui::Color32::WHITE)
+                                        .size(16.0));
+
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(8.0);
+
+                                    // Dialogue choices
+                                    if dialogue.choices.is_empty() {
+                                        ui.label(egui::RichText::new("[E] Continue")
+                                            .color(egui::Color32::from_rgb(100, 200, 255))
+                                            .size(14.0));
+                                    } else {
+                                        for choice in &dialogue.choices {
+                                            let color = if choice.locked {
+                                                egui::Color32::DARK_GRAY
+                                            } else if choice.has_effect {
+                                                egui::Color32::from_rgb(180, 255, 180)
+                                            } else {
+                                                egui::Color32::WHITE
+                                            };
+                                            let key = choice.index + 1;
+                                            let prefix = format!("[{}] ", key);
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(&prefix)
+                                                    .color(egui::Color32::from_rgb(100, 200, 255))
+                                                    .size(14.0));
+                                                ui.label(egui::RichText::new(&choice.text)
+                                                    .color(color)
+                                                    .size(14.0));
+                                                if choice.locked {
+                                                    if let Some(reason) = &choice.lock_reason {
+                                                        ui.label(egui::RichText::new(format!("({})", reason))
+                                                            .color(egui::Color32::from_rgb(200, 100, 100))
+                                                            .size(11.0));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new("[ESC] Leave conversation")
+                                            .color(egui::Color32::GRAY)
+                                            .size(12.0));
+                                    }
+                                });
+                            });
+                    }
 
                     // === Debug window (existing) ===
                     egui::Window::new("Game Menu").show(ui_ctx, |ui| {
@@ -2793,7 +3222,9 @@ fn main() {
                         );
                     }
                     if let Some(trees) = &chunk.trees {
-                        trees.update_camera(
+                        // Use full camera update with texture + alpha settings
+                        // Alpha cutoff ~0.23 matches the foliage GLTF materials
+                        trees.update_camera_full(
                             ctx.queue(),
                             &view_proj,
                             sun_dir.to_array(),
@@ -2803,6 +3234,8 @@ fn main() {
                             fog_start,
                             fog_end,
                             fog_density,
+                            0.23,  // alpha_cutoff for masked foliage
+                            1.0,   // use_texture = true (sample texture colors)
                         );
                     }
                     if let Some(detritus) = &chunk.detritus {
@@ -2987,6 +3420,8 @@ fn main() {
             {
                 // let water_system_guard = water_system_mutex.safe_lock();
                 let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
+                // Lock model_pipeline early so it outlives render_pass
+                let model_pipeline = animal_model_pipeline_mutex.safe_lock();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3108,7 +3543,20 @@ fn main() {
                     }
                 }
 
-                // Render Animal Orbs
+                // Render Animal Models (3D models for species that have them)
+                model_pipeline.update_camera(
+                    ctx.queue(),
+                    &view_proj,
+                    state.camera.position,
+                    state.time_of_day,
+                    Vec3::from_array(fog_color),
+                    fog_start,
+                    fog_end,
+                    1.5, // fog_density
+                );
+                model_pipeline.render(&mut render_pass);
+
+                // Render Animal Orbs (fallback for species without 3D models)
                 orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position);
                 orb_pipeline.render(&mut render_pass);
 

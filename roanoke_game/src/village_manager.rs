@@ -80,6 +80,17 @@ pub struct CommunicationBeam {
     pub lifetime: f32,
 }
 
+/// Player-focused NPC data (when player looks at an NPC)
+#[derive(Debug, Clone)]
+pub struct FocusedNpc {
+    pub index: usize,
+    pub name: String,
+    pub role: String,
+    pub position: Vec3,
+    pub distance: f32,
+    pub color: [f32; 3],
+}
+
 /// Manages all villages in the world
 pub struct VillageManager {
     /// All villages discovered in the world
@@ -96,6 +107,10 @@ pub struct VillageManager {
     current_hour: f32,
     /// Village center for reference
     village_center: Vec3,
+    /// Currently focused NPC (player is looking at)
+    pub focused_npc: Option<FocusedNpc>,
+    /// Player focus beam (from player to focused NPC)
+    pub player_focus_beam: Option<([f32; 3], [f32; 3], [f32; 3], f32)>,
 
     // ========================================================================
     // FPS OPTIMIZATION: Instance Cache System
@@ -117,6 +132,8 @@ impl VillageManager {
             communication_beams: Vec::new(),
             current_hour: 8.0,
             village_center: Vec3::ZERO,
+            focused_npc: None,
+            player_focus_beam: None,
             cached_instances: Vec::new(),
             instances_dirty: true,
         }
@@ -494,7 +511,7 @@ impl VillageManager {
 
     /// Update NPC positions, activities, and communication beams
     /// Call this every frame with delta time and current game hour
-    pub fn update(&mut self, dt: f32, game_hour: f32, player_pos: Vec3) {
+    pub fn update(&mut self, dt: f32, game_hour: f32, player_pos: Vec3, player_look_dir: Vec3) {
         self.current_hour = game_hour;
 
         // Update communication beam lifetimes
@@ -503,6 +520,9 @@ impl VillageManager {
             beam.intensity = (beam.lifetime / 3.0).clamp(0.0, 1.0);
             beam.lifetime > 0.0
         });
+
+        // Update player focus - which NPC is the player looking at
+        self.update_player_focus(player_pos, player_look_dir);
 
         // Skip if no NPCs
         if self.npc_orbs.is_empty() {
@@ -738,7 +758,7 @@ impl VillageManager {
 
     /// Get communication beam render data
     pub fn get_beam_render_data(&self) -> Vec<([f32; 3], [f32; 3], [f32; 3], f32)> {
-        self.communication_beams
+        let mut beams: Vec<_> = self.communication_beams
             .iter()
             .filter_map(|beam| {
                 if beam.from_idx < self.npc_orbs.len() && beam.to_idx < self.npc_orbs.len() {
@@ -754,7 +774,92 @@ impl VillageManager {
                     None
                 }
             })
-            .collect()
+            .collect();
+
+        // Add player focus beam if present
+        if let Some(beam) = &self.player_focus_beam {
+            beams.push(*beam);
+        }
+
+        beams
+    }
+
+    /// Update which NPC the player is looking at
+    fn update_player_focus(&mut self, player_pos: Vec3, look_dir: Vec3) {
+        self.focused_npc = None;
+        self.player_focus_beam = None;
+
+        if self.npc_orbs.is_empty() || look_dir.length_squared() < 0.01 {
+            return;
+        }
+
+        let look_dir = look_dir.normalize();
+        let mut best_score = 0.0f32;
+        let mut best_idx: Option<usize> = None;
+
+        // Find the NPC closest to the look direction
+        for (idx, orb) in self.npc_orbs.iter().enumerate() {
+            let to_npc = orb.position - player_pos;
+            let dist = to_npc.length();
+
+            // Must be within reasonable distance (50 units)
+            if dist < 2.0 || dist > 50.0 {
+                continue;
+            }
+
+            let to_npc_norm = to_npc / dist;
+
+            // Calculate how aligned the look direction is with the NPC
+            let dot = look_dir.dot(to_npc_norm);
+
+            // Must be looking roughly toward the NPC (within ~30 degree cone)
+            if dot < 0.85 {
+                continue;
+            }
+
+            // Score based on alignment and distance (prefer closer and more aligned)
+            let score = dot * (1.0 - dist / 50.0);
+
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(idx);
+            }
+        }
+
+        // If we found an NPC being looked at
+        if let Some(idx) = best_idx {
+            let orb = &self.npc_orbs[idx];
+
+            self.focused_npc = Some(FocusedNpc {
+                index: idx,
+                name: orb.name.clone(),
+                role: orb.role.clone(),
+                position: orb.position,
+                distance: (orb.position - player_pos).length(),
+                color: orb.color,
+            });
+
+            // Create a beam from player to focused NPC
+            // Use a cyan/white color for the focus beam
+            let beam_color = [0.5, 0.8, 1.0]; // Light blue/cyan
+            self.player_focus_beam = Some((
+                [player_pos.x, player_pos.y + 1.5, player_pos.z], // From player eye level
+                [orb.position.x, orb.position.y, orb.position.z], // To NPC
+                beam_color,
+                0.7, // Intensity
+            ));
+
+            // Make the focused NPC glow brighter
+            self.npc_orbs[idx].emissive = 0.8;
+            self.instances_dirty = true;
+        }
+    }
+
+    /// Get the name and role of the focused NPC for UI display
+    pub fn get_focused_npc_info(&self) -> Option<(String, String, f32)> {
+        self.focused_npc.as_ref().map(|f| {
+            (f.name.clone(), f.role.clone(), f.distance)
+        })
     }
 }
 

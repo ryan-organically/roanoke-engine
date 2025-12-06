@@ -7,7 +7,9 @@ struct CameraUniform {
     fog_color: vec3<f32>,// Fog color
     fog_start: f32,      // Fog start distance
     fog_end: f32,        // Fog end distance
-    _padding: vec3<f32>, // Padding
+    alpha_cutoff: f32,   // Alpha cutoff for masked rendering
+    use_texture: f32,    // 1.0 = sample texture, 0.0 = procedural
+    _padding: f32,       // Padding
 }
 
 @group(0) @binding(0)
@@ -95,37 +97,52 @@ fn vs_main(input: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Noise for variation
-    let noise = fract(sin(dot(in.world_position.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-    let noise2 = fract(sin(dot(in.world_position.xy * 0.5, vec2<f32>(39.346, 11.135))) * 43758.5453);
+    // Sample texture
+    let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
 
-    // Determine if this is trunk (uv.y <= 1.0) or canopy (uv.y > 1.0)
-    let is_canopy = in.uv.y > 1.0;
+    // Alpha discard for masked materials (leaves, etc.)
+    if (camera.alpha_cutoff > 0.0 && tex_color.a < camera.alpha_cutoff) {
+        discard;
+    }
 
     var base_color: vec3<f32>;
 
-    if (is_canopy) {
-        // CANOPY: Green foliage with variation
-        let leaf_dark = vec3<f32>(0.15, 0.35, 0.12);   // Dark forest green
-        let leaf_light = vec3<f32>(0.25, 0.55, 0.18);  // Brighter green
-        let leaf_yellow = vec3<f32>(0.45, 0.55, 0.15); // Yellow-green highlights
+    // Determine if this is trunk (uv.y <= 1.0) or canopy (uv.y > 1.0)
+    // This heuristic works for both textured and procedural trees
+    let is_canopy = in.uv.y > 1.0;
 
-        // Mix greens based on noise for natural variation
-        let green_mix = mix(leaf_dark, leaf_light, noise * 0.7 + 0.15);
-        base_color = mix(green_mix, leaf_yellow, noise2 * 0.25);
-
-        // Add slight variation based on normal direction (top vs underside)
-        let top_factor = saturate(in.world_normal.y * 0.5 + 0.5);
-        base_color = mix(base_color * 0.8, base_color * 1.1, top_factor);
+    // Use texture color if enabled, otherwise procedural
+    if (camera.use_texture > 0.5) {
+        base_color = tex_color.rgb;
     } else {
-        // TRUNK: Bark brown with variation
-        let bark_dark = vec3<f32>(0.25, 0.15, 0.08);  // Dark bark
-        let bark_light = vec3<f32>(0.45, 0.30, 0.18); // Light bark
-        let bark_color = mix(bark_dark, bark_light, noise * 0.6 + noise2 * 0.4);
+        // Procedural fallback for L-system trees
+        // Noise for variation
+        let noise = fract(sin(dot(in.world_position.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let noise2 = fract(sin(dot(in.world_position.xy * 0.5, vec2<f32>(39.346, 11.135))) * 43758.5453);
 
-        // Height-based variation (darker at base, lighter higher up)
-        let height_factor = saturate(in.local_height / 8.0);
-        base_color = mix(bark_color * 0.8, bark_color * 1.1, height_factor);
+        if (is_canopy) {
+            // CANOPY: Green foliage with variation
+            let leaf_dark = vec3<f32>(0.15, 0.35, 0.12);   // Dark forest green
+            let leaf_light = vec3<f32>(0.25, 0.55, 0.18);  // Brighter green
+            let leaf_yellow = vec3<f32>(0.45, 0.55, 0.15); // Yellow-green highlights
+
+            // Mix greens based on noise for natural variation
+            let green_mix = mix(leaf_dark, leaf_light, noise * 0.7 + 0.15);
+            base_color = mix(green_mix, leaf_yellow, noise2 * 0.25);
+
+            // Add slight variation based on normal direction (top vs underside)
+            let top_factor = saturate(in.world_normal.y * 0.5 + 0.5);
+            base_color = mix(base_color * 0.8, base_color * 1.1, top_factor);
+        } else {
+            // TRUNK: Bark brown with variation
+            let bark_dark = vec3<f32>(0.25, 0.15, 0.08);  // Dark bark
+            let bark_light = vec3<f32>(0.45, 0.30, 0.18); // Light bark
+            let bark_color = mix(bark_dark, bark_light, noise * 0.6 + noise2 * 0.4);
+
+            // Height-based variation (darker at base, lighter higher up)
+            let height_factor = saturate(in.local_height / 8.0);
+            base_color = mix(bark_color * 0.8, bark_color * 1.1, height_factor);
+        }
     }
 
     // Lighting (same for both trunk and canopy)

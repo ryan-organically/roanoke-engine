@@ -159,7 +159,7 @@ impl NpcRelationship {
     }
 
     /// Add a memory, keeping only recent ones
-    fn add_memory(&mut self, memory: NpcMemory) {
+    pub fn add_memory(&mut self, memory: NpcMemory) {
         self.memories.push(memory);
 
         // Keep only last 20 memories

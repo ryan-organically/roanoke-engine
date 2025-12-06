@@ -168,22 +168,23 @@ pub fn calculate_density(
 
 /// Sea Oats - Beach dune grass
 /// Tall wispy stalks that colonize and stabilize dunes
+/// DEBUG: Currently bright red and extra tall to verify species system works
 fn sea_oats_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.8, 1.4),
-            blade_segments: 5, // More joints for elegant droop
-            curve_factor: 0.6, // Strong graceful bend
-            width_base: 0.025, // Thin stalks
-            width_tip: 0.005,  // Very fine tips
-            color_base: [0.55, 0.50, 0.35], // Sandy tan
-            color_tip: [0.70, 0.65, 0.45],  // Sun-bleached gold
+            height_range: (1.5, 2.5),  // DEBUG: Extra tall to be visible
+            blade_segments: 5,
+            curve_factor: 0.6,
+            width_base: 0.08,  // DEBUG: Thicker to be visible
+            width_tip: 0.02,
+            color_base: [0.9, 0.1, 0.1],  // DEBUG: Bright red base
+            color_tip: [1.0, 0.3, 0.1],   // DEBUG: Orange-red tip
         },
-        density_range: (0.05, 0.15), // Very sparse, wind-scattered clumps
-        wind_amplitude: 1.2,         // Dramatic coastal sway
-        wind_frequency: 1.3,         // Fast response to gusts
-        clumping_factor: 0.7,        // Grows in distinct clumps
-        tolerates_water: false,      // Salt spray tolerant, not submerged
+        density_range: (0.15, 0.3),  // DEBUG: Increased density
+        wind_amplitude: 1.2,
+        wind_frequency: 1.3,
+        clumping_factor: 0.4,  // DEBUG: Reduced clumping for more coverage
+        tolerates_water: false,
     }
 }
 
@@ -210,21 +211,22 @@ fn cordgrass_config() -> GrassSpeciesConfig {
 
 /// Sawgrass - Meadow and grassland
 /// The quintessential flowing meadow grass
+/// DEBUG: Currently bright blue to verify species system works
 fn sawgrass_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.4, 0.9),
+            height_range: (0.6, 1.2),  // DEBUG: Taller
             blade_segments: 4,
-            curve_factor: 0.35, // Gentle natural bend
-            width_base: 0.04,
-            width_tip: 0.01,
-            color_base: [0.25, 0.50, 0.18], // Healthy green
-            color_tip: [0.40, 0.65, 0.25],  // Sun-touched tips
+            curve_factor: 0.35,
+            width_base: 0.06,  // DEBUG: Thicker
+            width_tip: 0.015,
+            color_base: [0.1, 0.2, 0.8],  // DEBUG: Bright blue base
+            color_tip: [0.2, 0.4, 1.0],   // DEBUG: Light blue tip
         },
-        density_range: (0.25, 0.4),
-        wind_amplitude: 0.8, // Responsive flowing motion
-        wind_frequency: 1.0, // Natural cadence
-        clumping_factor: 0.4,
+        density_range: (0.3, 0.5),  // DEBUG: Increased density
+        wind_amplitude: 0.8,
+        wind_frequency: 1.0,
+        clumping_factor: 0.3,  // DEBUG: Reduced clumping
         tolerates_water: false,
     }
 }
