@@ -1,9 +1,9 @@
 # ROANOKE ENGINE - MASTER AUDIT & ROADMAP
 
 **Date**: 2024-12-05
-**Updated**: 2024-12-05
-**Version**: v0.0.1 (Pre-Alpha)
-**Status**: Phase 0 FPS COMPLETE - Ready for Visual Improvements
+**Updated**: 2024-12-06
+**Version**: v0.0.2-dev (Pre-Alpha)
+**Status**: Phase 0 FPS COMPLETE, Phase 2 Trees COMPLETE - Ready for Visual Improvements
 
 ---
 
@@ -11,11 +11,13 @@
 
 | Document | Purpose |
 |----------|---------|
-| `FPS_OPTIMIZATION_ROADMAP.md` | Detailed FPS recovery steps |
-| `TREE_SYSTEM_AUDIT.md` | Tree rendering & asset pipeline |
-| `MATERIAL_SHADER_AUDIT.md` | Shader/material system analysis |
+| `../../AGENT_DIRECTIVE.md` | **START HERE** - Agent entry point |
 | `ROADMAP.md` | Technical implementation phases |
 | `VERSION.md` | Version history & known issues |
+| `KNOWN_ISSUES.md` | Build-blocking bugs |
+| `../performance/FPS_OPTIMIZATION_ROADMAP.md` | Detailed FPS recovery (COMPLETE) |
+| `../performance/TREE_SYSTEM_AUDIT.md` | Tree rendering (COMPLETE) |
+| `../performance/MATERIAL_SHADER_AUDIT.md` | Shader/material system analysis |
 
 ---
 
@@ -387,13 +389,15 @@ Change priority?
 
 ## AI AGENT INSTRUCTIONS
 
+**Primary Entry Point**: See `AGENT_DIRECTIVE.md` for comprehensive agent guidance.
+
 When updating this project:
 
-1. **Always check FPS first** - Run game, observe frame rate
-2. **Check TODO status** in VERSION.md before starting work
-3. **Update VERSION.md** after completing any fix
-4. **Run tests** before committing: `cargo test`
-5. **Document changes** in relevant audit files
+1. **Read `AGENT_DIRECTIVE.md` first** - Current state and priorities
+2. **Check `KNOWN_ISSUES.md`** - Build-blocking bugs
+3. **Run game to verify** - `cargo run --release`
+4. **Update documentation** after changes
+5. **Add session notes** to `AGENT_DIRECTIVE.md`
 
 ### Continuous Improvement Loop
 
@@ -408,4 +412,4 @@ When updating this project:
 ---
 
 *Master audit document - Auto-maintained by Claude Code*
-*Last updated: 2024-12-05*
+*Last updated: 2024-12-06*

@@ -27,15 +27,17 @@ struct TreeVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-    sun_dir: [f32; 3],
-    time: f32, // For wind animation
-    view_pos: [f32; 3],      // Camera position for fog distance
-    fog_density: f32,        // Fog intensity
-    fog_color: [f32; 3],     // Fog color
-    fog_start: f32,          // Fog start distance
-    fog_end: f32,            // Fog end distance
-    _padding: [f32; 3],      // Padding to 16-byte alignment
+    view_proj: [[f32; 4]; 4],   // 64 bytes (0-64)
+    sun_dir: [f32; 3],          // 12 bytes (64-76)
+    time: f32,                  // 4 bytes (76-80) - packs with sun_dir
+    view_pos: [f32; 3],         // 12 bytes (80-92)
+    fog_density: f32,           // 4 bytes (92-96) - packs with view_pos
+    fog_color: [f32; 3],        // 12 bytes (96-108)
+    fog_start: f32,             // 4 bytes (108-112) - packs with fog_color
+    fog_end: f32,               // 4 bytes (112-116)
+    _align_gap: [f32; 3],       // 12 bytes (116-128) - bridge to vec3 alignment
+    _padding: [f32; 3],         // 12 bytes (128-140) - matches WGSL vec3
+    _struct_pad: f32,           // 4 bytes (140-144) - struct alignment
 }
 
 #[repr(C)]
@@ -489,7 +491,9 @@ impl TreePipeline {
             fog_color,
             fog_start,
             fog_end,
+            _align_gap: [0.0; 3],
             _padding: [0.0; 3],
+            _struct_pad: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

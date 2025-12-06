@@ -54,6 +54,7 @@ mod ecology;
 mod naval;
 mod weather;
 mod systems_manager;
+mod character_agent;
 
 use water_system::WaterSystem;
 mod weather_system;

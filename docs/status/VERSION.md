@@ -16,18 +16,18 @@
 
 <!-- AGENT: Add completed features here before release -->
 
-### Critical Issues Identified (2024-12-05 Audit)
+### Critical Issues (2024-12-05 Audit) - RESOLVED
 
-**FPS BLOCKERS:**
-- [ ] O(n²) animal spatial queries in `manager.rs:187-232`
-- [ ] Per-frame NPC instance buffer allocation in `village_manager.rs:205-225`
-- [ ] SystemTime RNG calls in `behavior.rs:409-417`
-- [ ] Per-frame pack morale recalculation
+**FPS BLOCKERS (ALL FIXED 2024-12-05):**
+- [x] O(n²) animal spatial queries -> Quantum Spatial Cache
+- [x] Per-frame NPC instance buffer -> Cached with dirty flags
+- [x] SystemTime RNG calls -> PCG hash-based PRNG
+- [x] Per-frame pack morale recalculation -> Lazy evaluation
 
-**VISUAL BLOCKERS:**
+**VISUAL STATUS:**
 - [x] Trees re-enabled with simple low-poly mesh (~36 tris vs 247K)
-- [ ] Fog only tints ground, no atmospheric effect
-- [ ] 78K+ rock instances per chunk overwhelming GPU
+- [ ] Fog only tints ground, no atmospheric effect (Phase 3)
+- [ ] 78K+ rock instances per chunk (Phase 1 planned)
 
 ### Added
 - `FPS_OPTIMIZATION_ROADMAP.md` - Master performance recovery plan

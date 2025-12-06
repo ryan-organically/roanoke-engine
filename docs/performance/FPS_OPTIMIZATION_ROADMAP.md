@@ -1,9 +1,11 @@
 # FPS Optimization & Visual Improvement Roadmap
 
 **Created**: 2024-12-05
-**Updated**: 2024-12-05
-**Status**: Phase 0 COMPLETE - FPS Fluidization Implemented
-**Priority**: Trees/Rocks/Fog next
+**Updated**: 2024-12-06
+**Status**: Phase 0 COMPLETE, Phase 2 Trees COMPLETE
+**Priority**: Rocks/Fog next
+
+**Entry Point**: See `AGENT_DIRECTIVE.md` for unified agent guidance
 
 ---
 
@@ -20,7 +22,7 @@ Phase 0 FPS Emergency is **COMPLETE**. The Quantum Spatial Cache system transfor
 | Pack morale/alpha calc | ~~MODERATE (per-frame O(n))~~ | ✅ FIXED - Lazy evaluation |
 | SystemTime RNG | ~~LOW-MODERATE~~ | ✅ FIXED - PCG hash-based PRNG |
 | Query radius | ~~50 units (100 cells)~~ | ✅ FIXED - 25 units (9 cells) |
-| Trees | DISABLED (94K tris/tree) | 🔴 Needs LOD system |
+| Trees | ~~DISABLED (94K tris/tree)~~ | ✅ FIXED - 36 tris/tree |
 | Rocks/Pebbles | HIGH (78K+ instances/chunk) | 🟡 Needs culling |
 
 ---
@@ -261,115 +263,31 @@ pub fn pebble() -> Self {
 
 ---
 
-## Phase 2: Tree System Restoration
+## Phase 2: Tree System Restoration - COMPLETE
 
-**Goal**: Visible treeline at distance without GPU death.
+**Status**: COMPLETE (2024-12-05)
+**Result**: Trees re-enabled with 2,600x polygon reduction
 
-### 2.1 Create Lightweight Tree Mesh
+### Solution Implemented
 
-**Problem**: `trees9.obj` has 247K faces - instant GPU death.
+| Component | Implementation | Triangles |
+|-----------|----------------|-----------|
+| Trunk | 8-segment cylinder | 16 |
+| Canopy | Icosahedron | 20 |
+| **Total** | Per tree | **36** |
 
-**Solution**: Create simple procedural tree or find/create low-poly OBJ
+**Before**: 94,000 triangles/tree x 400 trees = 37.6M triangles
+**After**: 36 triangles/tree x 400 trees = 14,400 triangles
 
-**Option A - Procedural (fastest to implement)**:
-```rust
-// In tree generation, create minimal geometry:
-fn generate_simple_tree() -> TreeMesh {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+### Files Modified
 
-    // Trunk: 8-sided cylinder, 3 segments = 48 triangles
-    generate_cylinder(&mut vertices, &mut indices,
-        radius: 0.3, height: 4.0, segments: 8, rings: 3);
+- `crates/croatoan_procgen/src/tree.rs` - `generate_simple_tree_mesh()`
+- `roanoke_game/src/main.rs:761-792` - Use simple tree
+- `assets/shaders/tree.wgsl` - Canopy (green) vs trunk (brown) coloring
 
-    // Canopy: Single icosphere, 1 subdivision = 80 triangles
-    generate_sphere(&mut vertices, &mut indices,
-        center: Vec3::new(0.0, 5.0, 0.0),
-        radius: 2.5, subdivisions: 1);
+### Fog Integration
 
-    // Total: ~130 triangles per tree (vs 94,000)
-    TreeMesh { vertices, indices }
-}
-```
-
-**Option B - Billboard (best performance)**:
-```rust
-// For trees > 200m away, render as camera-facing quad
-struct TreeBillboard {
-    position: Vec3,
-    height: f32,
-    width: f32,
-    texture_id: u32,  // Pre-rendered tree image
-}
-```
-
-**Recommended**: Start with Option A, add Option B for LOD2
-
----
-
-### 2.2 Re-enable Tree Rendering with LOD
-
-**File**: `roanoke_game/src/main.rs:2637-2644`
-
-**Current**: Trees completely commented out
-
-**Solution**: Phased re-enablement with distance LOD
-```rust
-// Uncomment and add LOD:
-if let Some(trees) = &chunk.trees {
-    let chunk_dist = (chunk.bounds.center - camera_pos).length();
-
-    if chunk_dist <= 100.0 {
-        // Full detail trees (LOD0)
-        trees.render_full(&mut render_pass);
-    } else if chunk_dist <= 300.0 {
-        // Reduced detail (LOD1) - every 2nd tree, simpler mesh
-        trees.render_lod1(&mut render_pass);
-    } else if chunk_dist <= state.render_distance * 256.0 {
-        // Billboard (LOD2) - camera-facing quads
-        trees.render_billboard(&mut render_pass);
-    }
-    // Beyond render_distance: don't render
-}
-```
-
----
-
-### 2.3 Tree Frustum Culling
-
-**Add per-tree culling** (not just per-chunk):
-```rust
-// In TreePipeline::render():
-let visible_instances: Vec<_> = self.instances.iter()
-    .filter(|inst| {
-        let pos = Vec3::from_slice(&inst.model_matrix[3][0..3]);
-        frustum.contains_sphere(pos, TREE_RADIUS)
-    })
-    .cloned()
-    .collect();
-
-// Only upload and render visible trees
-```
-
----
-
-### 2.4 Add Fog to Tree Shader
-
-**File**: `assets/shaders/tree.wgsl`
-
-**Problem**: Trees have no fog, would look wrong when enabled
-
-**Solution**: Copy fog logic from terrain.wgsl
-```wgsl
-// Add to tree.wgsl fragment shader:
-// (requires adding fog uniforms to bind group)
-
-let dist = distance(in.world_position, camera.view_pos);
-let fog_factor = clamp(dist / camera.fog_end, 0.0, 1.0);
-let fog_factor_sq = fog_factor * fog_factor;  // Quadratic falloff
-
-final_color = mix(final_color, camera.fog_color, fog_factor_sq * camera.fog_density);
-```
+Tree shader now includes fog calculation matching terrain shader.
 
 ---
 

@@ -1,32 +1,44 @@
 # Roanoke Engine - Technical Roadmap
 
+**Last Updated**: 2024-12-06
+**Entry Point**: See `AGENT_DIRECTIVE.md` for agent guidance
+
 Prioritized implementation guide. Each section includes the problem, approach, and specific files to modify.
 
-**See also**:
-- `FPS_OPTIMIZATION_ROADMAP.md` - Detailed FPS recovery plan
-- `MARKETPLACE_LOOT_SYSTEM_SPEC.md` - Item drop system and marketplace design
-- `DECADE_FINANCIAL_ROADMAP.md` - 10-year economic strategy and institutional investment thesis
-- `TRILLION_DOLLAR_VISION.md` - 20-year trillion-dollar infrastructure thesis
+**Related Documents**:
+- `../../AGENT_DIRECTIVE.md` - **START HERE** - Agent entry point
+- `MASTER_AUDIT.md` - Technical status details
+- `../performance/FPS_OPTIMIZATION_ROADMAP.md` - Detailed FPS recovery (COMPLETE)
+- `../specs/MARKETPLACE_LOOT_SYSTEM_SPEC.md` - Item drop system design
+- `../vision/DECADE_FINANCIAL_ROADMAP.md` - 10-year economic vision
+- `../vision/TRILLION_DOLLAR_VISION.md` - Long-term infrastructure thesis
 
 ---
 
 ## Completion Status
 
+### COMPLETED PHASES
+
 | Phase | Status | Notes |
 |-------|--------|-------|
-| 0.1-0.5 FPS Emergency | ✅ DONE | Quantum Spatial Cache + lazy eval |
-| 1.1-1.2 Directional Lighting | ✅ DONE | Dynamic sun color based on elevation |
-| 1.3 Sun Billboard | ✅ DONE | Visual sun disk implemented |
-| 1.4 Time of Day | ✅ DONE | T/Y keys, dynamic sky/fog colors |
-| 2.1-2.3 Shadow Fixes | ✅ DONE | Texel snapping, stable projection |
-| 3.1-3.3 Frustum Culling | ✅ DONE | ~50% fewer draw calls |
-| 4.1-4.3 LOD System | ✅ DONE | Distance culling for grass/trees |
-| 5.1-5.3 Chunk Streaming | 🔧 READY | Infrastructure in chunk_manager.rs |
-| 6.1-6.3 Tree Restoration | 🔴 BLOCKED | Trees disabled, need LOD system |
-| 7.1-7.4 Fog Fix | 🟡 PENDING | Only tints ground, not atmospheric |
-| 8.1-8.2 Rock Optimization | 🟡 PENDING | 78K instances/chunk too many |
-| 9.1-9.3 Economy Foundation | 📋 DESIGNED | See DECADE_FINANCIAL_ROADMAP.md |
-| 10.1-10.3 Drop System | 📋 DESIGNED | See MARKETPLACE_LOOT_SYSTEM_SPEC.md |
+| 0.1-0.5 FPS Emergency | COMPLETE | Quantum Spatial Cache + lazy eval |
+| 1.1-1.2 Directional Lighting | COMPLETE | Dynamic sun color |
+| 1.3 Sun Billboard | COMPLETE | Visual sun disk |
+| 1.4 Time of Day | COMPLETE | T/Y keys |
+| 2.1-2.3 Shadow Fixes | COMPLETE | Texel snapping |
+| 3.1-3.3 Frustum Culling | COMPLETE | ~50% fewer draws |
+| 4.1-4.3 LOD System | COMPLETE | Distance culling |
+| 6.1-6.3 Tree Restoration | COMPLETE | 36 tris (was 247K) |
+
+### CURRENT/PENDING PHASES
+
+| Phase | Status | Priority | Notes |
+|-------|--------|----------|-------|
+| 5.1-5.3 Chunk Streaming | READY | P3 | Infrastructure exists |
+| 7.1-7.4 Fog Fix | PENDING | P2 | Only tints ground |
+| 8.1-8.2 Rock Optimization | PENDING | P1 | 78K instances/chunk |
+| 9.1-9.3 Economy Foundation | DESIGNED | P4 | See specs |
+| 10.1-10.3 Drop System | DESIGNED | P4 | See specs |
 
 ---
 
@@ -90,27 +102,26 @@ Prioritized implementation guide. Each section includes the problem, approach, a
 
 ---
 
-## Phase 6: Tree System Restoration (NEW)
+## Phase 6: Tree System Restoration - COMPLETE
 
-**Why:** Trees are completely disabled. Can't see treeline.
+**Status**: COMPLETE (2024-12-05)
+**Result**: Trees re-enabled with 2,600x polygon reduction
 
-### 6.1 Create Lightweight Tree Mesh
+### Solution Implemented
 
-**Problem:** Current OBJ is 247K faces per tree.
+| Component | Implementation | Triangles |
+|-----------|----------------|-----------|
+| Trunk | 8-segment cylinder | 16 |
+| Canopy | Icosahedron | 20 |
+| **Total** | Per tree | **36** |
 
-**Solution:** Procedural tree: 8-sided cylinder trunk + icosphere canopy = ~130 triangles.
+**Before**: 94,000 triangles/tree x 400 trees = 37.6M triangles
+**After**: 36 triangles/tree x 400 trees = 14,400 triangles
 
-### 6.2 Implement Tree LOD
-
-- LOD0 (0-100m): Full mesh ~130 tris
-- LOD1 (100-300m): Every 2nd tree, simpler mesh
-- LOD2 (300m+): Billboard quads
-
-### 6.3 Re-enable Tree Rendering
-
-**File:** `roanoke_game/src/main.rs:2637-2644`
-
-Uncomment tree render code with distance-based LOD selection.
+### Files Modified
+- `crates/croatoan_procgen/src/tree.rs` - `generate_simple_tree_mesh()`
+- `roanoke_game/src/main.rs:761-792` - Use simple tree
+- `assets/shaders/tree.wgsl` - Canopy vs trunk coloring
 
 ---
 

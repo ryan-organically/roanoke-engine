@@ -47,7 +47,8 @@
       "Bash(timeout:*)",
       "Bash(cargo fix:*)",
       "Bash(1)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(xargs ls:*)"
     ],
     "deny": [],
     "ask": []
