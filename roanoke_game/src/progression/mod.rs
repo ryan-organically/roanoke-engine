@@ -39,5 +39,11 @@ pub use faction_integration::{
 pub use faction_pipeline::{
     FactionPipelineCoordinator, PersistencePipeline, ReputationPipeline, ReputationSource,
     NotificationDispatcher, EventValidator, FactionSyncPipeline, PipelineError, PipelineResult,
-    PipelineHealthReport, SyncOperation,
+    PipelineHealthReport, SyncOperation, ReputationChangeResult,
+    // Transaction system
+    TransactionManager, ReputationTransaction, TransactionState,
+    // Undo system
+    UndoManager, UndoEntry,
+    // Enhanced metrics
+    PipelineMetrics, FactionMetrics, GlobalMetrics, RateMetrics,
 };

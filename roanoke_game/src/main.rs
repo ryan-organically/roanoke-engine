@@ -1978,6 +1978,101 @@ fn main() {
                     });
                 }
                 GameState::Playing => {
+                    // === HUD: Top-left player stats ===
+                    egui::Area::new(egui::Id::new("hud_stats"))
+                        .fixed_pos(egui::pos2(10.0, 10.0))
+                        .show(ui_ctx, |ui| {
+                            ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                            let bg = egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150))
+                                .rounding(egui::Rounding::same(5.0))
+                                .inner_margin(egui::Margin::same(8.0));
+                            bg.show(ui, |ui| {
+                                // Health bar (placeholder - use progression's player_health when available)
+                                let health = 100.0_f32; // TODO: Wire to actual player health
+                                let max_health = 100.0_f32;
+                                let health_pct = health / max_health;
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("♥").color(egui::Color32::RED).size(16.0));
+                                    let bar_size = egui::vec2(100.0, 12.0);
+                                    let (rect, _) = ui.allocate_exact_size(bar_size, egui::Sense::hover());
+                                    ui.painter().rect_filled(rect, 2.0, egui::Color32::DARK_RED);
+                                    let mut filled = rect;
+                                    filled.set_right(rect.left() + rect.width() * health_pct);
+                                    ui.painter().rect_filled(filled, 2.0, egui::Color32::RED);
+                                    ui.label(format!("{:.0}/{:.0}", health, max_health));
+                                });
+                                // Currency (access wallet fields directly)
+                                ui.horizontal(|ui| {
+                                    let wampum = state.player_economy.wallet.wampum;
+                                    let tobacco = state.player_economy.wallet.tobacco;
+                                    ui.label(egui::RichText::new("◎").color(egui::Color32::from_rgb(180, 180, 255)).size(14.0));
+                                    ui.label(format!("{}", wampum));
+                                    ui.add_space(10.0);
+                                    ui.label(egui::RichText::new("⚘").color(egui::Color32::from_rgb(139, 90, 43)).size(14.0));
+                                    ui.label(format!("{}", tobacco));
+                                });
+                            });
+                        });
+
+                    // === HUD: Bottom-center hotbar ===
+                    egui::Area::new(egui::Id::new("hud_hotbar"))
+                        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
+                        .show(ui_ctx, |ui| {
+                            let bg = egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150))
+                                .rounding(egui::Rounding::same(5.0))
+                                .inner_margin(egui::Margin::same(5.0));
+                            bg.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for slot in 0..10 {
+                                        let is_active = slot == state.active_hotbar_slot;
+                                        let slot_bg = if is_active {
+                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100)
+                                        } else {
+                                            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+                                        };
+                                        let frame = egui::Frame::none()
+                                            .fill(slot_bg)
+                                            .stroke(if is_active {
+                                                egui::Stroke::new(2.0, egui::Color32::GOLD)
+                                            } else {
+                                                egui::Stroke::new(1.0, egui::Color32::GRAY)
+                                            })
+                                            .rounding(egui::Rounding::same(3.0))
+                                            .inner_margin(egui::Margin::same(4.0));
+                                        frame.show(ui, |ui| {
+                                            ui.set_min_size(egui::vec2(36.0, 36.0));
+                                            if let Some(item) = state.player_economy.inventory.get_slot(slot) {
+                                                let color = match item.rarity {
+                                                    economy::Rarity::Crude => egui::Color32::GRAY,
+                                                    economy::Rarity::Common => egui::Color32::WHITE,
+                                                    economy::Rarity::Uncommon => egui::Color32::GREEN,
+                                                    economy::Rarity::Rare => egui::Color32::from_rgb(0, 112, 221),
+                                                    economy::Rarity::Epic => egui::Color32::from_rgb(163, 53, 238),
+                                                    economy::Rarity::Legendary => egui::Color32::from_rgb(255, 128, 0),
+                                                    economy::Rarity::Mythic => egui::Color32::from_rgb(230, 30, 30),
+                                                    economy::Rarity::Primordial => egui::Color32::from_rgb(255, 215, 0),
+                                                };
+                                                // Item icon (first char of name)
+                                                let icon = item.name.chars().next().unwrap_or('?');
+                                                ui.label(egui::RichText::new(icon.to_string()).color(color).size(18.0));
+                                                // Stack count
+                                                if item.stack_size > 1 {
+                                                    ui.label(egui::RichText::new(format!("x{}", item.stack_size)).size(10.0).color(egui::Color32::LIGHT_GRAY));
+                                                }
+                                            } else {
+                                                // Empty slot - show slot number
+                                                let key = if slot == 9 { "0".to_string() } else { (slot + 1).to_string() };
+                                                ui.label(egui::RichText::new(key).color(egui::Color32::DARK_GRAY).size(12.0));
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                        });
+
+                    // === Debug window (existing) ===
                     egui::Window::new("Game Menu").show(ui_ctx, |ui| {
                         ui.label(format!("FPS: {:.1}", state.fps));
                         let hours = state.time_of_day as u32;
