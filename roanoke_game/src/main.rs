@@ -1,6 +1,6 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
 use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -32,12 +32,16 @@ mod water_system;
 mod atmosphere;
 mod audio_system;
 mod procedural_synth;
+mod animals;
+mod village_manager;
 
 use water_system::WaterSystem;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
 use atmosphere::AtmosphereEngine;
 use audio_system::{AudioSystem, MusicState};
+use animals::{AnimalManager, AnimalSpawner, Difficulty, TimeOfDay as AnimalTimeOfDay};
+use village_manager::VillageManager;
 
 // ... (Existing structs remain same) ...
 
@@ -312,6 +316,14 @@ struct SharedState {
     swing_animation: SwingAnimation,
     atmosphere: AtmosphereEngine,
     show_load_menu: bool, // For Load Game submenu
+    // Animal System
+    animal_manager: AnimalManager,
+    animal_spawner: AnimalSpawner,
+    // Village System
+    village_manager: VillageManager,
+    // Debug
+    debug_timer: f32,
+    fog_level: u8, // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -453,6 +465,14 @@ fn main() {
         },
         atmosphere: AtmosphereEngine::new(),
         show_load_menu: false,
+        // Animal System
+        animal_manager: AnimalManager::new(Difficulty::Normal),
+        animal_spawner: AnimalSpawner::new(12345), // Will be re-seeded when game starts
+        // Village System
+        village_manager: VillageManager::new(12345), // Will be re-seeded when game starts
+        // Debug
+        debug_timer: 0.0,
+        fog_level: 2, // Start with medium fog
     }));
 
     // ... (Channel setup) ...
@@ -664,6 +684,59 @@ fn main() {
                                 KeyCode::KeyM => {
                                     state.audio_system.toggle_enabled();
                                 }
+                                // Backslash = Cycle fog level: Off -> Light -> Medium -> Heavy -> Dense
+                                KeyCode::Backslash => {
+                                    state.fog_level = (state.fog_level + 1) % 5;
+                                    let fog_name = match state.fog_level {
+                                        0 => "Off",
+                                        1 => "Light",
+                                        2 => "Medium",
+                                        3 => "Heavy",
+                                        _ => "Dense",
+                                    };
+                                    println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
+                                }
+                                // F5 = Spawn debug animals in a circle around player
+                                KeyCode::F5 => {
+                                    use animals::AnimalSpecies;
+                                    let player_pos = state.player.position;
+                                    let species_list = [
+                                        AnimalSpecies::BlackBear,
+                                        AnimalSpecies::EasternCougar,
+                                        AnimalSpecies::GrayWolf,
+                                        AnimalSpecies::TimberRattlesnake,
+                                        AnimalSpecies::AmericanAlligator,
+                                        AnimalSpecies::WildBoar,
+                                        AnimalSpecies::Copperhead,
+                                        AnimalSpecies::RedWolf,
+                                        AnimalSpecies::Bobcat,
+                                        AnimalSpecies::Cottonmouth,
+                                    ];
+                                    let num_species = species_list.len();
+                                    for (i, species) in species_list.iter().enumerate() {
+                                        let angle = (i as f32 / num_species as f32) * std::f32::consts::TAU;
+                                        let distance = 15.0; // 15 meters from player
+                                        let spawn_pos = Vec3::new(
+                                            player_pos.x + angle.cos() * distance,
+                                            player_pos.y,
+                                            player_pos.z + angle.sin() * distance,
+                                        );
+                                        state.animal_manager.spawn(*species, spawn_pos, (0, 0), None);
+                                    }
+                                    println!("[DEBUG] Spawned {} animals around player at {:?}", num_species, player_pos);
+                                }
+                                // F6 = Clear all animals
+                                KeyCode::F6 => {
+                                    let count = state.animal_manager.animal_count();
+                                    // Get all animal IDs first
+                                    let ids: Vec<_> = state.animal_manager.animals_iter()
+                                        .map(|a| a.id)
+                                        .collect();
+                                    for id in ids {
+                                        state.animal_manager.despawn(id);
+                                    }
+                                    println!("[DEBUG] Cleared {} animals", count);
+                                }
                                 _ => {}
                             }
                         }
@@ -856,11 +929,18 @@ fn main() {
                     }
                 }
 
-                // 2. Rock (Boulder)
-                {
-                    let recipe = RockRecipe::boulder();
+                // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
+                let rock_types: Vec<(RockRecipe, &str)> = vec![
+                    (RockRecipe::boulder(), "rock_boulder"),
+                    (RockRecipe::pebble(), "rock_pebble"),
+                    (RockRecipe::small_rock(), "rock_small"),
+                    (RockRecipe::medium_rock(), "rock_medium"),
+                    (RockRecipe::flat_rock(), "rock_flat"),
+                    (RockRecipe::mossy_rock(), "rock_mossy"),
+                ];
+
+                for (recipe, name) in rock_types {
                     let mesh = generate_rock(&recipe);
-                    
                     let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
                     let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
                     let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
@@ -873,7 +953,8 @@ fn main() {
                         &mesh.indices,
                         None,
                     );
-                    state.mesh_registry.insert("rock_boulder".to_string(), gpu_mesh);
+                    state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                    println!("[ASSET] Registered rock: {} ({} verts)", name, positions.len());
                 }
 
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
@@ -1002,6 +1083,12 @@ fn main() {
             Mutex::new(LightShaftPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // Animal Orb Pipeline (Visual representation of animals)
+        static ANIMAL_ORB_PIPELINE: OnceLock<Mutex<AnimalOrbPipeline>> = OnceLock::new();
+        let animal_orb_pipeline_mutex = ANIMAL_ORB_PIPELINE.get_or_init(|| {
+            Mutex::new(AnimalOrbPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Offscreen Render Target (for post-process effects)
         static OFFSCREEN_TARGET: OnceLock<Mutex<Option<OffscreenTarget>>> = OnceLock::new();
         let offscreen_target_mutex = OFFSCREEN_TARGET.get_or_init(|| Mutex::new(None));
@@ -1084,6 +1171,106 @@ fn main() {
             let cloud_coverage = state.weather.cloud_coverage;
             let render_dist = state.render_distance;
             state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, render_dist);
+
+            // Override fog density based on manual fog_level (\ key)
+            // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
+            let fog_multiplier = match state.fog_level {
+                0 => 0.0,   // Off
+                1 => 0.3,   // Light
+                2 => 0.6,   // Medium
+                3 => 1.0,   // Heavy
+                _ => 1.5,   // Dense
+            };
+            state.atmosphere.state.fog_density = fog_multiplier;
+
+            // Debug: Print fog and weather values every 5 seconds
+            state.debug_timer += delta;
+            if state.debug_timer > 5.0 {
+                state.debug_timer = 0.0;
+                let fog = state.atmosphere.fog_params();
+                println!("[DEBUG] Weather: {:?} | Fog: level={} density={:.2}, start={:.1}, end={:.1} | Clouds: {:.2}",
+                    state.weather.current_weather, state.fog_level, fog[0], fog[1], fog[2], state.weather.cloud_coverage);
+            }
+
+            // Update Animal System
+            // Sync time of day with animal manager
+            let animal_time = AnimalTimeOfDay::from_hour(state.time_of_day as u8);
+            state.animal_manager.set_time_of_day(animal_time);
+            // Update animal AI and movement
+            let player_pos = state.player.position;
+            let player_vel = state.player.velocity;
+            state.animal_manager.update(delta, player_pos, player_vel);
+
+            // Update animal orb visual representation
+            let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 256.0);
+            let mut orb_instances: Vec<OrbInstance> = nearby_animals
+                .iter()
+                .map(|animal| {
+                    let base_color = animal.species.orb_color();
+                    let scale = animal.species.orb_scale();
+
+                    // Modify color based on behavior state
+                    let (color, emissive) = match &animal.behavior_state {
+                        animals::BehaviorState::Attack(_) => {
+                            // Red tint and strong glow when attacking
+                            ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
+                        }
+                        animals::BehaviorState::Pursue(_) => {
+                            // Orange-ish tint and moderate glow when pursuing
+                            ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
+                        }
+                        animals::BehaviorState::Alert(_) => {
+                            // Slight yellow tint when alert
+                            ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
+                        }
+                        animals::BehaviorState::Flee(_) => {
+                            // Pale/washed out when fleeing
+                            ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
+                        }
+                        animals::BehaviorState::Dead => {
+                            // Dark gray when dead
+                            ([0.2, 0.2, 0.2], 0.0)
+                        }
+                        _ => {
+                            // Normal color for idle/patrol
+                            (base_color, 0.0)
+                        }
+                    };
+
+                    // Create transform matrix (position + scale, orbs hover slightly above ground)
+                    let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
+                    let model_matrix = Mat4::from_scale_rotation_translation(
+                        Vec3::splat(scale),
+                        glam::Quat::IDENTITY,
+                        pos,
+                    );
+
+                    OrbInstance {
+                        model_matrix: model_matrix.to_cols_array_2d(),
+                        color,
+                        emissive,
+                    }
+                })
+                .collect();
+
+            // Add village NPC orbs
+            for npc_orb in &state.village_manager.npc_orbs {
+                let scale = 1.2; // NPCs slightly larger than animals
+                let model_matrix = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    glam::Quat::IDENTITY,
+                    npc_orb.position,
+                );
+                orb_instances.push(OrbInstance {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    color: npc_orb.color,
+                    emissive: 0.6, // NPCs glow more
+                });
+            }
+
+            // Upload instances to GPU
+            let mut orb_pipeline = animal_orb_pipeline_mutex.lock().unwrap();
+            orb_pipeline.upload_instances(ctx.device(), &orb_instances);
         }
 
         // Handle Input (Player Controller)
@@ -1366,6 +1553,14 @@ fn main() {
                                                     mgr.loaded_chunks.clear();
                                                     mgr.loading_chunks.clear();
                                                 }
+                                                // Initialize village system
+                                                let player_pos = state.player.position;
+                                                state.village_manager = VillageManager::new(data.seed);
+                                                state.village_manager.discover_villages(
+                                                    player_pos,
+                                                    2000.0, // 2km radius
+                                                    10,     // max 10 villages
+                                                );
                                             }
                                         }
                                     }
@@ -1391,6 +1586,14 @@ fn main() {
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
+                                        // Initialize village system
+                                        let player_pos = state.player.position;
+                                        state.village_manager = VillageManager::new(seed);
+                                        state.village_manager.discover_villages(
+                                            player_pos,
+                                            2000.0, // 2km radius
+                                            10,     // max 10 villages
+                                        );
                                     }
                                     "Load Game" => {
                                         state.show_load_menu = true;
@@ -1466,6 +1669,14 @@ fn main() {
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
+                                        // Initialize village system
+                                        let player_pos = state.player.position;
+                                        state.village_manager = VillageManager::new(data.seed);
+                                        state.village_manager.discover_villages(
+                                            player_pos,
+                                            2000.0, // 2km radius
+                                            10,     // max 10 villages
+                                        );
                                     }
                                 }
                                 save_y += 45.0;
@@ -1498,12 +1709,37 @@ fn main() {
                             ui.label(format!("Weather: {:?}", state.weather.current_weather));
                             ui.label(format!("Render Dist: {:.0}", state.render_distance));
                             let fog = state.atmosphere.fog_params();
-                            ui.label(format!("Fog: d={:.2} s={:.0} e={:.0}", fog[0], fog[1], fog[2]));
+                            ui.label(format!("FOG: density={:.2} start={:.0} end={:.0}", fog[0], fog[1], fog[2]));
+                            let fog_color = state.atmosphere.fog_color();
+                            ui.label(format!("FOG COLOR: ({:.2}, {:.2}, {:.2})", fog_color[0], fog_color[1], fog_color[2]));
                             if let Some(manager) = CHUNK_MANAGER.get() {
                                 if let Ok(mgr) = manager.lock() {
                                     let (loaded, loading) = mgr.get_stats();
                                     ui.label(format!("Chunks: {} loaded, {} loading", loaded, loading));
                                     ui.label(format!("Load radius: {}", mgr.load_radius));
+                                }
+                            }
+                            // Village System Debug
+                            ui.separator();
+                            ui.label(format!("VILLAGES: {}", state.village_manager.stats_string()));
+                            // Show nearest village
+                            for village in &state.village_manager.villages {
+                                let dist = ((village.center.x - state.player.position.x).powi(2)
+                                          + (village.center.z - state.player.position.z).powi(2)).sqrt();
+                                ui.label(format!("  {} @ {:.0}m ({} longhouses)",
+                                    village.layout.name, dist, village.layout.longhouses.len()));
+                            }
+                            // Animal System Debug
+                            ui.separator();
+                            ui.label(state.animal_manager.debug_info());
+                            // List nearby animals
+                            let nearby = state.animal_manager.animals_near(state.player.position, 50.0);
+                            if !nearby.is_empty() {
+                                ui.label(format!("Nearby (50m): {}", nearby.len()));
+                                for animal in nearby.iter().take(5) {
+                                    let dist = animal.position.distance(state.player.position);
+                                    ui.label(format!("  {} @ {:.0}m - {:?}",
+                                        animal.species.name(), dist, animal.behavior_state));
                                 }
                             }
                         });
@@ -1731,6 +1967,7 @@ fn main() {
 
                                     ui.label(egui::RichText::new("Weather Controls:").size(18.0).strong().color(egui::Color32::BLACK));
                                     ui.label("[ / ] - Cycle Weather");
+                                    ui.label("\\ - Cycle Fog Level (Off/Light/Medium/Heavy/Dense)");
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
@@ -1876,6 +2113,10 @@ fn main() {
                             building_instances,
                             offset_x, offset_z)) => {
 
+                            // Debug: Show generation counts
+                            println!("[CHUNK] Received chunk ({}, {}): trees={}, rocks={}, detritus_verts={}",
+                                offset_x, offset_z, tree_instances.len(), rock_instances.len(), det_pos.len());
+
                             // Update status
                             state.loading_progress.current_status = format!(
                                 "Uploading chunk at ({}, {})...",
@@ -1913,12 +2154,16 @@ fn main() {
                             }
 
                             let mut tree_pipeline = None;
+                            println!("[CHUNK] Tree instances: {}", tree_instances.len());
                             if !tree_instances.is_empty() {
                                 if let Some(mesh) = state.mesh_registry.get("tree_oak") {
                                     let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), &tree_instances);
                                     tree_pipeline = Some(tp);
+                                    println!("[CHUNK] Created tree pipeline with {} instances", tree_instances.len());
+                                } else {
+                                    println!("[WARN] tree_oak mesh not found in registry!");
                                 }
                             }
 
@@ -1935,6 +2180,12 @@ fn main() {
                                 rock_groups.entry(name).or_default().push(transform);
                             }
 
+                            // Debug: Show rock type breakdown
+                            println!("[CHUNK] Rock types: {:?}", rock_groups.keys().collect::<Vec<_>>());
+                            for (name, transforms) in &rock_groups {
+                                println!("[CHUNK]   {}: {} instances", name, transforms.len());
+                            }
+
                             let mut rock_pipelines = Vec::new();
                             for (name, transforms) in rock_groups {
                                 if let Some(mesh) = state.mesh_registry.get(&name) {
@@ -1942,8 +2193,10 @@ fn main() {
                                     rp.set_mesh(mesh.clone());
                                     rp.upload_instances(ctx.device(), &transforms);
                                     rock_pipelines.push(rp);
+                                    println!("[CHUNK] Created rock pipeline '{}' with {} instances", name, transforms.len());
                                 } else {
-                                    println!("[WARN] Unknown rock type '{}' requested by generator", name);
+                                    println!("[WARN] Unknown rock type '{}' requested - mesh not in registry!", name);
+                                    println!("[WARN] Available meshes: {:?}", state.mesh_registry.keys().collect::<Vec<_>>());
                                 }
                             }
 
@@ -1965,6 +2218,62 @@ fn main() {
                                 }
                             }
 
+                            // Process Village Structures
+                            let village_structures = state.village_manager.get_structures_for_chunk(
+                                offset_x as f32,
+                                offset_z as f32,
+                                chunk_size,
+                            );
+
+                            if !village_structures.is_empty() {
+                                println!("[VILLAGE] Processing {} structures for chunk ({}, {})",
+                                    village_structures.len(), offset_x, offset_z);
+                            }
+
+                            for structure in village_structures {
+                                // Convert flattened vertex data back to BuildingVertex
+                                // Each vertex is 11 floats: pos[3], normal[3], uv[2], color[3]
+                                let num_vertices = structure.mesh_vertices.len() / 11;
+                                let mut vertices = Vec::with_capacity(num_vertices);
+
+                                for i in 0..num_vertices {
+                                    let base = i * 11;
+                                    vertices.push(BuildingVertex {
+                                        position: [
+                                            structure.mesh_vertices[base],
+                                            structure.mesh_vertices[base + 1],
+                                            structure.mesh_vertices[base + 2],
+                                        ],
+                                        normal: [
+                                            structure.mesh_vertices[base + 3],
+                                            structure.mesh_vertices[base + 4],
+                                            structure.mesh_vertices[base + 5],
+                                        ],
+                                        uv: [
+                                            structure.mesh_vertices[base + 6],
+                                            structure.mesh_vertices[base + 7],
+                                        ],
+                                        color: [
+                                            structure.mesh_vertices[base + 8],
+                                            structure.mesh_vertices[base + 9],
+                                            structure.mesh_vertices[base + 10],
+                                        ],
+                                    });
+                                }
+
+                                // Create mesh and pipeline for this structure
+                                let mesh = BuildingPipeline::create_mesh(
+                                    ctx.device(),
+                                    &vertices,
+                                    &structure.mesh_indices,
+                                );
+
+                                let mut pipeline = BuildingPipeline::new(ctx.device(), ctx.surface_format());
+                                pipeline.set_mesh(mesh);
+                                pipeline.upload_instances(ctx.device(), &[structure.transform]);
+                                building_pipelines.push(pipeline);
+                            }
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
@@ -1978,6 +2287,20 @@ fn main() {
                             
                             let coord = ChunkCoord::from_world_pos(Vec3::new(offset_x as f32, 0.0, offset_z as f32), chunk_size);
                             manager.add_chunk(coord, loaded_chunk);
+
+                            // Spawn animals for this chunk
+                            // Note: We need to destructure to avoid borrow checker issues
+                            let player_pos = state.player.position;
+                            let seed = state.seed;
+                            let SharedState { animal_spawner, animal_manager, .. } = &mut *state;
+                            animal_spawner.on_chunk_loaded(
+                                coord.x,
+                                coord.z,
+                                chunk_size,
+                                animal_manager,
+                                player_pos,
+                                seed,
+                            );
 
                             // Update uploaded count
                             state.loading_progress.chunks_uploaded += 1;
@@ -2234,6 +2557,7 @@ fn main() {
             // 2. Main Render Pass
             {
                 // let water_system_guard = water_system_mutex.lock().unwrap();
+                let orb_pipeline = animal_orb_pipeline_mutex.lock().unwrap();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2259,6 +2583,7 @@ fn main() {
                 // Atmospheric fog from time-of-day system (use validated params)
                 let fog_params = state.atmosphere.fog_params();
                 let fog_color = state.atmosphere.fog_color();
+                let fog_density = fog_params[0];  // Base fog intensity
                 let fog_start = fog_params[1];
                 let fog_end = fog_params[2];
 
@@ -2292,6 +2617,7 @@ fn main() {
                         fog_color,
                         fog_start,
                         fog_end,
+                        fog_density,
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()
@@ -2348,6 +2674,10 @@ fn main() {
                         }
                     }
                 }
+
+                // Render Animal Orbs
+                orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position);
+                orb_pipeline.render(&mut render_pass);
 
                 // Render Water
                 // water_system_guard.draw(&mut render_pass);

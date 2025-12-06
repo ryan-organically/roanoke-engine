@@ -50,16 +50,18 @@ Roanoke is a procedural open-world game engine built in Rust with wgpu. The agen
 | File | Purpose | Last Modified |
 |------|---------|---------------|
 | `AGENT_SCOPE.md` | Agent context and task tracking | 2024-11-29 |
-| `TREE_SYSTEM_AUDIT.md` | **NEW** Tree system audit, asset pipeline spec | 2024-11-29 |
-| `VERSION.md` | Version history | 2024-11-28 |
+| `TREE_SYSTEM_AUDIT.md` | Tree system audit, asset pipeline spec | 2024-11-29 |
+| `NPC_VILLAGE_SPECIFICATION.md` | **NEW** NPC behavior & longhouse village spec | 2024-12-05 |
+| `VERSION.md` | Version history | 2024-12-05 |
 
 ### Core Game
 | File | Purpose | Last Modified |
 |------|---------|---------------|
-| `roanoke_game/src/main.rs` | Main loop, UI, game state | 2024-11-29 |
+| `roanoke_game/src/main.rs` | Main loop, UI, game state | 2024-12-05 |
 | `roanoke_game/src/weather_system.rs` | Weather state machine | 2024-11-29 |
-| `roanoke_game/src/atmosphere.rs` | **NEW** Fog, light shafts, time-based FX | 2024-11-29 |
+| `roanoke_game/src/atmosphere.rs` | Fog, light shafts, time-based FX | 2024-11-29 |
 | `roanoke_game/src/water_system.rs` | Water compute (unused) | 2024-11-28 |
+| `roanoke_game/src/village_manager.rs` | **NEW** Village tracking and streaming | 2024-12-05 |
 
 ### Render Pipelines
 | File | Purpose |
@@ -88,6 +90,10 @@ Roanoke is a procedural open-world game engine built in Rust with wgpu. The agen
 | `croatoan_wfc/src/vegetation.rs` | Grass/flower placement |
 | `croatoan_wfc/src/trees.rs` | Tree placement |
 | `croatoan_wfc/src/rocks.rs` | Rock placement |
+| `croatoan_wfc/src/villages.rs` | **NEW** Village world integration |
+| `croatoan_procgen/src/longhouse.rs` | **NEW** Longhouse mesh generation |
+| `croatoan_procgen/src/npc.rs` | **NEW** NPC appearance and mesh generation |
+| `croatoan_procgen/src/village.rs` | **NEW** Village layout, fire pits, corn fields |
 
 ---
 
@@ -144,6 +150,38 @@ Roanoke is a procedural open-world game engine built in Rust with wgpu. The agen
 
 <!-- AGENT: Add dated notes about what you worked on -->
 
+### 2024-12-05 (Native American Village System + Game Integration)
+- **IMPLEMENTED**: Complete Native American village generation system
+  - `croatoan_procgen/src/longhouse.rs` - Iroquoian longhouse mesh generation
+    - 3 architectural styles: Iroquoian, Algonquian, Coastal
+    - Procedural frame poles, bark shell, smoke holes, interior hearths
+    - Configurable by family units (3-10), determining length
+  - `croatoan_procgen/src/npc.rs` - NPC appearance and character generation
+    - 9 roles: Chief, Shaman, Warrior, Hunter, Farmer, etc.
+    - Procedural appearance: height, build, skin tone, hair, clothing
+    - Culturally-authentic name generation using syllable patterns
+  - `croatoan_procgen/src/village.rs` - Village layout generation
+    - Longhouses arranged in oval around central ceremonial fire
+    - Corn fields with Three Sisters mounds (5 growth stages)
+    - Prayer sites at cardinal directions
+    - Fire pit mesh generation (ceremonial and domestic)
+  - `croatoan_wfc/src/villages.rs` - World integration
+    - Terrain-aware site selection (elevation, flatness, spacing)
+    - Chunk-based structure streaming for rendering
+- **GAME INTEGRATION**:
+  - `roanoke_game/src/village_manager.rs` - Village tracking and streaming
+    - Discovers villages at game start (2km radius, max 10 villages)
+    - Per-chunk structure queries for LOD streaming
+    - Integrates with building pipeline for rendering
+  - Village structures rendered using existing BuildingPipeline
+    - Longhouses, fire pits, corn plants added to chunk buildings
+    - Vertex format: position[3], normal[3], uv[2], color[3]
+    - World transform applied per-structure
+  - VillageManager initialized on New Game / Load Game
+- **DOCUMENTATION**: Updated `NPC_VILLAGE_SPECIFICATION.md` with implementation details
+- **TESTS**: All procgen and village integration tests passing
+- **FIXED**: wgpu API compatibility in `animal_orb_pipeline.rs`
+
 ### 2024-11-29 (Session 2 - Tree Audit)
 - **CRITICAL FINDING**: Tree system broken due to `trees/trees9.obj`
   - File is 966K lines, 247K faces - far too heavy for instancing
@@ -156,6 +194,7 @@ Roanoke is a procedural open-world game engine built in Rust with wgpu. The agen
 - Designed `TreeBiomeSpec` system for biome-aware tree placement
   - Oak forest (temperate), Mangrove (coastal), Dryland pine, Willow (riparian)
 - Identified missing systems: Animal pathing, AI agentic humans (no code exists)
+  - **NPC/Village spec created**: See `NPC_VILLAGE_SPECIFICATION.md` for full design
 - L-system procgen has leaves disabled at `tree.rs:331-340` and `tree.rs:483-525`
   - Billboard orientation wrong (faces up, not camera)
   - Would need shader rewrite for camera-facing + wind

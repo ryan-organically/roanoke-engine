@@ -25,20 +25,18 @@ pub fn generate_vegetation_for_chunk(
     let mut all_colors = Vec::new();
     let mut all_indices = Vec::new();
 
-    // Small margin to prevent grass at chunk edges (prevents edge density artifacts)
-    let edge_margin = 2.0;
-    let usable_size = chunk_size - edge_margin * 2.0;
+    // Create chunk-specific seed from chunk coordinates
+    let chunk_hash = ((offset_x as i32).wrapping_mul(73856093) ^ (offset_z as i32).wrapping_mul(19349663)) as u32;
 
     for i in 0..blade_count {
-        // Pseudo-random position within chunk using 2D noise
-        // Include chunk offset in noise to get unique positions per chunk
-        let chunk_seed = (offset_x * 1000.0 + offset_z) as f64;
-        let rand_x = noise.get([i as f64 * 0.7341 + chunk_seed, i as f64 * 0.9127]) as f32;
-        let rand_z = noise.get([i as f64 * 0.5813, i as f64 * 0.6719 + chunk_seed]) as f32;
+        // Generate positions using deterministic hash based on chunk + seed + index
+        // Each chunk gets unique grass placement
+        let combined_seed = seed.wrapping_add(chunk_hash).wrapping_add(i);
+        let hash1 = (combined_seed.wrapping_mul(2654435761)) as f32 / u32::MAX as f32;
+        let hash2 = (combined_seed.wrapping_mul(1597334677)) as f32 / u32::MAX as f32;
 
-        // Keep grass away from chunk edges with margin
-        let local_x = edge_margin + (rand_x + 1.0) * 0.5 * usable_size;
-        let local_z = edge_margin + (rand_z + 1.0) * 0.5 * usable_size;
+        let local_x = hash1 * chunk_size;
+        let local_z = hash2 * chunk_size;
 
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
@@ -111,8 +109,22 @@ pub fn generate_vegetation_for_chunk(
     (all_positions, all_colors, all_indices)
 }
 
-/// Generate detritus (fallen logs, rocks, etc.) for a terrain chunk
-/// Returns (positions, normals, uvs, indices)
+/// Generate detritus (fallen logs, dead branches, etc.) for a terrain chunk.
+///
+/// # Detritus Types
+/// - **Fallen Logs**: Horizontal cylinders in forest areas (height > 4m), 3-5m long
+/// - **Dead Branches**: Smaller debris scattered in scrub/open areas
+///
+/// # Density
+/// Increased 10x from original for much denser ground clutter.
+/// - Previous: 0.008 items/sq meter
+/// - Current: 0.08 items/sq meter
+///
+/// # Spawn Zones
+/// - Logs: Forest only (height > 4m), more common in deep forest
+/// - Branches: Scrub and forest edge (height 2-6m)
+///
+/// Returns (positions, normals, uvs, indices) for the combined mesh.
 pub fn generate_detritus_for_chunk(
     seed: u32,
     chunk_size: f32,
@@ -121,8 +133,8 @@ pub fn generate_detritus_for_chunk(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
     let noise = Perlin::new(seed + 555);
 
-    // Detritus density - increased for more visible ground clutter
-    let detritus_density = 0.008; // Items per square unit (was 0.002)
+    // Detritus density - 10x increase for dense ground clutter
+    let detritus_density = 0.08; // 10x increase (was 0.008)
     let potential_items = (chunk_size * chunk_size * detritus_density) as u32;
 
     let mut all_positions = Vec::new();

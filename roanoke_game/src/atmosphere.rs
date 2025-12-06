@@ -211,14 +211,15 @@ impl AtmosphereEngine {
             }
         }
 
-        // Clamp fog_end to hide chunk pop-in:
-        // - Minimum: render_distance * 0.9 (fog starts fading before pop-in)
-        // - Maximum: render_distance * 1.1 (fully fogged at pop-in distance)
-        // This ensures chunks pop in while already hidden by fog
-        let target_fog_end = render_distance * 0.95;
+        // Fog distances - fog should be very visible
+        // fog_end at render distance to hide chunk pop-in
+        let target_fog_end = render_distance * 0.9;
         self.state.fog_end = target_fog_end;
-        // Scale fog_start to be 30-50% of fog_end for natural gradient
-        self.state.fog_start = (target_fog_end * 0.4).max(20.0);
+        // fog_start very close (5% of end) for constant atmospheric haze
+        self.state.fog_start = (target_fog_end * 0.05).max(5.0);
+
+        // Strong minimum fog density - always visible haze
+        self.state.fog_density = self.state.fog_density.max(0.4);
     }
 
     /// Get fog uniforms for shaders [density, start, end, height_falloff]

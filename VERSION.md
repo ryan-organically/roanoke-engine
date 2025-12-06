@@ -62,6 +62,16 @@
 - [ ] Inventory system
 - [ ] Basic interactions
 - [ ] NPC foundation
+  - [ ] NPC entity and component system
+  - [ ] Behavior tree executor
+  - [ ] Needs system with decay
+- [ ] Native American longhouse villages
+  - [ ] Longhouse procedural generation (Iroquoian style)
+  - [ ] Village layout algorithm
+  - [ ] Corn field and farming system
+  - [ ] Fire pit and ceremonial dancing
+  - [ ] Prayer sites and prayer behaviors
+  - [ ] Daily NPC scheduling
 
 ### v0.1.0 - Alpha (Target: TBD)
 - [ ] Multiplayer foundation

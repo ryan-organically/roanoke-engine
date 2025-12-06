@@ -59,6 +59,66 @@ impl RockRecipe {
             deformation: 0.5,
         }
     }
+
+    /// Tiny pebble - very smooth, small
+    pub fn pebble() -> Self {
+        RockRecipe {
+            rock_type: RockType::RiverStone,
+            base_size: Vec3::new(0.15, 0.08, 0.12),
+            seed: 0,
+            subdivision_levels: 2,
+            roughness: 0.02,
+            deformation: 0.05,
+        }
+    }
+
+    /// Small rock - slightly rough
+    pub fn small_rock() -> Self {
+        RockRecipe {
+            rock_type: RockType::RiverStone,
+            base_size: Vec3::new(0.35, 0.25, 0.3),
+            seed: 0,
+            subdivision_levels: 2,
+            roughness: 0.08,
+            deformation: 0.12,
+        }
+    }
+
+    /// Medium rock - moderate roughness
+    pub fn medium_rock() -> Self {
+        RockRecipe {
+            rock_type: RockType::Boulder,
+            base_size: Vec3::new(0.7, 0.5, 0.65),
+            seed: 0,
+            subdivision_levels: 2,
+            roughness: 0.12,
+            deformation: 0.18,
+        }
+    }
+
+    /// Flat rock - wide and low, good for stepping stones
+    pub fn flat_rock() -> Self {
+        RockRecipe {
+            rock_type: RockType::RiverStone,
+            base_size: Vec3::new(0.6, 0.15, 0.55),
+            seed: 0,
+            subdivision_levels: 2,
+            roughness: 0.05,
+            deformation: 0.08,
+        }
+    }
+
+    /// Mossy rock - slightly larger, irregular
+    pub fn mossy_rock() -> Self {
+        RockRecipe {
+            rock_type: RockType::Boulder,
+            base_size: Vec3::new(0.6, 0.45, 0.55),
+            seed: 0,
+            subdivision_levels: 2,
+            roughness: 0.15,
+            deformation: 0.2,
+        }
+    }
 }
 
 /// Vertex data for rock mesh

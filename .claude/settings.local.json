@@ -41,7 +41,10 @@
       "Bash(export WAYLAND_DISPLAY=\"\")",
       "Bash(timeout 10:*)",
       "Bash(grep:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(cargo clean:*)",
+      "Bash(timeout 15 ./target/release/roanoke_game:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": []

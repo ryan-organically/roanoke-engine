@@ -12,7 +12,8 @@ struct Uniforms {
     time: f32,                      // 4 bytes (140-144)
     fog_start: f32,                 // 4 bytes (144-148)
     fog_end: f32,                   // 4 bytes (148-152)
-    _padding1: [f32; 2],            // 8 bytes (152-160)
+    fog_density: f32,               // 4 bytes (152-156)
+    _padding1: f32,                 // 4 bytes (156-160)
     sun_dir: [f32; 3],              // 12 bytes (160-172)
     _padding2: f32,                 // 4 bytes (172-176)
     view_pos: [f32; 3],             // 12 bytes (176-188)
@@ -236,7 +237,7 @@ impl TerrainPipeline {
     }
 
     /// Update uniform buffer with camera, time, fog, and light matrix
-    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, sun_dir: [f32; 3], view_pos: [f32; 3], camera_pos: [f32; 3]) {
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, fog_density: f32, sun_dir: [f32; 3], view_pos: [f32; 3], camera_pos: [f32; 3]) {
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
@@ -244,7 +245,8 @@ impl TerrainPipeline {
             time,
             fog_start,
             fog_end,
-            _padding1: [0.0; 2],
+            fog_density,
+            _padding1: 0.0,
             sun_dir,
             _padding2: 0.0,
             view_pos,

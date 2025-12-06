@@ -196,6 +196,97 @@ fn lerp_color(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// Calculate the approximate distance from a point to the nearest shoreline.
+///
+/// The shoreline is defined as where terrain height transitions from water (< 0.5m) to land.
+/// This function samples in the ocean direction (+X gradient) to find the shoreline.
+///
+/// # Returns
+/// - Positive value: distance to shoreline (point is inland)
+/// - Zero or negative: point is at or in the water
+///
+/// # Algorithm
+/// 1. If current point is underwater, return 0
+/// 2. March toward ocean (+X direction with noise influence) until water is found
+/// 3. Binary search to refine shoreline position
+/// 4. Return Euclidean distance to that point
+pub fn distance_to_shoreline(x: f32, z: f32, seed: u32) -> f32 {
+    let (height, _) = get_height_at(x, z, seed);
+
+    // Water threshold - below this is considered water
+    const WATER_LEVEL: f32 = 0.5;
+
+    // If we're already in water, distance is 0
+    if height < WATER_LEVEL {
+        return 0.0;
+    }
+
+    // March toward ocean (+X direction) to find shoreline
+    // The gradient is -x * 0.001, so +X = more ocean
+    let max_search_dist = 500.0; // Don't search beyond 500m
+    let step_size = 10.0; // Initial coarse step
+
+    let mut search_x = x;
+    let mut prev_x = x;
+    let mut found_water = false;
+
+    // Coarse search: find where water starts
+    while search_x < x + max_search_dist {
+        let (h, _) = get_height_at(search_x, z, seed);
+        if h < WATER_LEVEL {
+            found_water = true;
+            break;
+        }
+        prev_x = search_x;
+        search_x += step_size;
+    }
+
+    // If no water found within search distance, return max distance
+    if !found_water {
+        return max_search_dist;
+    }
+
+    // Binary search to refine shoreline position
+    let mut low = prev_x;
+    let mut high = search_x;
+    for _ in 0..8 {
+        let mid = (low + high) * 0.5;
+        let (h, _) = get_height_at(mid, z, seed);
+        if h < WATER_LEVEL {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    // Shoreline is approximately at 'high'
+    let shoreline_x = high;
+
+    // Return distance from original point to shoreline
+    // Since we only searched in X, this is just the X difference
+    // For more accuracy, we could search in multiple directions
+    (shoreline_x - x).abs()
+}
+
+/// Get the biome "t" value at a position (0.0-1.0 scale from ocean to deep forest)
+/// Useful for determining spawn zones without full height calculation.
+///
+/// # Biome Zones
+/// - t < 0.45: Ocean
+/// - t 0.45-0.55: Beach
+/// - t 0.55-0.65: Scrub/Lowland
+/// - t > 0.65: Forest
+pub fn get_biome_t(x: f32, z: f32, seed: u32) -> f32 {
+    let biome_scale = 0.002;
+    let biome_noise = noise_util::fbm(
+        Vec2::new(x * biome_scale, z * biome_scale),
+        3, 2.0, 0.5, seed + 100
+    );
+    let noise_norm = (biome_noise + 1.0) * 0.5;
+    let gradient = -x * 0.001;
+    (noise_norm * 0.3 + gradient + 0.5).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,8 +1,40 @@
 # Tree System Audit & Asset Pipeline Specification
 
-**Date**: 2024-11-29
-**Status**: Action Required
-**Priority**: HIGH - Visual quality blocker
+**Date**: 2024-12-05 (Updated)
+**Status**: Treeline & Bunch System Implemented
+**Priority**: HIGH - Visual quality blocker (assets still needed)
+
+---
+
+## Recent Changes (2024-12-05)
+
+### Treeline System Overhaul
+- **40-yard treeline**: Trees now only spawn 40+ yards (~36.6m) from the shoreline
+- **Distance-based logic**: Uses `distance_to_shoreline()` function instead of height-only checks
+- **Clean visual boundary**: Creates a natural-looking treeline that follows coastline contours
+
+### LowlandBunch System (NEW)
+Clustered vegetation units for natural distribution:
+- **1 anchor rock** (large boulder at center)
+- **8-15 pebbles** scattered within radius
+- **2 bushes** near the anchor
+- **1 large tree** (if beyond treeline)
+
+Bunches are spread on a jittered 18m grid across lowland/scrub zones.
+
+### Density Increases (10x)
+| Element | Old Density | New Density |
+|---------|-------------|-------------|
+| Large rocks | 0.02/m² | 0.2/m² |
+| Pebbles | 0.12/m² | 1.2/m² |
+| Deadwood | 0.008/m² | 0.08/m² |
+
+### Key Files Modified
+- `crates/croatoan_wfc/src/trees.rs` - Complete rewrite with bunch system
+- `crates/croatoan_wfc/src/rocks.rs` - 10x density, bunch integration
+- `crates/croatoan_wfc/src/vegetation.rs` - 10x detritus density
+- `crates/croatoan_wfc/src/mesh_gen.rs` - Added `distance_to_shoreline()`, `get_biome_t()`
+- `crates/croatoan_wfc/src/lib.rs` - New exports for bunch system
 
 ---
 
@@ -355,11 +387,16 @@ pub const WILLOW_RIVERSIDE: TreeBiomeSpec = TreeBiomeSpec {
 - **Required**: NavMesh generation, pathfinding algorithm, agent steering
 
 ### AI Agentic Humans
-- No NPC system exists
+- No NPC system exists yet
 - No behavior trees or utility AI
 - No needs/drives simulation
 - No social graph
 - **Required**: Full agent architecture, animations, scheduling system
+- **SPEC CREATED**: See `NPC_VILLAGE_SPECIFICATION.md` for full design including:
+  - Native American longhouse villages
+  - NPC behavior trees (farming, dancing, praying)
+  - Needs-driven scheduling system
+  - Village layout and placement algorithms
 
 ---
 
@@ -388,3 +425,149 @@ pub const WILLOW_RIVERSIDE: TreeBiomeSpec = TreeBiomeSpec {
 ---
 
 *Document generated from Claude Code audit session.*
+
+---
+
+## Appendix A: Treeline & Bunch System API Reference
+
+### Distance to Shoreline Function
+
+```rust
+/// Calculate distance from a point to the nearest shoreline
+/// Returns 0 if point is in water, positive distance if on land
+pub fn distance_to_shoreline(x: f32, z: f32, seed: u32) -> f32
+```
+
+**Algorithm**:
+1. Check if current point is underwater (height < 0.5m)
+2. March toward ocean (+X direction) in 10m steps
+3. Binary search to refine shoreline position
+4. Return Euclidean distance
+
+**Usage**:
+```rust
+use croatoan_wfc::distance_to_shoreline;
+
+let dist = distance_to_shoreline(world_x, world_z, seed);
+if dist > 36.6 {
+    // Beyond treeline, can spawn trees
+}
+```
+
+### LowlandBunch Structure
+
+```rust
+/// A vegetation cluster containing rocks, pebbles, bushes, and optionally a tree
+pub struct LowlandBunch {
+    pub center: Vec3,       // World position
+    pub radius: f32,        // 8-12m typically
+    pub seed: u32,          // Deterministic generation seed
+    pub has_tree: bool,     // True if beyond treeline
+    pub biome_factor: f32,  // 0.0 = scrub, 1.0 = deep forest
+}
+
+impl LowlandBunch {
+    /// Generate all instances within this bunch
+    pub fn generate(&self, world_seed: u32) -> BunchInstances
+}
+
+/// Result containing all instance transforms
+pub struct BunchInstances {
+    pub trees: Vec<Mat4>,
+    pub bushes: Vec<Mat4>,
+    pub large_rocks: Vec<Mat4>,
+    pub pebbles: Vec<Mat4>,
+}
+```
+
+### Generation Functions
+
+```rust
+/// Generate trees and bushes for a chunk (includes bunches)
+pub fn generate_trees_for_chunk(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+) -> Vec<Mat4>
+
+/// Get raw bunch data for external rock integration
+pub fn generate_bunches_for_chunk(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+) -> Vec<LowlandBunch>
+
+/// Generate rocks with bunch integration (10x density)
+pub fn generate_rocks_for_chunk(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+) -> Vec<(String, Mat4)>
+```
+
+### Biome Zones
+
+| Zone | t Value | Height | Vegetation |
+|------|---------|--------|------------|
+| Ocean | < 0.45 | < 0m | None |
+| Beach | 0.45-0.55 | 0-2m | Beach pebbles only |
+| Scrub/Lowland | 0.55-0.65 | 2-6m | Bunches (no trees if < 40yd from shore) |
+| Forest | > 0.65 | 6-15m+ | Dense trees + bunches |
+
+### Constants
+
+```rust
+/// Minimum distance from shoreline for trees (40 yards)
+const TREELINE_DISTANCE: f32 = 36.6;
+
+/// Upper elevation where trees fade out
+const UPPER_TREELINE_START: f32 = 40.0;
+const UPPER_TREELINE_END: f32 = 55.0;
+
+/// Bunch grid spacing
+const BUNCH_GRID_SIZE: f32 = 18.0;
+```
+
+---
+
+## Appendix B: Rock Type Reference
+
+| Type | Scale | Sink | Description |
+|------|-------|------|-------------|
+| Pebble | 0.12 | 0.03 | Tiny stones, everywhere above water |
+| SmallRock | 0.35 | 0.08 | Common ground detail |
+| MediumRock | 0.75 | 0.18 | Slopes and rocky areas |
+| LargeBoulder | 1.5 | 0.35 | Sparse landmarks, bunch anchors |
+| FlatRock | 0.55 | 0.12 | Near water, paths |
+| MossyRock | 0.65 | 0.22 | Damp/shaded areas |
+
+### Rock Generation Phases
+
+1. **Bunch-Integrated**: Anchor rocks + pebbles from LowlandBunch system
+2. **Scattered Large**: Independent boulders on slopes (0.2/m²)
+3. **Dense Pebbles**: Ground coverage everywhere (1.2/m²)
+4. **Beach Strips**: Tide line pebbles (0.8/m² in beach zone)
+
+---
+
+## Appendix C: Performance Considerations
+
+### Expected Instance Counts (256x256 chunk)
+
+| Element | Count | Notes |
+|---------|-------|-------|
+| Trees | ~200-500 | Depends on biome |
+| Bushes | ~100-300 | From bunches |
+| Large rocks | ~500-2000 | Slopes + bunches |
+| Pebbles | ~30,000-50,000 | Simplified transforms |
+| Detritus | ~1,000-3,000 | Logs + branches |
+
+### Optimization Notes
+
+- Pebbles use Y-rotation only (no tilt) for faster transforms
+- Bunches provide coordinated placement, reducing overlap checks
+- Clustering noise reduces visual randomness while maintaining density
+- Rock instances are grouped by type for batch rendering

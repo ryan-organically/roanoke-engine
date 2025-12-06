@@ -136,8 +136,8 @@ impl WeatherSystem {
         self.start_color_base = self.cloud_color_base;
         self.start_color_shade = self.cloud_color_shade;
 
-        // 5s transition for smooth but visible change (was 20s)
-        self.transition_duration = if instant { 0.0 } else { 5.0 };
+        // 1s transition for quick dev testing (was 5s)
+        self.transition_duration = if instant { 0.0 } else { 1.0 };
         self.transition_progress = 0.0; // Reset progress
 
         match weather {
