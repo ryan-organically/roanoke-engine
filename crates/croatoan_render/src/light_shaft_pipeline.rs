@@ -28,7 +28,7 @@ impl Default for LightShaftUniforms {
             density: 0.5,
             weight: 0.1,
             exposure: 1.0,
-            num_samples: 64,
+            num_samples: 24, // Reduced from 64 for FPS
         }
     }
 }
@@ -186,7 +186,7 @@ impl LightShaftPipeline {
             density,
             weight: 0.15,
             exposure: 1.2,
-            num_samples: 64,
+            num_samples: 24, // Reduced from 64 for FPS
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

@@ -61,8 +61,7 @@ use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec3, Quat};
 use croatoan_procgen::{
     VillageId, VillageRecipe, VillageLayout, generate_village,
-    LonghouseRecipe, LonghouseStyle, generate_longhouse, LonghouseMesh,
-    FirePit, generate_fire_pit, FirePitMesh,
+    LonghouseMesh, FirePitMesh, generate_fire_pit,
     CornGrowthStage, generate_corn_plant,
 };
 

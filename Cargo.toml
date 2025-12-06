@@ -11,7 +11,7 @@ log = "0.4"
 env_logger = "0.11"
 
 # Math & Physics
-glam = "0.25"        # SIMD Math (Replaces Unity.Mathematics)
+glam = { version = "0.25", features = ["serde"] }  # SIMD Math with serialization
 noise = "0.9"        # Base noise library
 bytemuck = { version = "1.14", features = ["derive"] }
 

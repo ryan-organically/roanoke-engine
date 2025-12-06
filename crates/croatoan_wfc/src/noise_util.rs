@@ -89,7 +89,7 @@ pub fn turbulence(point: Vec2, octaves: u32, lacunarity: f32, persistence: f32, 
 pub fn hash(n: u32) -> f32 {
     let mut n = n;
     n = (n << 13) ^ n;
-    n = n.wrapping_mul(n.wrapping_mul(n).wrapping_mul(15731) + 789221) + 1376312589;
+    n = n.wrapping_mul(n.wrapping_mul(n).wrapping_mul(15731).wrapping_add(789221)).wrapping_add(1376312589);
     (n & 0x7fffffff) as f32 / 0x7fffffff as f32
 }
 

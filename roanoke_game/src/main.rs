@@ -1,7 +1,12 @@
+// Allow dead code for planned features not yet integrated
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
 use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
-use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
+use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
 use image; // Added image crate
@@ -34,6 +39,9 @@ mod audio_system;
 mod procedural_synth;
 mod animals;
 mod village_manager;
+mod progression;
+mod npc;
+mod game_state;
 
 use water_system::WaterSystem;
 mod weather_system;
@@ -42,6 +50,7 @@ use atmosphere::AtmosphereEngine;
 use audio_system::{AudioSystem, MusicState};
 use animals::{AnimalManager, AnimalSpawner, Difficulty, TimeOfDay as AnimalTimeOfDay};
 use village_manager::VillageManager;
+use game_state::GameProgression;
 
 // ... (Existing structs remain same) ...
 
@@ -321,6 +330,8 @@ struct SharedState {
     animal_spawner: AnimalSpawner,
     // Village System
     village_manager: VillageManager,
+    // Progression System
+    game_progression: GameProgression,
     // Debug
     debug_timer: f32,
     fog_level: u8, // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
@@ -470,6 +481,8 @@ fn main() {
         animal_spawner: AnimalSpawner::new(12345), // Will be re-seeded when game starts
         // Village System
         village_manager: VillageManager::new(12345), // Will be re-seeded when game starts
+        // Progression System
+        game_progression: GameProgression::new(),
         // Debug
         debug_timer: 0.0,
         fog_level: 2, // Start with medium fog
@@ -894,7 +907,7 @@ fn main() {
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
         let (shadow_map_mutex, shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
-            let shadow_map = ShadowMap::new(ctx.device(), 2048);
+            let shadow_map = ShadowMap::new(ctx.device(), 1024); // Reduced from 2048 for FPS
             let shadow_pipeline = ShadowPipeline::new(ctx.device());
             (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
         });
@@ -1063,8 +1076,33 @@ fn main() {
             let player_vel = state.player.velocity;
             state.animal_manager.update(delta, player_pos, player_vel);
 
-            // Update animal orb visual representation
-            let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 256.0);
+            // Update Game Progression System
+            {
+                use crate::progression::reputation::Faction;
+                use std::collections::HashMap;
+
+                // Collect faction reputation for NPC behavior
+                let faction_rep: HashMap<Faction, i32> = state.game_progression.player_progression.reputation
+                    .iter()
+                    .map(|(k, v)| (*k, v.value))
+                    .collect();
+
+                // Update game progression (quests, events, NPC schedules)
+                state.game_progression.update(delta, player_pos, player_vel, &faction_rep);
+
+                // Check for achievements
+                let game_time = state.game_progression.game_time;
+                let new_achievements = state.game_progression.player_progression.check_all_achievements(game_time);
+                for achievement in new_achievements {
+                    println!("[ACHIEVEMENT] Unlocked: {}", achievement);
+                }
+
+                // Validate progression state periodically
+                state.game_progression.player_progression.validate();
+            }
+
+            // Update animal orb visual representation - only render nearby animals
+            let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 0.5);
             let mut orb_instances: Vec<OrbInstance> = nearby_animals
                 .iter()
                 .map(|animal| {
@@ -1695,7 +1733,7 @@ fn main() {
                                     let old_render_dist = state.render_distance;
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 300.0) / 2.0);
-                                        ui.add(egui::Slider::new(&mut state.render_distance, 200.0..=500.0)
+                                        ui.add(egui::Slider::new(&mut state.render_distance, 75.0..=200.0)
                                             .text("Distance")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
@@ -2225,7 +2263,7 @@ fn main() {
             let light_dir = if is_day { sun_dir } else { moon_dir };
 
             // Stable shadow projection
-            let shadow_map_size = 2048.0_f32;
+            let shadow_map_size = 1024.0_f32; // Reduced from 2048 for FPS
             let ortho_size = 600.0_f32;
             let shadow_center = Vec3::new(
                 (state.player.position.x / 64.0).round() * 64.0,

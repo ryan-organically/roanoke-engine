@@ -31,11 +31,11 @@ use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec3, Quat};
 
 /// Minimum distance from shoreline for trees to spawn (40 yards ≈ 36.6 meters)
-const TREELINE_DISTANCE: f32 = 36.6;
+pub const TREELINE_DISTANCE: f32 = 36.6;
 
 /// Upper elevation limit where trees fade out (alpine treeline)
-const UPPER_TREELINE_START: f32 = 40.0;
-const UPPER_TREELINE_END: f32 = 55.0;
+pub const UPPER_TREELINE_START: f32 = 40.0;
+pub const UPPER_TREELINE_END: f32 = 55.0;
 
 //=============================================================================
 // LOWLAND BUNCH SYSTEM
@@ -399,7 +399,7 @@ pub fn generate_bunches_for_chunk(
     let noise = Perlin::new(seed + 777);
     let mut bunches = Vec::new();
 
-    let bunch_grid_size = 18.0;
+    let bunch_grid_size = 32.0; // Increased from 18 for FPS
     let bunches_per_row = (chunk_size / bunch_grid_size).ceil() as i32;
 
     for bz in 0..bunches_per_row {

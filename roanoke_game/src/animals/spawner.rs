@@ -1,7 +1,7 @@
 //! Chunk-based animal spawning system
 
 use super::manager::AnimalManager;
-use super::types::{AnimalSpecies, Habitat, TimeOfDay};
+use super::types::{AnimalSpecies, Habitat};
 use glam::Vec3;
 use noise::{NoiseFn, Perlin};
 

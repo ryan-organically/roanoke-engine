@@ -1,7 +1,7 @@
 //! Combat system - damage processing between animals and player
 
 use super::behavior::{AttackState, BehaviorState};
-use super::entity::{Animal, AnimalId, DamageSource};
+use super::entity::AnimalId;
 use super::manager::AnimalManager;
 use super::types::StatusEffectType;
 use glam::Vec3;

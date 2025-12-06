@@ -1,4 +1,4 @@
-use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroupLayout, BindGroup};
+use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroup};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
@@ -183,7 +183,7 @@ impl GrassPipeline {
     pub fn upload_mesh(
         &mut self,
         device: &Device,
-        queue: &Queue,
+        _queue: &Queue,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
         indices: &[u32],

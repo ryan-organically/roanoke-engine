@@ -10,6 +10,7 @@
 //! - `behavior`: AI state machines
 //! - `spawner`: Chunk-based spawning
 //! - `combat`: Damage and attack processing
+//! - `player_tracking`: Animal-player relationship and reputation
 
 pub mod types;
 pub mod entity;
@@ -18,10 +19,10 @@ pub mod manager;
 pub mod behavior;
 pub mod spawner;
 pub mod combat;
+pub mod player_tracking;
 
 pub use types::*;
-pub use entity::{Animal, AnimalId, Target, DamageSource};
-pub use spatial::SpatialHash;
 pub use manager::AnimalManager;
 pub use behavior::BehaviorState;
 pub use spawner::AnimalSpawner;
+pub use player_tracking::{PlayerWildlifeReputation, LegendaryAnimal};

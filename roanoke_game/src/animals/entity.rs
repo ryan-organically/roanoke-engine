@@ -3,14 +3,15 @@
 use super::behavior::BehaviorState;
 use super::types::{AnimalSpecies, StatusEffectType};
 use glam::{Quat, Vec3};
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 /// Unique runtime identifier for animal instances
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AnimalId(pub u64);
 
 /// Unique identifier for a pack of animals
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PackId(pub u64);
 
 /// What the animal is currently targeting

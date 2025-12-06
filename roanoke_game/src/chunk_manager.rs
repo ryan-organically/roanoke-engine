@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
 use glam::Vec3;
 use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, DetritusPipeline, BuildingPipeline, ChunkBounds};
 

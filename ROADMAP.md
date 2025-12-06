@@ -2,7 +2,11 @@
 
 Prioritized implementation guide. Each section includes the problem, approach, and specific files to modify.
 
-**See also**: `FPS_OPTIMIZATION_ROADMAP.md` for detailed FPS recovery plan.
+**See also**:
+- `FPS_OPTIMIZATION_ROADMAP.md` - Detailed FPS recovery plan
+- `MARKETPLACE_LOOT_SYSTEM_SPEC.md` - Item drop system and marketplace design
+- `DECADE_FINANCIAL_ROADMAP.md` - 10-year economic strategy and institutional investment thesis
+- `TRILLION_DOLLAR_VISION.md` - 20-year trillion-dollar infrastructure thesis
 
 ---
 
@@ -21,6 +25,8 @@ Prioritized implementation guide. Each section includes the problem, approach, a
 | 6.1-6.3 Tree Restoration | 🔴 BLOCKED | Trees disabled, need LOD system |
 | 7.1-7.4 Fog Fix | 🟡 PENDING | Only tints ground, not atmospheric |
 | 8.1-8.2 Rock Optimization | 🟡 PENDING | 78K instances/chunk too many |
+| 9.1-9.3 Economy Foundation | 📋 DESIGNED | See DECADE_FINANCIAL_ROADMAP.md |
+| 10.1-10.3 Drop System | 📋 DESIGNED | See MARKETPLACE_LOOT_SYSTEM_SPEC.md |
 
 ---
 
@@ -596,6 +602,101 @@ Skip LOD until streaming works. Streaming is more important for gameplay (infini
 
 ---
 
+## Phase 9: Economy System Foundation
+
+**Why:** The financial system is core to long-term player retention and potential revenue.
+
+**See:** `DECADE_FINANCIAL_ROADMAP.md` for full economic architecture.
+
+### 9.1 Wampum Currency System
+
+**New file:** `roanoke_game/src/economy/currency.rs`
+
+```rust
+pub struct CurrencySystem {
+    player_wallets: HashMap<PlayerId, Wallet>,
+    total_supply: u64,
+    daily_emission: u64,
+    daily_burned: u64,
+}
+
+pub struct Wallet {
+    wampum: u64,
+    tobacco: u64,
+}
+```
+
+**Integration points:**
+- Drop system → Currency rewards
+- NPC vendors → Currency sinks
+- Player trades → Transaction fees
+
+### 9.2 Item Provenance System
+
+**New file:** `roanoke_game/src/economy/provenance.rs`
+
+Track item history from creation through all ownership changes:
+- First owner permanently recorded
+- Kill/discovery context captured
+- Trade history (last 10 owners)
+- Value estimation from history
+
+### 9.3 Basic Marketplace
+
+**New file:** `roanoke_game/src/economy/marketplace.rs`
+
+**Phase 1 (MVP):**
+- Direct player-to-player trades
+- Simple offer/accept flow
+- Transaction logging
+
+**Phase 2:**
+- Auction house with bidding
+- Order book system
+- Price history tracking
+
+---
+
+## Phase 10: Drop System Integration
+
+**Why:** Loot drops are the primary value-generation mechanism.
+
+**See:** `MARKETPLACE_LOOT_SYSTEM_SPEC.md` for complete drop mechanics.
+
+### 10.1 Rarity Roll System
+
+**New file:** `roanoke_game/src/loot/rarity.rs`
+
+Implement the 7-layer roll cascade:
+1. Base RNG
+2. Luck modifier
+3. Skill mastery
+4. Session pity
+5. Celestial/weather
+6. Event multiplier
+7. Karma correction
+
+### 10.2 Item DNA Generation
+
+**New file:** `roanoke_game/src/loot/item_dna.rs`
+
+Seed-based item generation:
+- 64-bit genome determines all properties
+- Prefix/suffix from 324/216 pools
+- Quality 0-100 bell curve
+- Variant class (1% rare variants)
+
+### 10.3 Pity System
+
+**New file:** `roanoke_game/src/loot/pity.rs`
+
+Karma accumulation for unlucky players:
+- Hard pity: Guaranteed rare at 50 drops
+- Hard pity: Guaranteed epic at 200 drops
+- Hard pity: Guaranteed legendary at 1000 drops
+
+---
+
 ## Don't Do (Yet)
 
 - **VOBJ format:** You don't have enough assets to need a custom format
@@ -603,3 +704,5 @@ Skip LOD until streaming works. Streaming is more important for gameplay (infini
 - **PBR materials:** Stylized/simple shading is fine, PBR is a rabbit hole
 - **Water rendering:** Get land right first
 - **Multiplayer:** Single-player first, always
+- **Blockchain/NFT:** The economic system achieves scarcity without chain overhead
+- **Real money extraction:** Focus on gameplay first; monetization comes after retention

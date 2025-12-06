@@ -2,7 +2,6 @@
 
 use super::entity::{Animal, AnimalId, PackId, Target};
 use super::types::{AggressionType, BehaviorType};
-use crate::player::Player;
 use glam::Vec3;
 
 /// High-level behavior states
@@ -434,4 +433,442 @@ pub fn rand_chance_seeded(probability: f32, seed: u64) -> bool {
     let final_hash = (mixed ^ (mixed >> 33)).wrapping_mul(0xC4CEB9FE1A85EC53);
 
     (final_hash as f32 / u64::MAX as f32) < probability
+}
+
+// === Pack Coordination System ===
+
+/// Role within a pack
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackRole {
+    Alpha,
+    Beta,
+    Hunter,
+    Scout,
+    Guard,
+}
+
+/// Pack tactical state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackTactic {
+    Patrolling,
+    Hunting,
+    Flanking,
+    Surrounding,
+    Retreating,
+    Defending,
+}
+
+/// Pack coordination state
+#[derive(Debug, Clone)]
+pub struct PackState {
+    pub pack_id: PackId,
+    pub alpha_id: Option<AnimalId>,
+    pub member_ids: Vec<AnimalId>,
+    pub tactic: PackTactic,
+    pub target_pos: Option<Vec3>,
+    pub formation_center: Vec3,
+    pub morale: f32, // 0.0 = broken, 1.0 = confident
+    pub alert_level: f32,
+    pub last_kill_time: Option<std::time::Instant>,
+}
+
+impl PackState {
+    pub fn new(pack_id: PackId, center: Vec3) -> Self {
+        Self {
+            pack_id,
+            alpha_id: None,
+            member_ids: Vec::new(),
+            tactic: PackTactic::Patrolling,
+            target_pos: None,
+            formation_center: center,
+            morale: 1.0,
+            alert_level: 0.0,
+            last_kill_time: None,
+        }
+    }
+
+    /// Add a member to the pack
+    pub fn add_member(&mut self, id: AnimalId, is_alpha: bool) {
+        self.member_ids.push(id);
+        if is_alpha {
+            self.alpha_id = Some(id);
+        }
+    }
+
+    /// Remove a member (death/despawn)
+    pub fn remove_member(&mut self, id: AnimalId) {
+        self.member_ids.retain(|&m| m != id);
+
+        // If alpha died, pack morale drops significantly
+        if self.alpha_id == Some(id) {
+            self.alpha_id = None;
+            self.morale *= 0.3;
+
+            // Promote strongest remaining as new alpha
+            if !self.member_ids.is_empty() {
+                self.alpha_id = Some(self.member_ids[0]);
+            }
+        } else {
+            // Regular member death reduces morale slightly
+            self.morale *= 0.85;
+        }
+    }
+
+    /// Update pack morale
+    pub fn update_morale(&mut self, dt: f32) {
+        // Morale slowly recovers
+        self.morale = (self.morale + 0.02 * dt).min(1.0);
+
+        // But caps lower if missing alpha
+        if self.alpha_id.is_none() {
+            self.morale = self.morale.min(0.5);
+        }
+
+        // Recent kill boosts morale
+        if let Some(kill_time) = self.last_kill_time {
+            if kill_time.elapsed().as_secs_f32() < 30.0 {
+                self.morale = self.morale.max(0.8);
+            }
+        }
+    }
+
+    /// Check if pack should retreat
+    pub fn should_retreat(&self) -> bool {
+        self.morale < 0.25 || self.member_ids.len() <= 1
+    }
+
+    /// Get member count
+    pub fn member_count(&self) -> usize {
+        self.member_ids.len()
+    }
+
+    /// Get alpha position from animals list
+    pub fn alpha_position(&self, animals: &[Animal]) -> Option<Vec3> {
+        self.alpha_id.and_then(|alpha_id| {
+            animals.iter().find(|a| a.id == alpha_id).map(|a| a.position)
+        })
+    }
+}
+
+/// Calculate flanking position for pack hunting
+pub fn calculate_flank_position(
+    target_pos: Vec3,
+    pack_center: Vec3,
+    member_index: usize,
+    total_members: usize,
+    desired_distance: f32,
+) -> Vec3 {
+    if total_members <= 1 {
+        return target_pos;
+    }
+
+    // Distribute members in an arc around the target
+    let base_angle = (target_pos - pack_center).normalize_or_zero();
+    let angle_offset = std::f32::consts::PI * 2.0 / total_members as f32;
+    let angle = angle_offset * member_index as f32 - std::f32::consts::PI;
+
+    // Rotate the direction
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    let rotated = Vec3::new(
+        base_angle.x * cos_a - base_angle.z * sin_a,
+        0.0,
+        base_angle.x * sin_a + base_angle.z * cos_a,
+    );
+
+    target_pos + rotated * desired_distance
+}
+
+/// Update pack hunting behavior
+pub fn update_pack_hunting(
+    pack: &mut PackState,
+    animals: &mut [Animal],
+    player_pos: Vec3,
+    dt: f32,
+) {
+    // Update morale
+    pack.update_morale(dt);
+
+    // Find alpha position first (avoid borrow issues)
+    let alpha_pos = pack.alpha_id
+        .and_then(|alpha_id| animals.iter().find(|a| a.id == alpha_id).map(|a| a.position))
+        .unwrap_or(pack.formation_center);
+    let player_dist = alpha_pos.distance(player_pos);
+
+    if player_dist < 100.0 {
+        pack.alert_level = (pack.alert_level + 0.5 * dt).min(1.0);
+    } else {
+        pack.alert_level = (pack.alert_level - 0.1 * dt).max(0.0);
+    }
+
+    // Determine pack tactic based on state
+    pack.tactic = if pack.should_retreat() {
+        PackTactic::Retreating
+    } else if pack.alert_level > 0.8 && player_dist < 50.0 {
+        PackTactic::Surrounding
+    } else if pack.alert_level > 0.5 {
+        PackTactic::Hunting
+    } else if pack.alert_level > 0.2 {
+        PackTactic::Flanking
+    } else {
+        PackTactic::Patrolling
+    };
+
+    // Assign positions based on tactic
+    let members: Vec<AnimalId> = pack.member_ids.clone();
+    let member_count = members.len();
+    let tactic = pack.tactic;
+    let formation_center = pack.formation_center;
+    let pack_alpha_id = pack.alpha_id;
+    let alert_level = pack.alert_level;
+
+    for (idx, &member_id) in members.iter().enumerate() {
+        if let Some(animal) = animals.iter_mut().find(|a| a.id == member_id) {
+            let role = if pack_alpha_id == Some(member_id) {
+                PackRole::Alpha
+            } else if idx == 1 {
+                PackRole::Beta
+            } else if idx % 3 == 0 {
+                PackRole::Scout
+            } else {
+                PackRole::Hunter
+            };
+
+            match tactic {
+                PackTactic::Patrolling => {
+                    // Patrol around formation center
+                    let patrol_radius = 30.0 + (idx as f32 * 5.0);
+                    let angle = (idx as f32 * 2.4) + (alert_level * 10.0);
+                    let patrol_pos = formation_center + Vec3::new(
+                        angle.cos() * patrol_radius,
+                        0.0,
+                        angle.sin() * patrol_radius,
+                    );
+                    animal.target = Some(Target::Position(patrol_pos));
+                }
+
+                PackTactic::Hunting => {
+                    // Alpha leads, others follow
+                    if role == PackRole::Alpha {
+                        animal.target = Some(Target::Player);
+                        animal.behavior_state = BehaviorState::Pursue(PursueState::Stalking);
+                    } else {
+                        // Follow alpha at distance (using cached alpha_pos)
+                        let follow_pos = alpha_pos + Vec3::new(
+                            (idx as f32 * 1.5).sin() * 10.0,
+                            0.0,
+                            (idx as f32 * 1.5).cos() * 10.0,
+                        );
+                        animal.target = Some(Target::Position(follow_pos));
+                    }
+                }
+
+                PackTactic::Flanking => {
+                    // Move to flanking positions around target
+                    let flank_pos = calculate_flank_position(
+                        player_pos,
+                        alpha_pos,
+                        idx,
+                        member_count,
+                        25.0,
+                    );
+                    animal.target = Some(Target::Position(flank_pos));
+                    animal.behavior_state = BehaviorState::Pursue(PursueState::Circling);
+                }
+
+                PackTactic::Surrounding => {
+                    // Close surround for attack
+                    let attack_pos = calculate_flank_position(
+                        player_pos,
+                        alpha_pos,
+                        idx,
+                        member_count,
+                        8.0,
+                    );
+                    animal.target = Some(Target::Position(attack_pos));
+                    animal.awareness = 1.0;
+
+                    // Attack if in range
+                    if animal.position.distance(player_pos) < animal.species.base_stats().attack_range * 1.5 {
+                        animal.target = Some(Target::Player);
+                        animal.behavior_state = BehaviorState::Attack(AttackState::WindingUp);
+                    }
+                }
+
+                PackTactic::Retreating => {
+                    // Flee away from player
+                    let retreat_dir = (alpha_pos - player_pos).normalize_or_zero();
+                    let retreat_pos = alpha_pos + retreat_dir * 100.0;
+                    animal.target = Some(Target::Position(retreat_pos));
+                    animal.behavior_state = BehaviorState::Flee(FleeState::Running);
+                }
+
+                PackTactic::Defending => {
+                    // Defend territory
+                    let defend_pos = formation_center + Vec3::new(
+                        (idx as f32 * 1.2).cos() * 15.0,
+                        0.0,
+                        (idx as f32 * 1.2).sin() * 15.0,
+                    );
+                    animal.target = Some(Target::Position(defend_pos));
+                    animal.behavior_state = BehaviorState::Alert(AlertState::Warning);
+                }
+            }
+        }
+    }
+}
+
+// === Territory System ===
+
+/// Territory claim
+#[derive(Debug, Clone)]
+pub struct Territory {
+    pub owner_id: AnimalId,
+    pub center: Vec3,
+    pub radius: f32,
+    pub strength: f32, // How aggressively defended
+    pub established_time: f32,
+}
+
+impl Territory {
+    pub fn new(owner_id: AnimalId, center: Vec3, radius: f32) -> Self {
+        Self {
+            owner_id,
+            center,
+            radius,
+            strength: 1.0,
+            established_time: 0.0,
+        }
+    }
+
+    /// Check if position is within territory
+    pub fn contains(&self, pos: Vec3) -> bool {
+        pos.distance(self.center) < self.radius
+    }
+
+    /// Get aggression level for intruder at position
+    pub fn aggression_at(&self, pos: Vec3) -> f32 {
+        let dist = pos.distance(self.center);
+        if dist >= self.radius {
+            return 0.0;
+        }
+
+        // More aggressive closer to center
+        let closeness = 1.0 - (dist / self.radius);
+        self.strength * closeness * (1.0 + self.established_time * 0.1).min(2.0)
+    }
+}
+
+/// Update territorial behavior for a single animal
+pub fn update_territorial_behavior(
+    animal: &mut Animal,
+    territory: &Territory,
+    intruder_pos: Vec3,
+    intruder_in_territory: bool,
+    dt: f32,
+) {
+    if !intruder_in_territory {
+        // No intruder, patrol territory
+        if animal.behavior_state == BehaviorState::Idle {
+            if rand_chance(0.02 * dt) {
+                animal.behavior_state = BehaviorState::Patrol;
+                // Pick random patrol point in territory using hash-based angle
+                let hash = animal.id.0.wrapping_mul(0x9E3779B97F4A7C15);
+                let angle = (hash as f32 / u64::MAX as f32) * std::f32::consts::TAU;
+                let dist = territory.radius * 0.7;
+                let patrol_target = territory.center + Vec3::new(
+                    angle.cos() * dist,
+                    0.0,
+                    angle.sin() * dist,
+                );
+                animal.target = Some(Target::Position(patrol_target));
+            }
+        }
+        return;
+    }
+
+    // Intruder detected!
+    let aggression = territory.aggression_at(intruder_pos);
+
+    if aggression > 0.7 {
+        // Attack intruder
+        animal.awareness = 1.0;
+        animal.target = Some(Target::Player);
+        animal.behavior_state = BehaviorState::Pursue(PursueState::Chasing);
+    } else if aggression > 0.4 {
+        // Warning display
+        animal.awareness = (animal.awareness + 0.3 * dt).min(1.0);
+        animal.behavior_state = BehaviorState::Alert(AlertState::Warning);
+        animal.look_at(intruder_pos);
+    } else if aggression > 0.1 {
+        // Watch carefully
+        animal.awareness = (animal.awareness + 0.1 * dt).min(0.8);
+        animal.behavior_state = BehaviorState::Alert(AlertState::Looking);
+        animal.look_at(intruder_pos);
+    }
+}
+
+// === Hunting Patterns ===
+
+/// Calculate ambush position for stalkers
+pub fn calculate_ambush_position(
+    stalker_pos: Vec3,
+    target_pos: Vec3,
+    target_velocity: Vec3,
+    terrain_height_fn: impl Fn(f32, f32) -> f32,
+) -> Vec3 {
+    // Predict where target will be
+    let prediction_time = 3.0;
+    let predicted_pos = target_pos + target_velocity * prediction_time;
+
+    // Find point ahead of target that's elevated (for pouncing)
+    let to_predicted = (predicted_pos - stalker_pos).normalize_or_zero();
+    let ambush_dist = 15.0;
+
+    let candidate_pos = predicted_pos - to_predicted * ambush_dist;
+    let ground_height = terrain_height_fn(candidate_pos.x, candidate_pos.z);
+
+    Vec3::new(candidate_pos.x, ground_height + 1.0, candidate_pos.z)
+}
+
+/// Check if animal has line of sight to target (simplified)
+pub fn has_line_of_sight(from: Vec3, to: Vec3, _terrain_height_fn: impl Fn(f32, f32) -> f32) -> bool {
+    // Simplified - just check distance and height difference
+    let dist = from.distance(to);
+    let height_diff = (from.y - to.y).abs();
+
+    // If target is too far down or occluded, no LOS
+    dist < 150.0 && height_diff < 20.0
+}
+
+/// Calculate circling position for predators
+pub fn calculate_circle_position(
+    current_pos: Vec3,
+    target_pos: Vec3,
+    circle_radius: f32,
+    circle_speed: f32,
+    dt: f32,
+) -> Vec3 {
+    let to_target = target_pos - current_pos;
+    let current_dist = to_target.length();
+
+    if current_dist < 0.1 {
+        return current_pos;
+    }
+
+    // Calculate perpendicular direction for circling
+    let forward = to_target.normalize_or_zero();
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+
+    // Spiral inward if too far, outward if too close
+    let radial_adjust = if current_dist > circle_radius {
+        1.0
+    } else if current_dist < circle_radius * 0.5 {
+        -0.5
+    } else {
+        0.0
+    };
+
+    let movement = (right + forward * radial_adjust).normalize_or_zero() * circle_speed * dt;
+    current_pos + movement
 }

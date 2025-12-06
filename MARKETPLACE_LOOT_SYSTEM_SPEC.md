@@ -1,8 +1,15 @@
 # Roanoke Financial Marketplace & Loot Drop System
 
+**Related Documents:**
+- `DECADE_FINANCIAL_ROADMAP.md` - 10-year economic strategy, institutional investment thesis
+- `TRILLION_DOLLAR_VISION.md` - 20-year trillion-dollar infrastructure thesis
+- `ROADMAP.md` - Technical implementation roadmap
+
 ## Executive Summary
 
 A skill, luck, and time-based economy where every item has provenance, rarity derives from mathematical scarcity, and value emerges from player-driven markets. The system creates "digital artifact" value without blockchain—through deterministic rarity, deflationary sinks, and permanent item history.
+
+**Investment Thesis:** This loot system is the value-generation engine that powers the dual-currency economy (Wampum/Tobacco) detailed in `DECADE_FINANCIAL_ROADMAP.md`. Items are the assets; currencies are the medium of exchange; the marketplace is the liquidity layer.
 
 ---
 
@@ -2229,6 +2236,181 @@ Market Metrics:
 
 ---
 
-*Document Version: 1.0*
-*Last Updated: 2024*
+## Part XII: Currency Integration
+
+This section bridges the loot system with the dual-currency economy defined in `DECADE_FINANCIAL_ROADMAP.md`.
+
+### 12.1 Wampum (WPM) Generation from Drops
+
+Every drop generates Wampum based on item properties:
+
+```rust
+struct DropToWampumConversion {
+    // Base WPM by rarity
+    fn calculate(&self, item: &Item, context: &DropContext) -> u64 {
+        let base = match item.rarity {
+            Rarity::Crude => 5,
+            Rarity::Common => 20,
+            Rarity::Uncommon => 100,
+            Rarity::Rare => 500,
+            Rarity::Epic => 2_500,
+            Rarity::Legendary => 15_000,
+            Rarity::Mythic => 100_000,
+            Rarity::Primordial => 1_000_000,
+        };
+
+        // Quality multiplier (0.5x - 1.5x)
+        let quality_mult = 0.5 + (item.quality as f64 / 100.0);
+
+        // Kill quality bonus
+        let kill_mult = match context.kill_quality {
+            Some(KillQuality::Legendary) => 2.0,
+            Some(KillQuality::Perfect) => 1.5,
+            Some(KillQuality::Clean) => 1.25,
+            _ => 1.0,
+        };
+
+        // First-time discovery bonus
+        let discovery_mult = if context.is_first_of_type { 3.0 }
+            else if context.is_server_first { 5.0 }
+            else { 1.0 };
+
+        (base as f64 * quality_mult * kill_mult * discovery_mult) as u64
+    }
+}
+```
+
+### 12.2 Tobacco (TBC) Drop Integration
+
+TBC drops are extremely rare and tied to exceptional achievements:
+
+```
+TBC DROP TRIGGERS
+════════════════════════════════════════════════════════════════════════════
+
+TRIGGER                          TBC REWARD      PROBABILITY
+───────────────────────────────────────────────────────────────────────────
+Legendary item drop              10 TBC          10% chance on drop
+Mythic item drop                 100 TBC         25% chance on drop
+Primordial item drop             1,000 TBC       100% guaranteed
+Server-first legendary beast     500 TBC         Guaranteed
+Perfect quality + Legendary      50 TBC          Guaranteed
+Season leaderboard top 10        100-1000 TBC    End of season
+Event participation              1-10 TBC        Per milestone
+```
+
+### 12.3 Marketplace Fee Distribution
+
+Transaction fees fund the economy:
+
+```rust
+struct FeeDistribution {
+    // Where fees go
+    fn distribute(&self, fee: u64) {
+        let burned = (fee as f64 * 0.40) as u64;      // 40% burned (deflation)
+        let treasury = (fee as f64 * 0.30) as u64;    // 30% to treasury
+        let rewards = (fee as f64 * 0.20) as u64;     // 20% to player rewards
+        let ecosystem = (fee as f64 * 0.10) as u64;   // 10% to creators
+
+        self.burn(burned);
+        self.treasury.deposit(treasury);
+        self.reward_pool.deposit(rewards);
+        self.creator_fund.deposit(ecosystem);
+    }
+}
+```
+
+### 12.4 Item-to-Currency Sinks
+
+Items destroyed to generate deflationary pressure:
+
+```
+DESTRUCTION REWARDS
+════════════════════════════════════════════════════════════════════════════
+
+Sacrifice Altar:     Destroy items for permanent stat bonuses
+                     Value threshold unlocks tiers (see Part IV)
+                     TBC bonus for sacrificing Legendary+
+
+Crafting Consumption: Epic+ items consumed to craft Legendary+
+                      Failure chance creates additional sinks
+                      Success grants bonus WPM
+
+Durability Death:     Items at 0 durability destroyed permanently
+                      High-value items generate "memorial" WPM
+                      Primordials never fully destroy (become "ruined")
+```
+
+---
+
+## Part XIII: Institutional Data Feeds
+
+For institutional investors (see `DECADE_FINANCIAL_ROADMAP.md` Part II):
+
+### 13.1 Real-Time API Endpoints
+
+```
+PUBLIC ENDPOINTS (Free)
+════════════════════════════════════════════════════════════════════════════
+GET /api/v1/economy/live           Live economy metrics (5s refresh)
+GET /api/v1/prices/{template_id}   Current bid/ask/last for item
+GET /api/v1/rarity/distribution    Current rarity distribution
+GET /api/v1/supply/wpm             WPM total supply and velocity
+GET /api/v1/supply/tbc             TBC circulating and burned
+
+LICENSED ENDPOINTS ($5K/month)
+════════════════════════════════════════════════════════════════════════════
+GET /api/v1/history/trades         Full trade history (paginated)
+GET /api/v1/history/prices         OHLCV candles by item
+GET /api/v1/analytics/whales       Large holder activity
+GET /api/v1/analytics/flow         Currency flow analysis
+WS  /api/v1/stream/trades          Real-time trade stream
+WS  /api/v1/stream/drops           Real-time drop notifications
+
+INSTITUTIONAL ENDPOINTS ($25K/month)
+════════════════════════════════════════════════════════════════════════════
+GET /api/v1/audit/supply           Cryptographic supply proof
+GET /api/v1/audit/provenance       Full provenance chain verification
+GET /api/v1/custody/accounts       Multi-sig account management
+POST /api/v1/custody/transfer      Institutional transfers
+GET /api/v1/reports/quarterly      Audit-ready quarterly reports
+```
+
+### 13.2 Price Oracle Specification
+
+```rust
+struct PriceOracle {
+    // Manipulation-resistant price feeds
+    fn get_price(&self, template_id: ItemTemplateId) -> OraclePrice {
+        OraclePrice {
+            // Time-weighted average (resistant to flash crashes)
+            twap_1h: self.calculate_twap(template_id, Duration::hours(1)),
+            twap_24h: self.calculate_twap(template_id, Duration::hours(24)),
+
+            // Volume-weighted average (resistant to wash trading)
+            vwap_24h: self.calculate_vwap(template_id, Duration::hours(24)),
+
+            // Last trade (for reference)
+            last_price: self.get_last_trade(template_id).price,
+            last_trade_time: self.get_last_trade(template_id).timestamp,
+
+            // Liquidity metrics
+            bid_depth: self.get_bid_depth(template_id),
+            ask_depth: self.get_ask_depth(template_id),
+            spread_bps: self.calculate_spread_bps(template_id),
+
+            // Confidence
+            confidence: self.calculate_confidence(template_id),
+            sample_size: self.get_trade_count_24h(template_id),
+        }
+    }
+}
+```
+
+---
+
+*Document Version: 1.1*
+*Last Updated: December 2024*
 *Author: Game Design / Economy Team*
+
+*See also: `DECADE_FINANCIAL_ROADMAP.md` for investment thesis and 10-year economic strategy.*

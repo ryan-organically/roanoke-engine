@@ -51,7 +51,7 @@
 
 use glam::{Vec2, Vec3};
 use crate::longhouse::{LonghouseRecipe, LonghouseStyle, LonghouseMesh, generate_longhouse};
-use crate::npc::{NpcId, NpcRecipe, NpcRole, NpcData, generate_npc};
+use crate::npc::{NpcId, NpcRecipe, NpcData, generate_npc};
 
 /// Unique identifier for villages
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

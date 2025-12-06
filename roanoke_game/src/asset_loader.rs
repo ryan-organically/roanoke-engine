@@ -1,5 +1,4 @@
 use tobj;
-use std::path::Path;
 use croatoan_wfc::TreeTemplate;
 
 pub fn load_obj(path: &str) -> Option<TreeTemplate> {
@@ -24,7 +23,7 @@ pub fn load_obj(path: &str) -> Option<TreeTemplate> {
             let mut skipped = Vec::new();
             let mut loaded = Vec::new();
 
-            for (i, m) in models.iter().enumerate() {
+            for (_idx, m) in models.iter().enumerate() {
                 let mesh = &m.mesh;
                 let obj_name = m.name.to_lowercase();
 

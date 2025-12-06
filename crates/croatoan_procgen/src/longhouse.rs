@@ -143,7 +143,9 @@ pub struct LonghouseMesh {
 // Color palette
 const FRAME_POLE_COLOR: [f32; 3] = [0.55, 0.40, 0.25];
 const ELM_BARK_COLOR: [f32; 3] = [0.45, 0.35, 0.28];
+#[allow(dead_code)]
 const BIRCH_BARK_COLOR: [f32; 3] = [0.75, 0.72, 0.65];
+#[allow(dead_code)]
 const INTERIOR_BARK_COLOR: [f32; 3] = [0.50, 0.38, 0.30];
 const SMOKE_STAIN_COLOR: [f32; 3] = [0.30, 0.27, 0.25];
 const DOOR_FRAME_COLOR: [f32; 3] = [0.40, 0.30, 0.22];

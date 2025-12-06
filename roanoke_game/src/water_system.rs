@@ -1,8 +1,7 @@
 use wgpu;
 use wgpu::util::DeviceExt;
-use glam::{Vec2, Vec3, Mat4, Vec4};
+use glam::Mat4;
 use bytemuck::{Pod, Zeroable};
-use std::mem;
 
 // --- Uniforms ---
 

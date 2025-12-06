@@ -237,7 +237,7 @@ impl TerrainPipeline {
     }
 
     /// Update uniform buffer with camera, time, fog, and light matrix
-    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, fog_density: f32, sun_dir: [f32; 3], view_pos: [f32; 3], camera_pos: [f32; 3]) {
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, fog_density: f32, sun_dir: [f32; 3], view_pos: [f32; 3], _camera_pos: [f32; 3]) {
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),

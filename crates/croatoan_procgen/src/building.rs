@@ -1,5 +1,4 @@
-use glam::{Vec3, Vec2};
-use std::collections::HashMap;
+use glam::Vec3;
 
 /// Architectural style for the building
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

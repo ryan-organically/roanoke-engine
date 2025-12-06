@@ -54,14 +54,14 @@ fn noise(p: vec2<f32>) -> f32 {
                    hash(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
 }
 
-// FBM (Fractal Brownian Motion)
+// FBM (Fractal Brownian Motion) - Reduced iterations for FPS
 fn fbm(p: vec2<f32>) -> f32 {
     var value = 0.0;
     var amplitude = 0.5;
-    var frequency = 0.0;
     var p2 = p;
-    
-    for (var i = 0; i < 5; i++) {
+
+    // Reduced from 5 to 3 iterations for FPS
+    for (var i = 0; i < 3; i++) {
         value += amplitude * noise(p2);
         p2 = p2 * 2.0;
         amplitude *= 0.5;
