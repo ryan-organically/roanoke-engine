@@ -1,0 +1,511 @@
+{
+  "namespace": "com.roanoke.marketing.events",
+  "type": "record",
+  "name": "CampaignEvent",
+  "doc": "Schema for marketing campaign events and performance data",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Unique identifier for this event (UUID v4)"
+    },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "CampaignEventType",
+        "symbols": [
+          "IMPRESSION",
+          "CLICK",
+          "CONVERSION",
+          "VIEW",
+          "ENGAGEMENT",
+          "INSTALL",
+          "PURCHASE",
+          "SIGNUP",
+          "WISHLIST_ADD",
+          "CAMPAIGN_START",
+          "CAMPAIGN_END",
+          "BUDGET_UPDATE",
+          "BID_UPDATE",
+          "CREATIVE_CHANGE"
+        ]
+      }
+    },
+    {
+      "name": "timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      }
+    },
+    {
+      "name": "campaign",
+      "type": {
+        "type": "record",
+        "name": "Campaign",
+        "fields": [
+          {
+            "name": "campaign_id",
+            "type": "string"
+          },
+          {
+            "name": "campaign_name",
+            "type": "string"
+          },
+          {
+            "name": "campaign_type",
+            "type": {
+              "type": "enum",
+              "name": "CampaignType",
+              "symbols": [
+                "AWARENESS",
+                "CONSIDERATION",
+                "CONVERSION",
+                "RETENTION",
+                "INFLUENCER",
+                "ORGANIC",
+                "PR",
+                "EVENT",
+                "SEASONAL"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "type": {
+              "type": "enum",
+              "name": "CampaignStatus",
+              "symbols": ["DRAFT", "SCHEDULED", "ACTIVE", "PAUSED", "COMPLETED", "CANCELLED"]
+            }
+          },
+          {
+            "name": "start_date",
+            "type": {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            }
+          },
+          {
+            "name": "end_date",
+            "type": ["null", {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            }],
+            "default": null
+          },
+          {
+            "name": "budget_total",
+            "type": ["null", {
+              "type": "bytes",
+              "logicalType": "decimal",
+              "precision": 12,
+              "scale": 2
+            }],
+            "default": null
+          },
+          {
+            "name": "budget_daily",
+            "type": ["null", {
+              "type": "bytes",
+              "logicalType": "decimal",
+              "precision": 10,
+              "scale": 2
+            }],
+            "default": null
+          },
+          {
+            "name": "budget_currency",
+            "type": "string",
+            "default": "USD"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ad_group",
+      "type": ["null", {
+        "type": "record",
+        "name": "AdGroup",
+        "fields": [
+          {
+            "name": "ad_group_id",
+            "type": "string"
+          },
+          {
+            "name": "ad_group_name",
+            "type": "string"
+          },
+          {
+            "name": "targeting",
+            "type": {
+              "type": "record",
+              "name": "Targeting",
+              "fields": [
+                {
+                  "name": "age_min",
+                  "type": ["null", "int"],
+                  "default": null
+                },
+                {
+                  "name": "age_max",
+                  "type": ["null", "int"],
+                  "default": null
+                },
+                {
+                  "name": "genders",
+                  "type": {
+                    "type": "array",
+                    "items": "string"
+                  },
+                  "default": []
+                },
+                {
+                  "name": "locations",
+                  "type": {
+                    "type": "array",
+                    "items": "string"
+                  },
+                  "default": []
+                },
+                {
+                  "name": "interests",
+                  "type": {
+                    "type": "array",
+                    "items": "string"
+                  },
+                  "default": []
+                },
+                {
+                  "name": "platforms",
+                  "type": {
+                    "type": "array",
+                    "items": "string"
+                  },
+                  "default": []
+                },
+                {
+                  "name": "custom_audiences",
+                  "type": {
+                    "type": "array",
+                    "items": "string"
+                  },
+                  "default": []
+                }
+              ]
+            }
+          }
+        ]
+      }],
+      "default": null
+    },
+    {
+      "name": "creative",
+      "type": ["null", {
+        "type": "record",
+        "name": "Creative",
+        "fields": [
+          {
+            "name": "creative_id",
+            "type": "string"
+          },
+          {
+            "name": "creative_name",
+            "type": "string"
+          },
+          {
+            "name": "creative_type",
+            "type": {
+              "type": "enum",
+              "name": "CreativeType",
+              "symbols": ["IMAGE", "VIDEO", "CAROUSEL", "TEXT", "PLAYABLE", "COLLECTION"]
+            }
+          },
+          {
+            "name": "headline",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "description",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "cta",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "asset_urls",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          },
+          {
+            "name": "landing_url",
+            "type": ["null", "string"],
+            "default": null
+          }
+        ]
+      }],
+      "default": null
+    },
+    {
+      "name": "platform",
+      "type": {
+        "type": "enum",
+        "name": "AdPlatform",
+        "symbols": [
+          "GOOGLE_ADS",
+          "META_ADS",
+          "TIKTOK_ADS",
+          "TWITTER_ADS",
+          "REDDIT_ADS",
+          "YOUTUBE_ADS",
+          "STEAM",
+          "TWITCH",
+          "INFLUENCER",
+          "DIRECT"
+        ]
+      }
+    },
+    {
+      "name": "placement",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Ad placement (feed, story, search, etc.)"
+    },
+    {
+      "name": "metrics",
+      "type": {
+        "type": "record",
+        "name": "CampaignMetrics",
+        "fields": [
+          {
+            "name": "impressions",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "reach",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "clicks",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "conversions",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "video_views",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "video_completions",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "engagements",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "shares",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "saves",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "installs",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "wishlist_adds",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "purchases",
+            "type": "long",
+            "default": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "costs",
+      "type": {
+        "type": "record",
+        "name": "CampaignCosts",
+        "fields": [
+          {
+            "name": "spend",
+            "type": {
+              "type": "bytes",
+              "logicalType": "decimal",
+              "precision": 10,
+              "scale": 4
+            }
+          },
+          {
+            "name": "currency",
+            "type": "string",
+            "default": "USD"
+          },
+          {
+            "name": "cpm",
+            "type": ["null", "float"],
+            "default": null
+          },
+          {
+            "name": "cpc",
+            "type": ["null", "float"],
+            "default": null
+          },
+          {
+            "name": "cpa",
+            "type": ["null", "float"],
+            "default": null
+          },
+          {
+            "name": "cpi",
+            "type": ["null", "float"],
+            "default": null,
+            "doc": "Cost per install"
+          },
+          {
+            "name": "roas",
+            "type": ["null", "float"],
+            "default": null,
+            "doc": "Return on ad spend"
+          }
+        ]
+      }
+    },
+    {
+      "name": "attribution",
+      "type": {
+        "type": "record",
+        "name": "Attribution",
+        "fields": [
+          {
+            "name": "model",
+            "type": {
+              "type": "enum",
+              "name": "AttributionModel",
+              "symbols": ["LAST_CLICK", "FIRST_CLICK", "LINEAR", "TIME_DECAY", "POSITION_BASED", "DATA_DRIVEN"]
+            },
+            "default": "LAST_CLICK"
+          },
+          {
+            "name": "window_days",
+            "type": "int",
+            "default": 7
+          },
+          {
+            "name": "view_through",
+            "type": "boolean",
+            "default": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "user",
+      "type": ["null", {
+        "type": "record",
+        "name": "CampaignUser",
+        "fields": [
+          {
+            "name": "anonymous_id",
+            "type": "string",
+            "doc": "Anonymized/hashed user identifier"
+          },
+          {
+            "name": "device_type",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "os",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "browser",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "country",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "region",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "is_new_user",
+            "type": ["null", "boolean"],
+            "default": null
+          }
+        ]
+      }],
+      "default": null
+    },
+    {
+      "name": "processing_metadata",
+      "type": {
+        "type": "record",
+        "name": "CampaignProcessingMetadata",
+        "fields": [
+          {
+            "name": "pipeline_version",
+            "type": "string"
+          },
+          {
+            "name": "schema_version",
+            "type": "string",
+            "default": "1.0.0"
+          },
+          {
+            "name": "ingestion_timestamp",
+            "type": {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            }
+          },
+          {
+            "name": "source_system",
+            "type": "string"
+          },
+          {
+            "name": "data_quality_flags",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          }
+        ]
+      }
+    }
+  ]
+}

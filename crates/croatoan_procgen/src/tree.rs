@@ -543,9 +543,165 @@ pub fn generate_tree_mesh(tree: &GeneratedTree) -> TreeMesh {
     }
 }
 
+//=============================================================================
+// SIMPLE LOW-POLY TREE GENERATOR
+//=============================================================================
+// Generates a simple cylinder trunk + icosphere canopy tree
+// Total: ~200-300 triangles vs 94K from complex OBJ
+// Perfect for LOD1 or as primary tree mesh for performance
+
+/// Generate a simple low-poly tree mesh (cylinder trunk + icosphere canopy)
+///
+/// This creates a tree with approximately 200-300 triangles:
+/// - Trunk: cylinder with 8 sides = ~48 triangles
+/// - Canopy: icosphere with 1 subdivision = ~80 triangles
+/// - Total: ~130 triangles per tree
+///
+/// # Arguments
+/// * `trunk_height` - Height of the trunk (default ~3.0)
+/// * `trunk_radius` - Radius of the trunk (default ~0.3)
+/// * `canopy_radius` - Radius of the canopy sphere (default ~2.5)
+/// * `seed` - Seed for slight variation
+pub fn generate_simple_tree_mesh(
+    trunk_height: f32,
+    trunk_radius: f32,
+    canopy_radius: f32,
+    seed: u64,
+) -> TreeMesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Simple RNG for variation
+    let mut rng_state = seed;
+    let mut random = || {
+        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((rng_state >> 32) as f32 / u32::MAX as f32) * 2.0 - 1.0 // -1 to 1
+    };
+
+    // Add slight variation based on seed
+    let height_var = 1.0 + random() * 0.15;
+    let canopy_var = 1.0 + random() * 0.1;
+    let trunk_h = trunk_height * height_var;
+    let canopy_r = canopy_radius * canopy_var;
+
+    //=========================================================================
+    // TRUNK (Cylinder with 8 sides)
+    //=========================================================================
+    let trunk_segments = 8;
+    let trunk_rings = 2; // Just top and bottom
+
+    // Generate trunk vertices
+    for ring in 0..trunk_rings {
+        let y = if ring == 0 { 0.0 } else { trunk_h };
+        let radius = if ring == 0 { trunk_radius * 1.1 } else { trunk_radius * 0.85 }; // Slight taper
+
+        for i in 0..trunk_segments {
+            let angle = (i as f32 / trunk_segments as f32) * std::f32::consts::TAU;
+            let x = angle.cos() * radius;
+            let z = angle.sin() * radius;
+
+            let normal = Vec3::new(angle.cos(), 0.0, angle.sin()).normalize();
+
+            vertices.push(TreeVertex {
+                position: [x, y, z],
+                normal: normal.to_array(),
+                uv: [i as f32 / trunk_segments as f32, y / trunk_h],
+            });
+        }
+    }
+
+    // Generate trunk indices (connect rings)
+    for i in 0..trunk_segments {
+        let next = (i + 1) % trunk_segments;
+        let i0 = i as u32;
+        let i1 = next as u32;
+        let i2 = (trunk_segments + i) as u32;
+        let i3 = (trunk_segments + next) as u32;
+
+        indices.push(i0);
+        indices.push(i2);
+        indices.push(i1);
+
+        indices.push(i1);
+        indices.push(i2);
+        indices.push(i3);
+    }
+
+    //=========================================================================
+    // CANOPY (Icosphere with subdivision level 1)
+    //=========================================================================
+    let canopy_center_y = trunk_h + canopy_r * 0.4; // Slightly above trunk
+    let base_vertex_count = vertices.len() as u32;
+
+    // Golden ratio for icosahedron
+    let phi = (1.0 + 5.0_f32.sqrt()) / 2.0;
+    let icosa_scale = canopy_r / (1.0 + phi * phi).sqrt();
+
+    // 12 vertices of icosahedron
+    let icosa_verts = [
+        Vec3::new(-1.0, phi, 0.0) * icosa_scale,
+        Vec3::new(1.0, phi, 0.0) * icosa_scale,
+        Vec3::new(-1.0, -phi, 0.0) * icosa_scale,
+        Vec3::new(1.0, -phi, 0.0) * icosa_scale,
+        Vec3::new(0.0, -1.0, phi) * icosa_scale,
+        Vec3::new(0.0, 1.0, phi) * icosa_scale,
+        Vec3::new(0.0, -1.0, -phi) * icosa_scale,
+        Vec3::new(0.0, 1.0, -phi) * icosa_scale,
+        Vec3::new(phi, 0.0, -1.0) * icosa_scale,
+        Vec3::new(phi, 0.0, 1.0) * icosa_scale,
+        Vec3::new(-phi, 0.0, -1.0) * icosa_scale,
+        Vec3::new(-phi, 0.0, 1.0) * icosa_scale,
+    ];
+
+    // Add icosahedron vertices (offset to canopy position)
+    for v in &icosa_verts {
+        let pos = *v + Vec3::new(0.0, canopy_center_y, 0.0);
+        let normal = v.normalize();
+
+        vertices.push(TreeVertex {
+            position: pos.to_array(),
+            normal: normal.to_array(),
+            uv: [0.5 + normal.x * 0.5, 2.0 + normal.y * 0.5], // UV.y > 1 marks as leaf
+        });
+    }
+
+    // 20 faces of icosahedron
+    let icosa_faces: [[u32; 3]; 20] = [
+        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+    ];
+
+    for face in &icosa_faces {
+        indices.push(base_vertex_count + face[0]);
+        indices.push(base_vertex_count + face[1]);
+        indices.push(base_vertex_count + face[2]);
+    }
+
+    TreeMesh {
+        vertices,
+        indices,
+    }
+}
+
+/// Generate a default simple tree with standard proportions
+pub fn generate_default_simple_tree(seed: u64) -> TreeMesh {
+    generate_simple_tree_mesh(3.5, 0.25, 2.2, seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_simple_tree_generation() {
+        let mesh = generate_simple_tree_mesh(3.0, 0.3, 2.0, 12345);
+        println!("Simple tree: {} vertices, {} triangles",
+            mesh.vertices.len(), mesh.indices.len() / 3);
+        assert!(mesh.vertices.len() < 100, "Simple tree should have < 100 vertices");
+        assert!(mesh.indices.len() / 3 < 200, "Simple tree should have < 200 triangles");
+    }
 
     #[test]
     fn test_lsystem_generation() {

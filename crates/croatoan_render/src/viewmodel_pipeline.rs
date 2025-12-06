@@ -46,6 +46,7 @@ pub struct ViewModelPipeline {
     num_indices: u32,
     uniform_buffer: Buffer,
     bind_group: BindGroup,
+    #[allow(dead_code)]
     bind_group_layout: BindGroupLayout,
 }
 
@@ -261,7 +262,7 @@ impl ViewModelPipeline {
     }
 
     /// Update uniforms for rendering
-    pub fn update_uniforms(&self, queue: &Queue, camera_yaw: f32, camera_pitch: f32, aspect_ratio: f32, swing_progress: f32) {
+    pub fn update_uniforms(&self, queue: &Queue, _camera_yaw: f32, _camera_pitch: f32, aspect_ratio: f32, swing_progress: f32) {
         // Create a special projection matrix for viewmodel with closer near plane
         let fov = 45.0_f32.to_radians();
         let proj = Mat4::perspective_rh(fov, aspect_ratio, 0.01, 10.0);

@@ -1,7 +1,17 @@
-use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroupLayout, BindGroup};
+use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroup};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+
+use crate::pipeline_validation::{
+    MeshValidator, PipelineResult,
+    log_pipeline_error, sanitize_vec3,
+};
+
+/// Maximum vertices per grass mesh (safety limit - grass is highest vertex count)
+const MAX_GRASS_VERTICES: usize = 500_000;
+/// Maximum indices per grass mesh (safety limit)
+const MAX_GRASS_INDICES: usize = 1_500_000;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -13,12 +23,18 @@ struct GrassVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],      // 64 bytes (0-64)
+    view_proj: [[f32; 4]; 4],       // 64 bytes (0-64)
     light_view_proj: [[f32; 4]; 4], // 64 bytes (64-128)
     time: f32,                      // 4 bytes (128-132)
-    _padding1: [f32; 3],            // 12 bytes (132-144)
-    sun_dir: [f32; 3],              // 12 bytes (144-156)
-    _padding2: [f32; 5],            // 20 bytes (156-176) -> Total 176 bytes (aligned to 16)
+    _gap1: [f32; 3],                // 12 bytes (132-144) - align _padding1 to 16-byte
+    _padding1: [f32; 3],            // 12 bytes (144-156)
+    _gap2: f32,                     // 4 bytes (156-160) - align sun_dir to 16-byte
+    sun_dir: [f32; 3],              // 12 bytes (160-172)
+    fog_density: f32,               // 4 bytes (172-176)
+    view_pos: [f32; 3],             // 12 bytes (176-188)
+    fog_start: f32,                 // 4 bytes (188-192)
+    fog_color: [f32; 3],            // 12 bytes (192-204)
+    fog_end: f32,                   // 4 bytes (204-208)
 }
 
 pub struct GrassPipeline {
@@ -175,22 +191,65 @@ impl GrassPipeline {
         }
     }
 
-    /// Upload grass mesh data to GPU
+    /// Upload grass mesh data to GPU with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if mesh data is invalid
+    pub fn try_upload_mesh(
+        &mut self,
+        device: &Device,
+        positions: &[[f32; 3]],
+        colors: &[[f32; 3]],
+        indices: &[u32],
+    ) -> PipelineResult<()> {
+        // Validate mesh data before GPU allocation
+        let validator = MeshValidator::new(MAX_GRASS_VERTICES, MAX_GRASS_INDICES);
+        validator.validate_grass(positions, colors, indices)?;
+
+        self.upload_mesh_unchecked(device, positions, colors, indices);
+        Ok(())
+    }
+
+    /// Upload grass mesh data to GPU (panics on invalid data)
     pub fn upload_mesh(
         &mut self,
         device: &Device,
-        queue: &Queue,
+        _queue: &Queue,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
         indices: &[u32],
     ) {
-        // Interleave positions and colors into vertex data
-        let vertices: Vec<GrassVertex> = positions
+        match self.try_upload_mesh(device, positions, colors, indices) {
+            Ok(()) => {}
+            Err(e) => {
+                log_pipeline_error("GrassPipeline", &e);
+                // Don't panic for grass - just skip rendering
+                log::warn!("Grass mesh upload failed, skipping grass rendering");
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+            }
+        }
+    }
+
+    /// Upload mesh without validation (internal use)
+    fn upload_mesh_unchecked(
+        &mut self,
+        device: &Device,
+        positions: &[[f32; 3]],
+        colors: &[[f32; 3]],
+        indices: &[u32],
+    ) {
+        let vertex_count = positions.len().min(MAX_GRASS_VERTICES);
+        let index_count = indices.len().min(MAX_GRASS_INDICES);
+
+        // Interleave positions and colors with NaN/Inf sanitization
+        let vertices: Vec<GrassVertex> = positions[..vertex_count]
             .iter()
-            .zip(colors.iter())
+            .zip(colors[..vertex_count].iter())
             .map(|(pos, col)| GrassVertex {
-                position: *pos,
-                color: *col,
+                position: sanitize_vec3(*pos),
+                color: sanitize_vec3(*col),
             })
             .collect();
 
@@ -204,44 +263,84 @@ impl GrassPipeline {
         // Create index buffer
         self.index_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Grass Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices[..index_count]),
             usage: wgpu::BufferUsages::INDEX,
         }));
 
-        self.index_count = indices.len() as u32;
+        self.index_count = index_count as u32;
 
-        log::info!("Uploaded grass mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
+        log::debug!("Uploaded grass mesh: {} vertices, {} triangles", vertices.len(), index_count / 3);
     }
 
-    /// Update camera uniform with time for wind animation and shadow data
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, light_view_proj: &Mat4, sun_dir: [f32; 3], time: f32) {
+    /// Update camera uniform with time for wind animation, shadow data, and fog
+    pub fn update_camera(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
             time,
+            _gap1: [0.0; 3],
             _padding1: [0.0; 3],
+            _gap2: 0.0,
             sun_dir,
-            _padding2: [0.0; 5],
+            fog_density,
+            view_pos,
+            fog_start,
+            fog_color,
+            fog_end,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
     /// Render the grass
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'rpass>(
         &'rpass self,
         render_pass: &mut wgpu::RenderPass<'rpass>,
     ) {
-        if self.vertex_buffer.is_none() || self.index_count == 0 {
+        // Early exit if no triangles to render
+        if self.index_count == 0 {
             return;
         }
 
+        // Defensive: require both buffers to be present
+        let (vertex_buffer, index_buffer) = match (&self.vertex_buffer, &self.index_buffer) {
+            (Some(vb), Some(ib)) => (vb, ib),
+            _ => {
+                log::trace!("Grass render skipped: missing vertex or index buffer");
+                return;
+            }
+        };
+
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.as_ref().unwrap().slice(..));
-        render_pass.set_index_buffer(
-            self.index_buffer.as_ref().unwrap().slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);
+    }
+
+    /// Check if the pipeline has valid mesh data ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.vertex_buffer.is_some() && self.index_buffer.is_some() && self.index_count > 0
+    }
+
+    /// Get the current triangle count
+    #[inline]
+    pub fn triangle_count(&self) -> u32 {
+        self.index_count / 3
     }
 }

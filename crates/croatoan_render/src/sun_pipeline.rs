@@ -1,4 +1,3 @@
-use wgpu::util::DeviceExt;
 use glam::{Vec3, Mat4};
 
 #[repr(C)]

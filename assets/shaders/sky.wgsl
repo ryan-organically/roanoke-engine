@@ -54,14 +54,14 @@ fn noise(p: vec2<f32>) -> f32 {
                    hash(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
 }
 
-// FBM (Fractal Brownian Motion)
+// FBM (Fractal Brownian Motion) - Reduced iterations for FPS
 fn fbm(p: vec2<f32>) -> f32 {
     var value = 0.0;
     var amplitude = 0.5;
-    var frequency = 0.0;
     var p2 = p;
-    
-    for (var i = 0; i < 5; i++) {
+
+    // Reduced from 5 to 3 iterations for FPS
+    for (var i = 0; i < 3; i++) {
         value += amplitude * noise(p2);
         p2 = p2 * 2.0;
         amplitude *= 0.5;
@@ -103,16 +103,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let y = ray_dir.y * 0.5 + 0.5; // -1..1 to 0..1
     var sky_color = mix(horizon_color, top_color, pow(clamp(y, 0.0, 1.0), 0.5));
 
-    // Stars at night
-    if (day_factor < 0.5 && ray_dir.y > 0.0) {
-        let star_pos = ray_dir.xz / (ray_dir.y + 0.001) * 100.0;
-        let star_hash = hash(floor(star_pos * 50.0));
-        let star_brightness = step(0.97, star_hash) * (1.0 - day_factor * 2.0);
-        let twinkle = sin(uniforms.time * 2.0 + star_hash * 100.0) * 0.3 + 0.7;
-        sky_color += vec3<f32>(star_brightness * twinkle);
+    // Stars at night - sparse, subtle
+    if (day_factor < 0.4 && ray_dir.y > 0.1) {
+        let star_pos = ray_dir.xz / (ray_dir.y + 0.001) * 80.0;
+        let star_hash = hash(floor(star_pos * 15.0)); // Fewer cells = fewer stars
+        // Only 0.5% of cells have stars (was 3%)
+        let star_brightness = step(0.995, star_hash) * (1.0 - day_factor * 2.5);
+        let twinkle = sin(uniforms.time * 1.5 + star_hash * 50.0) * 0.2 + 0.8;
+        // Dimmer stars, vary size slightly
+        let star_intensity = star_brightness * twinkle * 0.7;
+        sky_color += vec3<f32>(star_intensity * 0.9, star_intensity * 0.95, star_intensity);
     }
 
-    // Cloud Rendering - project ray onto sky dome
+    // Cloud Rendering - wispy, translucent clouds that allow light through
     let cloud_height = 500.0;
 
     // Only render clouds when looking up (ray_dir.y > 0)
@@ -126,29 +129,41 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
         let uv_scaled = cloud_pos * 0.002 * uniforms.cloud_scale + wind;
 
+        // Multi-layered noise for wispy effect
         var n = fbm(uv_scaled);
-        n = n * 0.5 + 0.5;
+        let detail = fbm(uv_scaled * 3.0) * 0.3; // Fine detail layer
+        n = (n * 0.5 + 0.5) + detail;
 
         let threshold = 1.0 - uniforms.cloud_coverage;
-        let cloud_alpha = smoothstep(threshold - 0.1, threshold + 0.1, n);
+        // Softer edge for wispy appearance
+        let cloud_alpha = smoothstep(threshold - 0.15, threshold + 0.25, n);
 
-        let horizon_fade = smoothstep(0.01, 0.15, ray_dir.y);
+        let horizon_fade = smoothstep(0.01, 0.2, ray_dir.y);
 
         // Fade clouds at night (but don't completely hide them - moonlit clouds)
-        let night_cloud_fade = mix(0.15, 1.0, day_factor);
-        let density = cloud_alpha * uniforms.cloud_density * horizon_fade * night_cloud_fade;
+        let night_cloud_fade = mix(0.2, 1.0, day_factor);
+
+        // Maximum cloud opacity reduced for translucent/phantom effect
+        let max_opacity = 0.65; // Clouds never fully opaque
+        let density = cloud_alpha * uniforms.cloud_density * horizon_fade * night_cloud_fade * max_opacity;
 
         if (density > 0.01) {
             let color_mix = smoothstep(threshold, threshold + 0.4, n);
             var cloud_rgb = mix(uniforms.cloud_color_base, uniforms.cloud_color_shade, color_mix);
 
             // Darken clouds at night
-            let night_cloud_color = cloud_rgb * 0.15; // Very dark at night
+            let night_cloud_color = cloud_rgb * 0.2; // Slightly brighter for moonlit effect
             cloud_rgb = mix(night_cloud_color, cloud_rgb, day_factor);
 
-            let highlight = smoothstep(0.8, 1.0, n);
-            let highlight_color = mix(vec3<f32>(0.2, 0.2, 0.3), vec3<f32>(1.0, 0.9, 0.9), day_factor);
-            let final_cloud_color = mix(cloud_rgb, highlight_color, highlight * 0.5);
+            // Sun/moon scattering through clouds (light rays effect)
+            let sun_dot = max(dot(ray_dir, -uniforms.sun_dir), 0.0);
+            let scatter = pow(sun_dot, 4.0) * 0.4; // Soft glow around sun/moon through clouds
+            let scatter_color = mix(vec3<f32>(0.3, 0.35, 0.5), uniforms.sun_color, day_factor);
+            cloud_rgb += scatter_color * scatter * (1.0 - density * 0.5);
+
+            let highlight = smoothstep(0.75, 1.0, n);
+            let highlight_color = mix(vec3<f32>(0.25, 0.25, 0.35), vec3<f32>(1.0, 0.95, 0.9), day_factor);
+            let final_cloud_color = mix(cloud_rgb, highlight_color, highlight * 0.4);
 
             sky_color = mix(sky_color, final_cloud_color, density);
         }

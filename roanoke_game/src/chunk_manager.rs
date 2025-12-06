@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender;
 use glam::Vec3;
 use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, DetritusPipeline, BuildingPipeline, ChunkBounds};
 
@@ -92,7 +91,9 @@ impl ChunkManager {
             println!("[CHUNK] Unloaded chunk ({}, {})", coord.x, coord.z);
         }
 
-        // Request new chunks that should be loaded
+        // Request new chunks that should be loaded, sorted by distance (closest first)
+        let mut pending_coords: Vec<(ChunkCoord, i32)> = Vec::new();
+
         for dz in -self.load_radius..=self.load_radius {
             for dx in -self.load_radius..=self.load_radius {
                 let coord = ChunkCoord {
@@ -105,10 +106,19 @@ impl ChunkManager {
                     continue;
                 }
 
-                // Mark as loading and request generation
-                self.loading_chunks.insert(coord);
-                requests.push(ChunkRequest { coord, seed });
+                // Calculate squared distance for sorting (no sqrt needed)
+                let dist_sq = dx * dx + dz * dz;
+                pending_coords.push((coord, dist_sq));
             }
+        }
+
+        // Sort by distance (closest chunks first)
+        pending_coords.sort_by_key(|(_, dist_sq)| *dist_sq);
+
+        // Mark as loading and create requests
+        for (coord, _) in pending_coords {
+            self.loading_chunks.insert(coord);
+            requests.push(ChunkRequest { coord, seed });
         }
 
         if !requests.is_empty() {
@@ -138,5 +148,25 @@ impl ChunkManager {
     /// Get total counts
     pub fn chunk_count(&self) -> usize {
         self.loaded_chunks.len()
+    }
+
+    /// Update load/unload radii based on render distance
+    /// Buildings render at 1.5x render_distance, so we need chunks loaded beyond that
+    pub fn update_radius_for_render_distance(&mut self, render_distance: f32) {
+        // Validate input - clamp to sane range
+        let render_distance = render_distance.clamp(100.0, 1000.0);
+
+        // Buildings visible at 1.0x render distance now (reduced from 1.5x)
+        let max_visible_distance = render_distance * 1.0;
+        // Convert to chunk units and round up, ensure chunk_size is valid
+        let chunk_size = self.chunk_size.max(1.0);
+        let needed_radius = (max_visible_distance / chunk_size).ceil() as i32;
+        // Clamp to small range (1-2) for FPS - fewer chunks = much faster
+        self.load_radius = needed_radius.clamp(1, 2);
+        // Unload radius should be 1 chunk beyond load radius for hysteresis
+        self.unload_radius = self.load_radius + 1;
+
+        println!("[CHUNK] Updated radii for render_distance={:.0}: load={}, unload={}",
+                 render_distance, self.load_radius, self.unload_radius);
     }
 }

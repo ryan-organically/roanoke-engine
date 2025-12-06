@@ -1,7 +1,12 @@
+// Allow dead code for planned features not yet integrated
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline};
-use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
+use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
+use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
 use image; // Added image crate
@@ -30,11 +35,38 @@ use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 mod water_system;
 mod atmosphere;
+mod audio_system;
+mod procedural_synth;
+mod animals;
+mod village_manager;
+mod progression;
+mod npc;
+mod game_state;
+mod economy;
+mod audio_events;
+mod data_pipeline;
+mod safe_ops;
+
+// New systems for discovery, ecology, flora, naval, and weather
+mod encyclopedia;
+mod flora;
+mod ecology;
+mod naval;
+mod weather;
+mod systems_manager;
+mod character_agent;
 
 use water_system::WaterSystem;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
 use atmosphere::AtmosphereEngine;
+use audio_system::{AudioSystem, MusicState};
+use audio_events::{AudioEventProcessor, AudioEvent, AudioBiome, ThreatLevel, species_threat_profile, wfc_biome_to_audio};
+use data_pipeline::{DataPipeline, GameEvent, NpcAudioIntegration, ProgressionAudioBridge, FactionAudioBridge};
+use animals::{AnimalManager, AnimalSpawner, Difficulty, TimeOfDay as AnimalTimeOfDay, BehaviorState};
+use village_manager::VillageManager;
+use game_state::GameProgression;
+use safe_ops::{SafeMutex, saturating_range_area}; // Safe mutex and overflow protection
 
 // ... (Existing structs remain same) ...
 
@@ -86,8 +118,8 @@ struct LoadingSlideshow {
 }
 
 impl LoadingSlideshow {
-    const PAN_DURATION: f32 = 25.0;     // Seconds per image - nice and slow
-    const TRANSITION_DURATION: f32 = 2.0; // Crossfade duration
+    const PAN_DURATION: f32 = 12.0;      // Seconds per image
+    const TRANSITION_DURATION: f32 = 3.0; // Crossfade duration (longer for smoother blend)
     const ZOOM_SCALE: f32 = 1.2;        // How much to zoom in (for pan headroom)
     const PAN_AMOUNT: f32 = 0.08;       // How far to pan (as fraction of image) - gentle drift
 
@@ -268,6 +300,7 @@ struct SwingAnimation {
     is_swinging: bool,
     swing_progress: f32,  // 0.0 to 1.0
     swing_duration: f32,  // Total animation duration in seconds
+    hit_processed: bool,  // Whether hit was processed this swing
 }
 
 struct SharedState {
@@ -295,6 +328,9 @@ struct SharedState {
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_slideshow: LoadingSlideshow, // For Loading Screen
     weather: WeatherSystem,
+    // Audio System
+    audio_system: AudioSystem,
+    audio_event_processor: AudioEventProcessor,
     // Pause Menu
     pause_menu_page: PauseMenuPage,
     show_save_popup: bool,
@@ -307,6 +343,96 @@ struct SharedState {
     swing_animation: SwingAnimation,
     atmosphere: AtmosphereEngine,
     show_load_menu: bool, // For Load Game submenu
+    // Animal System
+    animal_manager: AnimalManager,
+    animal_spawner: AnimalSpawner,
+    // Village System
+    village_manager: VillageManager,
+    // Progression System
+    game_progression: GameProgression,
+    // Economy System
+    economy_manager: economy::EconomyManager,
+    player_economy: economy::PlayerEconomy,
+    dropped_items: economy::DroppedItemManager,
+    // Hotbar (quick-slot for inventory access)
+    active_hotbar_slot: usize, // 0-9, maps to first 10 inventory slots
+    // Combat state
+    combat_kill_time: f32, // Tracks time spent fighting current target
+    // Debug
+    debug_timer: f32,
+    fog_level: u8, // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
+    // Audio state tracking
+    was_in_village: bool,
+    // Data Pipeline
+    data_pipeline: DataPipeline,
+    npc_audio: NpcAudioIntegration,
+    progression_audio: ProgressionAudioBridge,
+    faction_audio: FactionAudioBridge,
+    // Systems Manager (encyclopedia, flora, ecology, weather coordination)
+    systems_manager: systems_manager::SystemsManager,
+}
+
+impl SharedState {
+    /// Helper method to process audio event with proper split borrow
+    fn process_audio_event(&mut self, event: AudioEvent) {
+        self.audio_event_processor.process_event(event, &mut self.audio_system);
+    }
+
+    /// Helper method to update audio event processor with proper split borrow
+    fn update_audio_processor(&mut self, delta: f32) {
+        self.audio_event_processor.update(delta, &mut self.audio_system);
+    }
+
+    /// Helper method to update systems manager with proper split borrow
+    fn update_systems_manager(&mut self, delta: f32) {
+        let player_pos = self.player.position;
+        let look_dir = self.camera.forward();
+        self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+
+    /// Helper method to process combat loot with proper split borrow
+    fn process_combat_loot(
+        &mut self,
+        result: &crate::animals::combat::AnimalAttackResult,
+        weapon_used: &str,
+    ) -> economy::CombatLootResult {
+        use economy::CombatEconomyExt;
+        let combat_kill_time = self.combat_kill_time;
+        let hunting_level = self.game_progression.player_progression.get_hunting_level();
+        result.process_loot(
+            &mut self.economy_manager,
+            &mut self.player_economy,
+            weapon_used,
+            combat_kill_time,
+            100.0, // Player health
+            hunting_level,
+            0.0, // Luck stat
+        )
+    }
+
+    /// Helper method to update systems manager with proper split borrow
+    fn update_systems(&mut self, delta: f32) {
+        let player_pos = self.player.position;
+        let look_dir = self.camera.forward();
+        // Split borrow: systems_manager and animal_manager are separate fields
+        // Within a method on SharedState, Rust can see they're distinct
+        self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+}
+
+/// Register village factions with player progression
+/// Uses collect_faction_data to avoid borrow conflicts
+fn register_village_factions(state: &mut SharedState) {
+    // Collect data first (immutable borrow of village_manager)
+    let (village_factions, npc_factions) = state.village_manager.collect_faction_data();
+
+    // Then register (mutable borrow of player_progression)
+    for (id, faction) in village_factions {
+        state.game_progression.player_progression.register_village_faction(id, faction);
+    }
+    for (id, npc_data) in npc_factions {
+        state.game_progression.player_progression.register_npc_faction(id, npc_data);
+    }
 }
 
 fn save_game(name: &str, data: &SaveData) {
@@ -431,21 +557,52 @@ fn main() {
         background_texture: None,
         loading_slideshow: LoadingSlideshow::new(),
         weather: WeatherSystem::new(),
+        // Audio System
+        audio_system: AudioSystem::new(),
+        audio_event_processor: AudioEventProcessor::new(),
         // Pause Menu
         pause_menu_page: PauseMenuPage::Main,
         show_save_popup: false,
         // Game Settings (default values)
         mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
         movement_speed: 10.0,
-        render_distance: 350.0, // Default 350
+        render_distance: 150.0, // Reduced from 250 for better FPS
         master_volume: 80.0, // 0-100 scale, 80 = default
         swing_animation: SwingAnimation {
             is_swinging: false,
             swing_progress: 0.0,
             swing_duration: 0.35, // 350ms swing - fast like Minecraft
+            hit_processed: false,
         },
         atmosphere: AtmosphereEngine::new(),
         show_load_menu: false,
+        // Animal System
+        animal_manager: AnimalManager::new(Difficulty::Normal),
+        animal_spawner: AnimalSpawner::new(12345), // Will be re-seeded when game starts
+        // Village System
+        village_manager: VillageManager::new(12345), // Will be re-seeded when game starts
+        // Progression System
+        game_progression: GameProgression::new(),
+        // Economy System
+        economy_manager: economy::EconomyManager::new(),
+        player_economy: economy::PlayerEconomy::new(),
+        dropped_items: economy::DroppedItemManager::new(),
+        // Hotbar
+        active_hotbar_slot: 0,
+        // Combat state
+        combat_kill_time: 0.0,
+        // Debug
+        debug_timer: 0.0,
+        fog_level: 2, // Start with medium fog
+        // Audio state tracking
+        was_in_village: false,
+        // Data Pipeline
+        data_pipeline: DataPipeline::new(),
+        npc_audio: NpcAudioIntegration::new(),
+        progression_audio: ProgressionAudioBridge::new(),
+        faction_audio: FactionAudioBridge::new(),
+        // Systems Manager (will be re-seeded when game starts)
+        systems_manager: systems_manager::SystemsManager::new(12345),
     }));
 
     // ... (Channel setup) ...
@@ -551,7 +708,7 @@ fn main() {
     // --- Input Callback ---
     let input_state = Arc::clone(&shared_state);
     app.set_input_callback(move |event, window| {
-        let mut state = input_state.lock().unwrap();
+        let mut state = input_state.safe_lock();
 
         // Initialize egui state if needed
         if state.egui_state.is_none() {
@@ -563,6 +720,12 @@ fn main() {
                 Some(window.scale_factor() as f32),
                 None,
             ));
+        }
+
+        // Handle CloseRequested before egui can consume it
+        if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
+            println!("[EXIT] Window close requested");
+            std::process::exit(0);
         }
 
         // Pass event to egui
@@ -591,6 +754,7 @@ fn main() {
                         if !state.swing_animation.is_swinging {
                             state.swing_animation.is_swinging = true;
                             state.swing_animation.swing_progress = 0.0;
+                            state.swing_animation.hit_processed = false;
                         }
                     }
                 }
@@ -622,18 +786,135 @@ fn main() {
                                     state.time_of_day = (state.time_of_day - 1.0 + 24.0) % 24.0;
                                     println!("[TIME] {:.1}:00", state.time_of_day);
                                 }
-                                KeyCode::KeyU => {
-                                    state.weather.set_weather(WeatherType::Clear, false);
-                                    println!("[WEATHER] Set to Clear");
+                                KeyCode::BracketLeft => {
+                                    // Cycle weather backward: Clear <- Cloudy <- Overcast <- Stormy <- Foggy
+                                    let prev = match state.weather.current_weather {
+                                        WeatherType::Clear => WeatherType::Foggy,
+                                        WeatherType::PartlyCloudy => WeatherType::Clear,
+                                        WeatherType::Overcast => WeatherType::PartlyCloudy,
+                                        WeatherType::Stormy => WeatherType::Overcast,
+                                        WeatherType::Foggy => WeatherType::Stormy,
+                                    };
+                                    state.weather.set_weather(prev, false);
+                                    state.weather.auto_weather_enabled = false; // Disable auto when manual
+                                    println!("[WEATHER] << Set to {:?} (auto disabled)", prev);
                                 }
-                                KeyCode::KeyI => {
-                                    state.weather.set_weather(WeatherType::PartlyCloudy, false);
-                                    println!("[WEATHER] Set to PartlyCloudy");
+                                KeyCode::BracketRight => {
+                                    // Cycle weather forward: Clear -> Cloudy -> Overcast -> Stormy -> Foggy
+                                    let next = match state.weather.current_weather {
+                                        WeatherType::Clear => WeatherType::PartlyCloudy,
+                                        WeatherType::PartlyCloudy => WeatherType::Overcast,
+                                        WeatherType::Overcast => WeatherType::Stormy,
+                                        WeatherType::Stormy => WeatherType::Foggy,
+                                        WeatherType::Foggy => WeatherType::Clear,
+                                    };
+                                    state.weather.set_weather(next, false);
+                                    state.weather.auto_weather_enabled = false; // Disable auto when manual
+                                    println!("[WEATHER] >> Set to {:?} (auto disabled)", next);
                                 }
-                                KeyCode::KeyO => {
-                                    state.weather.set_weather(WeatherType::Stormy, false);
-                                    println!("[WEATHER] Set to Stormy");
+                                KeyCode::KeyM => {
+                                    state.audio_system.toggle_enabled();
                                 }
+                                // Backslash = Cycle fog level: Off -> Light -> Medium -> Heavy -> Dense
+                                KeyCode::Backslash => {
+                                    state.fog_level = (state.fog_level + 1) % 5;
+                                    let fog_name = match state.fog_level {
+                                        0 => "Off",
+                                        1 => "Light",
+                                        2 => "Medium",
+                                        3 => "Heavy",
+                                        _ => "Dense",
+                                    };
+                                    println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
+                                }
+                                // F5 = Spawn debug animals in a circle around player
+                                KeyCode::F5 => {
+                                    use animals::AnimalSpecies;
+                                    let player_pos = state.player.position;
+                                    let species_list = [
+                                        AnimalSpecies::BlackBear,
+                                        AnimalSpecies::EasternCougar,
+                                        AnimalSpecies::GrayWolf,
+                                        AnimalSpecies::TimberRattlesnake,
+                                        AnimalSpecies::AmericanAlligator,
+                                        AnimalSpecies::WildBoar,
+                                        AnimalSpecies::Copperhead,
+                                        AnimalSpecies::RedWolf,
+                                        AnimalSpecies::Bobcat,
+                                        AnimalSpecies::Cottonmouth,
+                                    ];
+                                    let num_species = species_list.len();
+                                    for (i, species) in species_list.iter().enumerate() {
+                                        let angle = (i as f32 / num_species as f32) * std::f32::consts::TAU;
+                                        let distance = 15.0; // 15 meters from player
+                                        let spawn_pos = Vec3::new(
+                                            player_pos.x + angle.cos() * distance,
+                                            player_pos.y,
+                                            player_pos.z + angle.sin() * distance,
+                                        );
+                                        state.animal_manager.spawn(*species, spawn_pos, (0, 0), None);
+                                    }
+                                    println!("[DEBUG] Spawned {} animals around player at {:?}", num_species, player_pos);
+                                }
+                                // F6 = Clear all animals
+                                KeyCode::F6 => {
+                                    let count = state.animal_manager.animal_count();
+                                    // Get all animal IDs first
+                                    let ids: Vec<_> = state.animal_manager.animals_iter()
+                                        .map(|a| a.id)
+                                        .collect();
+                                    for id in ids {
+                                        state.animal_manager.despawn(id);
+                                    }
+                                    println!("[DEBUG] Cleared {} animals", count);
+                                }
+                                // E = Pickup closest item
+                                KeyCode::KeyE => {
+                                    let pickup_range = 3.0;
+                                    if let Some(closest) = state.dropped_items.closest_drop(
+                                        state.player.position,
+                                        pickup_range,
+                                    ) {
+                                        let item_name = closest.item.name.clone();
+                                        let rarity = closest.item.rarity;
+                                        let drop_id = closest.id;
+
+                                        // Pick up the item
+                                        if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
+                                            // Add to player inventory
+                                            if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
+                                                log::warn!("Failed to add item to inventory: {:?}", e);
+                                            } else {
+                                                log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Q = Drop item from current hotbar slot
+                                KeyCode::KeyQ => {
+                                    let slot = state.active_hotbar_slot;
+                                    if let Some(item) = state.player_economy.inventory.get_slot(slot).cloned() {
+                                        // Remove from inventory
+                                        let item_id = item.id;
+                                        if let Some(removed) = state.player_economy.inventory.remove_item(item_id) {
+                                            // Drop in front of player
+                                            let drop_pos = state.player.position + state.camera.forward() * 1.5 + Vec3::new(0.0, 1.0, 0.0);
+                                            state.dropped_items.spawn_drop(removed, drop_pos);
+                                            log::info!("[DROP] {} from hotbar slot {}", item.name, slot + 1);
+                                        }
+                                    }
+                                }
+                                // Number keys 1-9, 0 = Select hotbar slot
+                                KeyCode::Digit1 => state.active_hotbar_slot = 0,
+                                KeyCode::Digit2 => state.active_hotbar_slot = 1,
+                                KeyCode::Digit3 => state.active_hotbar_slot = 2,
+                                KeyCode::Digit4 => state.active_hotbar_slot = 3,
+                                KeyCode::Digit5 => state.active_hotbar_slot = 4,
+                                KeyCode::Digit6 => state.active_hotbar_slot = 5,
+                                KeyCode::Digit7 => state.active_hotbar_slot = 6,
+                                KeyCode::Digit8 => state.active_hotbar_slot = 7,
+                                KeyCode::Digit9 => state.active_hotbar_slot = 8,
+                                KeyCode::Digit0 => state.active_hotbar_slot = 9,
                                 _ => {}
                             }
                         }
@@ -651,186 +932,55 @@ fn main() {
     app.set_render_callback(move |ctx| {
         // Initialize Asset Registry if empty
         {
-            let mut state = render_state.lock().unwrap();
+            let mut state = render_state.safe_lock();
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Oak Tree (from Blender OBJ - bark meshes only, leaves filtered)
+                // 1. Oak Tree - USING SIMPLE LOW-POLY MESH (not OBJ)
+                // The OBJ file has 247K faces which destroys FPS
+                // Simple tree: ~36 triangles (cylinder trunk + icosphere canopy)
                 {
                     println!("[ASSET] ========== TREE LOADING START ==========");
-                    let obj_paths = ["assets/trees/trees9.obj", "trees/trees9.obj"];
-                    let mut template = None;
-                    for path in obj_paths {
-                        println!("[ASSET] Trying OBJ path: {}", path);
-                        if let Some(t) = asset_loader::load_obj(path) {
-                            template = Some(t);
-                            println!("[ASSET] SUCCESS: Loaded tree from {}", path);
-                            break;
-                        } else {
-                            println!("[ASSET] FAILED: Could not load {}", path);
-                        }
-                    }
+                    println!("[ASSET] Using SIMPLE LOW-POLY tree mesh (~36 tris)");
+                    println!("[ASSET] Skipping OBJ (247K faces = unplayable FPS)");
 
-                    if let Some(template) = template {
-                        // Load bark texture
-                        println!("[ASSET] Loading bark texture...");
-                        let texture_paths = ["assets/trees/Texture/Bark___0.jpg", "trees/Texture/Bark___0.jpg"];
-                        let mut texture_bytes = Vec::new();
+                    // Generate simple tree mesh: trunk height, trunk radius, canopy radius, seed
+                    let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
 
-                        for path in texture_paths {
-                            println!("[ASSET] Trying texture path: {}", path);
-                            match std::fs::read(path) {
-                                Ok(bytes) => {
-                                    texture_bytes = bytes;
-                                    println!("[ASSET] SUCCESS: Loaded bark texture ({} bytes) from {}", texture_bytes.len(), path);
-                                    break;
-                                }
-                                Err(e) => {
-                                    println!("[ASSET] FAILED: {} - {}", path, e);
-                                }
-                            }
-                        }
+                    let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                    let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                    let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
 
-                        if texture_bytes.is_empty() {
-                            println!("[WARN] No bark texture found, using white fallback");
-                            texture_bytes = vec![255, 255, 255, 255];
-                        }
+                    let gpu_mesh = TreePipeline::create_mesh(
+                        ctx.device(),
+                        &positions,
+                        &normals,
+                        &uvs,
+                        &mesh.indices,
+                        None, // No texture - shader uses procedural colors
+                    );
 
-                        let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|e| {
-                            println!("[WARN] Failed to decode texture: {}, using 1x1 fallback", e);
-                            image::DynamicImage::new_rgba8(1, 1)
-                        });
-                        let rgba = texture_image.to_rgba8();
-                        let dimensions = rgba.dimensions();
-                        println!("[ASSET] Texture dimensions: {}x{}", dimensions.0, dimensions.1);
+                    println!("[ASSET] Simple tree mesh: {} vertices, {} triangles",
+                        positions.len(), mesh.indices.len() / 3);
+                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                    println!("[ASSET] ========== TREE LOADING COMPLETE ==========");
 
-                        let texture_size = wgpu::Extent3d {
-                            width: dimensions.0,
-                            height: dimensions.1,
-                            depth_or_array_layers: 1,
-                        };
-
-                        let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
-                            size: texture_size,
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            label: Some("Tree Bark Texture"),
-                            view_formats: &[],
-                        });
-
-                        ctx.queue().write_texture(
-                            wgpu::ImageCopyTexture {
-                                texture: &texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &rgba,
-                            wgpu::ImageDataLayout {
-                                offset: 0,
-                                bytes_per_row: Some(4 * dimensions.0),
-                                rows_per_image: Some(dimensions.1),
-                            },
-                            texture_size,
-                        );
-
-                        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
-                            address_mode_u: wgpu::AddressMode::Repeat,
-                            address_mode_v: wgpu::AddressMode::Repeat,
-                            mag_filter: wgpu::FilterMode::Linear,
-                            min_filter: wgpu::FilterMode::Linear,
-                            mipmap_filter: wgpu::FilterMode::Nearest,
-                            ..Default::default()
-                        });
-
-                        let texture_bind_group_layout = ctx.device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                            label: Some("Tree Texture Bind Group Layout"),
-                            entries: &[
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 0,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
-                                    ty: wgpu::BindingType::Texture {
-                                        multisampled: false,
-                                        view_dimension: wgpu::TextureViewDimension::D2,
-                                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                    },
-                                    count: None,
-                                },
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 1,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
-                                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                    count: None,
-                                },
-                            ],
-                        });
-
-                        let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-                            layout: &texture_bind_group_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&sampler),
-                                },
-                            ],
-                            label: Some("Tree Texture Bind Group"),
-                        });
-
-                        println!("[ASSET] Creating GPU mesh with texture bind group...");
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &template.positions,
-                            &template.normals,
-                            &template.uvs,
-                            &template.indices,
-                            Some(Arc::new(bind_group)),
-                        );
-                        println!("[ASSET] Tree mesh created: {} verts, {} tris",
-                            template.positions.len(), template.indices.len() / 3);
-                        println!("[ASSET] Texture bind group: ATTACHED");
-                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                        println!("[ASSET] ========== TREE LOADING COMPLETE (OBJ) ==========");
-                    } else {
-                        // Fallback to procedural if OBJ fails (bark only, no leaves)
-                        println!("[ASSET] ========== TREE LOADING FALLBACK ==========");
-                        println!("[WARN] OBJ load failed, using procedural tree (bark only)");
-                        let mut recipe = TreeRecipe::oak();
-                        recipe.leaf_probability = 0.0; // No procedural leaves
-                        let tree = generate_tree(&recipe, 12345);
-                        let mesh = generate_tree_mesh(&tree);
-
-                        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                        let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                        let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
-
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &positions,
-                            &normals,
-                            &uvs,
-                            &mesh.indices,
-                            None,
-                        );
-                        println!("[ASSET] Procedural mesh created: {} verts", positions.len());
-                        println!("[ASSET] Texture bind group: NONE (using default white)");
-                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                        println!("[ASSET] ========== TREE LOADING COMPLETE (PROCEDURAL) ==========");
-                    }
+                    // OBJ loading code removed - was loading 247K face tree mesh
+                    // Simple low-poly tree (~36 tris) already registered above
                 }
 
-                // 2. Rock (Boulder)
-                {
-                    let recipe = RockRecipe::boulder();
+                // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
+                let rock_types: Vec<(RockRecipe, &str)> = vec![
+                    (RockRecipe::boulder(), "rock_boulder"),
+                    (RockRecipe::pebble(), "rock_pebble"),
+                    (RockRecipe::small_rock(), "rock_small"),
+                    (RockRecipe::medium_rock(), "rock_medium"),
+                    (RockRecipe::flat_rock(), "rock_flat"),
+                    (RockRecipe::mossy_rock(), "rock_mossy"),
+                ];
+
+                for (recipe, name) in rock_types {
                     let mesh = generate_rock(&recipe);
-                    
                     let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
                     let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
                     let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
@@ -843,7 +993,8 @@ fn main() {
                         &mesh.indices,
                         None,
                     );
-                    state.mesh_registry.insert("rock_boulder".to_string(), gpu_mesh);
+                    state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                    println!("[ASSET] Registered rock: {} ({} verts)", name, positions.len());
                 }
 
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
@@ -909,17 +1060,19 @@ fn main() {
         });
 
         // Chunk Manager (Stores all loaded chunks and manages streaming)
+        // Load/unload radii are scaled dynamically based on render_distance
         static CHUNK_MANAGER: OnceLock<Mutex<ChunkManager>> = OnceLock::new();
         let chunk_manager = CHUNK_MANAGER.get_or_init(|| {
-            // Load radius 2 = 5x5 grid (visible ~500 units), Unload radius 4 = buffer zone
-            // Reduced from 4 (9x9) for performance
-            Mutex::new(ChunkManager::new(256.0, 2, 4))
+            let mut manager = ChunkManager::new(256.0, 2, 4);
+            // Initialize radius based on default render_distance (150)
+            manager.update_radius_for_render_distance(150.0);
+            Mutex::new(manager)
         });
 
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
         let (shadow_map_mutex, shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
-            let shadow_map = ShadowMap::new(ctx.device(), 2048);
+            let shadow_map = ShadowMap::new(ctx.device(), 1024); // Reduced from 2048 for FPS
             let shadow_pipeline = ShadowPipeline::new(ctx.device());
             (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
         });
@@ -927,7 +1080,7 @@ fn main() {
         // Grass System (requires shadow map)
         static GRASS_PIPELINE: OnceLock<Mutex<GrassPipeline>> = OnceLock::new();
         let _grass_pipeline_mutex = GRASS_PIPELINE.get_or_init(|| {
-            let shadow_map = shadow_map_mutex.lock().unwrap();
+            let shadow_map = shadow_map_mutex.safe_lock();
             let grass_pipeline = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
             drop(shadow_map);  // Release lock
             Mutex::new(grass_pipeline)
@@ -970,13 +1123,19 @@ fn main() {
             Mutex::new(LightShaftPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // Animal Orb Pipeline (Visual representation of animals)
+        static ANIMAL_ORB_PIPELINE: OnceLock<Mutex<AnimalOrbPipeline>> = OnceLock::new();
+        let animal_orb_pipeline_mutex = ANIMAL_ORB_PIPELINE.get_or_init(|| {
+            Mutex::new(AnimalOrbPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Offscreen Render Target (for post-process effects)
         static OFFSCREEN_TARGET: OnceLock<Mutex<Option<OffscreenTarget>>> = OnceLock::new();
         let offscreen_target_mutex = OFFSCREEN_TARGET.get_or_init(|| Mutex::new(None));
 
         // Check if offscreen target needs to be created/resized
         {
-            let mut offscreen_opt = offscreen_target_mutex.lock().unwrap();
+            let mut offscreen_opt = offscreen_target_mutex.safe_lock();
             let needs_create = match &*offscreen_opt {
                 None => true,
                 Some(target) => target.needs_resize(ctx.config().width, ctx.config().height),
@@ -991,7 +1150,7 @@ fn main() {
             }
         }
 
-        let mut state = render_state.lock().unwrap();
+        let mut state = render_state.safe_lock();
 
         // Calculate FPS
         let now = Instant::now();
@@ -1017,9 +1176,98 @@ fn main() {
             // Update Weather
             state.weather.update(delta);
 
-            // Update Swing Animation
+            // Update dropped items (despawn timer)
+            state.dropped_items.update(delta);
+
+            // Update Systems Manager (encyclopedia, flora, ecology pipelines)
+            // This coordinates data flow between weather, ecology, observations
+            state.update_systems(delta);
+
+            // Update Audio System (responds to weather, time, game state)
+            let time_normalized = state.time_of_day / 24.0; // Normalize to 0.0-1.0
+            let current_weather = state.weather.current_weather;
+            state.audio_system.update(delta, current_weather, time_normalized);
+
+            // Sync audio music state with game state
+            let audio_music_state = match state.game_state {
+                GameState::Menu => MusicState::MainMenu,
+                GameState::Loading => MusicState::MainMenu,
+                GameState::Playing => MusicState::Exploration,
+                GameState::Paused => MusicState::Peaceful,
+            };
+            state.audio_system.set_music_state(audio_music_state);
+
+            // Update Swing Animation & Combat
             if state.swing_animation.is_swinging {
                 state.swing_animation.swing_progress += delta / state.swing_animation.swing_duration;
+
+                // Process hit at midpoint of swing (when weapon makes contact)
+                if state.swing_animation.swing_progress >= 0.4 && !state.swing_animation.hit_processed {
+                    state.swing_animation.hit_processed = true;
+                    state.combat_kill_time += delta;
+
+                    // Find closest animal in attack range
+                    let attack_range = 3.0; // Melee range in world units
+                    if let Some((animal_id, dist)) = animals::combat::find_closest_animal(
+                        &state.animal_manager,
+                        state.player.position,
+                        attack_range,
+                    ) {
+                        // Base damage from weapon (could be modified by equipped weapon)
+                        let base_damage = 25.0;
+                        let combat_ctx = animals::combat::CombatContext::default();
+
+                        // Process the attack
+                        if let Some(result) = animals::combat::player_attack_animal(
+                            &mut state.animal_manager,
+                            animal_id,
+                            base_damage,
+                            Some("hunter_knife"), // TODO: Get from equipped weapon
+                            &combat_ctx,
+                        ) {
+                            // Process loot if killed
+                            if result.killed {
+                                let loot_result = state.process_combat_loot(&result, "hunter_knife");
+
+                                // Spawn dropped items in the world
+                                let drop_pos = result.position + Vec3::new(0.0, 0.5, 0.0);
+                                for notification in &loot_result.loot {
+                                    state.dropped_items.spawn_drop(
+                                        notification.item.clone(),
+                                        drop_pos + Vec3::new(
+                                            (rand::random::<f32>() - 0.5) * 1.0,
+                                            0.0,
+                                            (rand::random::<f32>() - 0.5) * 1.0,
+                                        ),
+                                    );
+                                }
+
+                                // Spawn currency drops if any
+                                if loot_result.total_wampum > 0 || loot_result.total_tobacco > 0 {
+                                    state.dropped_items.spawn_currency(
+                                        loot_result.total_wampum,
+                                        loot_result.total_tobacco,
+                                        drop_pos,
+                                    );
+                                }
+
+                                // Log loot for debugging
+                                if !loot_result.loot.is_empty() || loot_result.total_wampum > 0 {
+                                    log::info!(
+                                        "Killed {:?}! Spawned {} drops, {} wampum",
+                                        loot_result.species,
+                                        loot_result.loot.len(),
+                                        loot_result.total_wampum
+                                    );
+                                }
+
+                                // Reset combat timer
+                                state.combat_kill_time = 0.0;
+                            }
+                        }
+                    }
+                }
+
                 if state.swing_animation.swing_progress >= 1.0 {
                     state.swing_animation.is_swinging = false;
                     state.swing_animation.swing_progress = 0.0;
@@ -1027,6 +1275,7 @@ fn main() {
             }
 
             // Update Atmosphere (fog, light shafts based on time/weather)
+            // Pass render_distance so fog_end is scaled to hide object pop-in
             let weather_fog = match state.weather.current_weather {
                 WeatherType::Foggy => 0.8,
                 WeatherType::Overcast => 0.3,
@@ -1035,7 +1284,274 @@ fn main() {
             };
             let time_of_day = state.time_of_day;
             let cloud_coverage = state.weather.cloud_coverage;
-            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage);
+            let render_dist = state.render_distance;
+            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, render_dist);
+
+            // Override fog density based on manual fog_level (\ key)
+            // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
+            let fog_multiplier = match state.fog_level {
+                0 => 0.0,   // Off
+                1 => 0.3,   // Light
+                2 => 0.6,   // Medium
+                3 => 1.0,   // Heavy
+                _ => 1.5,   // Dense
+            };
+            state.atmosphere.state.fog_density = fog_multiplier;
+
+            // Debug: Print fog and weather values every 5 seconds
+            state.debug_timer += delta;
+            if state.debug_timer > 5.0 {
+                state.debug_timer = 0.0;
+                let fog = state.atmosphere.fog_params();
+                println!("[DEBUG] Weather: {:?} | Fog: level={} density={:.2}, start={:.1}, end={:.1} | Clouds: {:.2}",
+                    state.weather.current_weather, state.fog_level, fog[0], fog[1], fog[2], state.weather.cloud_coverage);
+            }
+
+            // Update Animal System
+            // Sync time of day with animal manager
+            let animal_time = AnimalTimeOfDay::from_hour(state.time_of_day as u8);
+            state.animal_manager.set_time_of_day(animal_time);
+            // Update animal AI and movement
+            let player_pos = state.player.position;
+            let player_vel = state.player.velocity;
+            state.animal_manager.update(delta, player_pos, player_vel);
+
+            // === AUDIO EVENTS INTEGRATION ===
+            // Collect audio events to avoid borrow conflicts
+            let audio_events: Vec<AudioEvent> = {
+                let mut events = Vec::new();
+
+                // Process animal encounters for audio
+                let mut in_combat = false;
+                for animal in state.animal_manager.animals_near(player_pos, 50.0) {
+                    let distance = (animal.position - player_pos).length();
+                    let species_name = animal.species.name().to_string();
+                    let threat = species_threat_profile(&species_name);
+
+                    match animal.behavior_state {
+                        BehaviorState::Attack(_) => {
+                            if !in_combat {
+                                events.push(AudioEvent::AnimalCombatStart { species: species_name });
+                                in_combat = true;
+                            }
+                        }
+                        BehaviorState::Pursue(_) | BehaviorState::Alert(_) => {
+                            events.push(AudioEvent::AnimalDetected {
+                                species: species_name,
+                                threat,
+                                distance
+                            });
+                        }
+                        BehaviorState::Flee(_) => {
+                            events.push(AudioEvent::AnimalFleeing { species: species_name });
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Time-of-day audio events
+                let prev_hour = ((state.time_of_day - delta * 0.1) + 24.0) % 24.0;
+                let curr_hour = state.time_of_day;
+
+                if prev_hour < 6.0 && curr_hour >= 6.0 {
+                    events.push(AudioEvent::SunriseBegins);
+                }
+                if prev_hour < 18.0 && curr_hour >= 18.0 {
+                    events.push(AudioEvent::SunsetBegins);
+                }
+
+                // Storm approaching
+                if state.weather.target_weather == WeatherType::Stormy &&
+                   state.weather.transition_progress < 0.1 {
+                    events.push(AudioEvent::StormApproaching);
+                }
+
+                events
+            };
+
+            // Collect village events
+            let (is_in_village, population) = state.village_manager.is_player_in_village(player_pos);
+            let village_event = if is_in_village && !state.was_in_village {
+                Some(AudioEvent::VillageEntered { population })
+            } else if !is_in_village && state.was_in_village {
+                Some(AudioEvent::VillageExited)
+            } else {
+                None
+            };
+            state.was_in_village = is_in_village;
+
+            // Process all audio events - use std::mem::take to avoid borrow conflicts
+            {
+                let mut audio_processor = std::mem::take(&mut state.audio_event_processor);
+                for event in audio_events {
+                    audio_processor.process_event(event, &mut state.audio_system);
+                }
+                if let Some(event) = village_event {
+                    audio_processor.process_event(event, &mut state.audio_system);
+                }
+                audio_processor.update(delta, &mut state.audio_system);
+                state.audio_event_processor = audio_processor;
+            }
+
+            // === DATA PIPELINE PROCESSING ===
+            // Process game events through the unified data pipeline
+            {
+                // Process data pipeline and collect audio events
+                let mut pipeline = std::mem::take(&mut state.data_pipeline);
+                let pipeline_audio_events = pipeline.process(delta);
+                state.data_pipeline = pipeline;
+
+                // Send pipeline-generated audio events to audio processor
+                if !pipeline_audio_events.is_empty() {
+                    let mut audio_processor = std::mem::take(&mut state.audio_event_processor);
+                    for event in pipeline_audio_events {
+                        audio_processor.process_event(event, &mut state.audio_system);
+                    }
+                    state.audio_event_processor = audio_processor;
+                }
+
+                // Cleanup NPC audio integration periodically
+                let cleanup_time = state.data_pipeline.stats().events_processed as f32 * 0.016;
+                state.npc_audio.cleanup(cleanup_time);
+            }
+
+            // Update Game Progression System
+            {
+                use crate::progression::reputation::Faction;
+                use std::collections::HashMap;
+
+                // Collect faction reputation for NPC behavior
+                let faction_rep: HashMap<Faction, i32> = state.game_progression.player_progression.reputation
+                    .iter()
+                    .map(|(k, v)| (*k, v.value))
+                    .collect();
+
+                // Update game progression (quests, events, NPC schedules)
+                state.game_progression.update(delta, player_pos, player_vel, &faction_rep);
+
+                // Update village NPC movement and communication
+                let game_hour = (state.game_progression.game_time % 24.0) as f32;
+                state.village_manager.update(delta, game_hour, player_pos);
+
+                // Check for achievements
+                let game_time = state.game_progression.game_time;
+                let new_achievements = state.game_progression.player_progression.check_all_achievements(game_time);
+                for achievement in new_achievements {
+                    println!("[ACHIEVEMENT] Unlocked: {}", achievement);
+                }
+
+                // Validate progression state periodically
+                state.game_progression.player_progression.validate();
+
+                // Update faction system and process faction events
+                state.game_progression.player_progression.update_faction_system(game_time);
+
+                // Display faction notifications
+                let notifications = state.game_progression.player_progression.get_faction_notifications();
+                for notification in notifications {
+                    if notification.importance >= crate::progression::faction_integration::NotificationImportance::Medium {
+                        println!("[FACTION] {}", notification.message);
+                    }
+                }
+            }
+
+            // Update animal orb visual representation - only render nearby animals
+            let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 0.5);
+            let mut orb_instances: Vec<OrbInstance> = nearby_animals
+                .iter()
+                .map(|animal| {
+                    let base_color = animal.species.orb_color();
+                    let scale = animal.species.orb_scale();
+
+                    // Modify color based on behavior state
+                    let (mut color, mut emissive) = match &animal.behavior_state {
+                        animals::BehaviorState::Attack(_) => {
+                            // Red tint and strong glow when attacking
+                            ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
+                        }
+                        animals::BehaviorState::Pursue(_) => {
+                            // Orange-ish tint and moderate glow when pursuing
+                            ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
+                        }
+                        animals::BehaviorState::Alert(_) => {
+                            // Slight yellow tint when alert
+                            ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
+                        }
+                        animals::BehaviorState::Flee(_) => {
+                            // Pale/washed out when fleeing
+                            ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
+                        }
+                        animals::BehaviorState::Dead => {
+                            // Dark gray when dead
+                            ([0.2, 0.2, 0.2], 0.0)
+                        }
+                        _ => {
+                            // Normal color for idle/patrol
+                            (base_color, 0.0)
+                        }
+                    };
+
+                    // Apply damage flash effect (bright white/red flash when hit)
+                    let (flash_tint, flash_emissive) = animal.damage_flash_effect();
+                    color = [
+                        (color[0] * flash_tint[0]).min(2.0),
+                        (color[1] * flash_tint[1]).min(2.0),
+                        (color[2] * flash_tint[2]).min(2.0),
+                    ];
+                    emissive = (emissive + flash_emissive).min(2.0);
+
+                    // Create transform matrix (position + scale, orbs hover slightly above ground)
+                    let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
+                    let model_matrix = Mat4::from_scale_rotation_translation(
+                        Vec3::splat(scale),
+                        glam::Quat::IDENTITY,
+                        pos,
+                    );
+
+                    OrbInstance {
+                        model_matrix: model_matrix.to_cols_array_2d(),
+                        color,
+                        emissive,
+                    }
+                })
+                .collect();
+
+            // Add village NPC orbs
+            for npc_orb in &state.village_manager.npc_orbs {
+                let scale = 1.2; // NPCs slightly larger than animals
+                let model_matrix = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    glam::Quat::IDENTITY,
+                    npc_orb.position,
+                );
+                orb_instances.push(OrbInstance {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    color: npc_orb.color,
+                    emissive: 0.6, // NPCs glow more
+                });
+            }
+
+            // Add dropped item orbs
+            let game_time = state.time_of_day; // For bounce animation
+            for drop in state.dropped_items.all_drops() {
+                let scale = drop.scale();
+                let bounce = drop.bounce_offset(game_time);
+                let pos = drop.position + Vec3::new(0.0, scale * 0.5 + bounce + 0.2, 0.0);
+                let model_matrix = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    glam::Quat::from_rotation_y(drop.rotation),
+                    pos,
+                );
+                orb_instances.push(OrbInstance {
+                    model_matrix: model_matrix.to_cols_array_2d(),
+                    color: drop.color(),
+                    emissive: drop.glow_intensity + if drop.is_highlighted { 0.5 } else { 0.0 },
+                });
+            }
+
+            // Upload instances to GPU
+            let mut orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
+            orb_pipeline.upload_instances(ctx.device(), &orb_instances);
         }
 
         // Handle Input (Player Controller)
@@ -1094,6 +1610,9 @@ fn main() {
             let mut style = (*ui_ctx.style()).clone();
             style.visuals.window_fill = egui::Color32::from_rgb(244, 228, 188); // Paper Color
             style.visuals.panel_fill = egui::Color32::from_rgb(244, 228, 188);
+            // Remove window stroke/shadow to prevent outline artifacts
+            style.visuals.window_stroke = egui::Stroke::NONE;
+            style.visuals.window_shadow = egui::epaint::Shadow::NONE;
             ui_ctx.set_style(style);
 
             // Sync Cursor State with Game State
@@ -1119,9 +1638,12 @@ fn main() {
                             state.loading_slideshow.load_images(ui.ctx());
                         }
 
-                        // Update slideshow animation
-                        let dt = 1.0 / 60.0; // Approximate dt for UI updates
-                        state.loading_slideshow.update(dt);
+                        // Update slideshow animation using actual elapsed time
+                        let slideshow_dt = state.loading_slideshow.start_time.elapsed().as_secs_f32();
+                        state.loading_slideshow.start_time = Instant::now();
+                        // Clamp dt to avoid huge jumps (first frame or lag spikes)
+                        let slideshow_dt = slideshow_dt.clamp(0.0, 0.1);
+                        state.loading_slideshow.update(slideshow_dt);
 
                         // Draw slideshow background with Ken Burns effect
                         state.loading_slideshow.render(ui);
@@ -1245,7 +1767,7 @@ fn main() {
                             ("New Game", true),
                             ("Load Game", true),
                             ("Settings", false), // Not implemented
-                            ("Marketplace", false), // Not implemented
+                            ("Exit", true),
                         ];
 
                         let saves = list_saves();
@@ -1300,7 +1822,7 @@ fn main() {
                                                 state.game_state = GameState::Loading;
                                                 state.save_name_input = save_name.clone();
                                                 let range = 3;
-                                                let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                                let total = saturating_range_area(range);
                                                 state.loading_progress = LoadingProgress {
                                                     total_chunks: total,
                                                     chunks_generated: 0,
@@ -1308,10 +1830,20 @@ fn main() {
                                                     current_status: "Loading saved world...".to_string(),
                                                 };
                                                 if let Some(manager) = CHUNK_MANAGER.get() {
-                                                    let mut mgr = manager.lock().unwrap();
+                                                    let mut mgr = manager.safe_lock();
                                                     mgr.loaded_chunks.clear();
                                                     mgr.loading_chunks.clear();
                                                 }
+                                                // Initialize village system
+                                                let player_pos = state.player.position;
+                                                state.village_manager = VillageManager::new(data.seed);
+                                                state.village_manager.discover_villages(
+                                                    player_pos,
+                                                    2000.0, // 2km radius
+                                                    10,     // max 10 villages
+                                                );
+                                                // Register village factions
+                                                register_village_factions(&mut *state);
                                             }
                                         }
                                     }
@@ -1325,7 +1857,7 @@ fn main() {
                                         state.player = Player::new(Vec3::new(0.0, 50.0, 0.0));
                                         println!("[GAME] Starting new game with seed: {}", seed);
                                         let range = 3;
-                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        let total = saturating_range_area(range);
                                         state.loading_progress = LoadingProgress {
                                             total_chunks: total,
                                             chunks_generated: 0,
@@ -1333,13 +1865,27 @@ fn main() {
                                             current_status: "Initializing world generation...".to_string(),
                                         };
                                         if let Some(manager) = CHUNK_MANAGER.get() {
-                                            let mut mgr = manager.lock().unwrap();
+                                            let mut mgr = manager.safe_lock();
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
+                                        // Initialize village system
+                                        let player_pos = state.player.position;
+                                        state.village_manager = VillageManager::new(seed);
+                                        state.village_manager.discover_villages(
+                                            player_pos,
+                                            2000.0, // 2km radius
+                                            10,     // max 10 villages
+                                        );
+                                        // Register village factions
+                                        register_village_factions(&mut *state);
                                     }
                                     "Load Game" => {
                                         state.show_load_menu = true;
+                                    }
+                                    "Exit" => {
+                                        println!("[EXIT] User requested exit from menu");
+                                        std::process::exit(0);
                                     }
                                     _ => {}
                                 }
@@ -1396,7 +1942,7 @@ fn main() {
                                         state.save_name_input = save_name.clone();
                                         state.show_load_menu = false;
                                         let range = 3;
-                                        let total = ((range * 2 + 1) * (range * 2 + 1)) as usize;
+                                        let total = saturating_range_area(range);
                                         state.loading_progress = LoadingProgress {
                                             total_chunks: total,
                                             chunks_generated: 0,
@@ -1404,10 +1950,20 @@ fn main() {
                                             current_status: "Loading saved world...".to_string(),
                                         };
                                         if let Some(manager) = CHUNK_MANAGER.get() {
-                                            let mut mgr = manager.lock().unwrap();
+                                            let mut mgr = manager.safe_lock();
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
+                                        // Initialize village system
+                                        let player_pos = state.player.position;
+                                        state.village_manager = VillageManager::new(data.seed);
+                                        state.village_manager.discover_villages(
+                                            player_pos,
+                                            2000.0, // 2km radius
+                                            10,     // max 10 villages
+                                        );
+                                        // Register village factions
+                                        register_village_factions(&mut *state);
                                     }
                                 }
                                 save_y += 45.0;
@@ -1427,6 +1983,101 @@ fn main() {
                     });
                 }
                 GameState::Playing => {
+                    // === HUD: Top-left player stats ===
+                    egui::Area::new(egui::Id::new("hud_stats"))
+                        .fixed_pos(egui::pos2(10.0, 10.0))
+                        .show(ui_ctx, |ui| {
+                            ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                            let bg = egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150))
+                                .rounding(egui::Rounding::same(5.0))
+                                .inner_margin(egui::Margin::same(8.0));
+                            bg.show(ui, |ui| {
+                                // Health bar (placeholder - use progression's player_health when available)
+                                let health = 100.0_f32; // TODO: Wire to actual player health
+                                let max_health = 100.0_f32;
+                                let health_pct = health / max_health;
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("♥").color(egui::Color32::RED).size(16.0));
+                                    let bar_size = egui::vec2(100.0, 12.0);
+                                    let (rect, _) = ui.allocate_exact_size(bar_size, egui::Sense::hover());
+                                    ui.painter().rect_filled(rect, 2.0, egui::Color32::DARK_RED);
+                                    let mut filled = rect;
+                                    filled.set_right(rect.left() + rect.width() * health_pct);
+                                    ui.painter().rect_filled(filled, 2.0, egui::Color32::RED);
+                                    ui.label(format!("{:.0}/{:.0}", health, max_health));
+                                });
+                                // Currency (access wallet fields directly)
+                                ui.horizontal(|ui| {
+                                    let wampum = state.player_economy.wallet.wampum;
+                                    let tobacco = state.player_economy.wallet.tobacco;
+                                    ui.label(egui::RichText::new("◎").color(egui::Color32::from_rgb(180, 180, 255)).size(14.0));
+                                    ui.label(format!("{}", wampum));
+                                    ui.add_space(10.0);
+                                    ui.label(egui::RichText::new("⚘").color(egui::Color32::from_rgb(139, 90, 43)).size(14.0));
+                                    ui.label(format!("{}", tobacco));
+                                });
+                            });
+                        });
+
+                    // === HUD: Bottom-center hotbar ===
+                    egui::Area::new(egui::Id::new("hud_hotbar"))
+                        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
+                        .show(ui_ctx, |ui| {
+                            let bg = egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150))
+                                .rounding(egui::Rounding::same(5.0))
+                                .inner_margin(egui::Margin::same(5.0));
+                            bg.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for slot in 0..10 {
+                                        let is_active = slot == state.active_hotbar_slot;
+                                        let slot_bg = if is_active {
+                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100)
+                                        } else {
+                                            egui::Color32::from_rgba_unmultiplied(50, 50, 50, 200)
+                                        };
+                                        let frame = egui::Frame::none()
+                                            .fill(slot_bg)
+                                            .stroke(if is_active {
+                                                egui::Stroke::new(2.0, egui::Color32::GOLD)
+                                            } else {
+                                                egui::Stroke::new(1.0, egui::Color32::GRAY)
+                                            })
+                                            .rounding(egui::Rounding::same(3.0))
+                                            .inner_margin(egui::Margin::same(4.0));
+                                        frame.show(ui, |ui| {
+                                            ui.set_min_size(egui::vec2(36.0, 36.0));
+                                            if let Some(item) = state.player_economy.inventory.get_slot(slot) {
+                                                let color = match item.rarity {
+                                                    economy::Rarity::Crude => egui::Color32::GRAY,
+                                                    economy::Rarity::Common => egui::Color32::WHITE,
+                                                    economy::Rarity::Uncommon => egui::Color32::GREEN,
+                                                    economy::Rarity::Rare => egui::Color32::from_rgb(0, 112, 221),
+                                                    economy::Rarity::Epic => egui::Color32::from_rgb(163, 53, 238),
+                                                    economy::Rarity::Legendary => egui::Color32::from_rgb(255, 128, 0),
+                                                    economy::Rarity::Mythic => egui::Color32::from_rgb(230, 30, 30),
+                                                    economy::Rarity::Primordial => egui::Color32::from_rgb(255, 215, 0),
+                                                };
+                                                // Item icon (first char of name)
+                                                let icon = item.name.chars().next().unwrap_or('?');
+                                                ui.label(egui::RichText::new(icon.to_string()).color(color).size(18.0));
+                                                // Stack count
+                                                if item.stack_size > 1 {
+                                                    ui.label(egui::RichText::new(format!("x{}", item.stack_size)).size(10.0).color(egui::Color32::LIGHT_GRAY));
+                                                }
+                                            } else {
+                                                // Empty slot - show slot number
+                                                let key = if slot == 9 { "0".to_string() } else { (slot + 1).to_string() };
+                                                ui.label(egui::RichText::new(key).color(egui::Color32::DARK_GRAY).size(12.0));
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                        });
+
+                    // === Debug window (existing) ===
                     egui::Window::new("Game Menu").show(ui_ctx, |ui| {
                         ui.label(format!("FPS: {:.1}", state.fps));
                         let hours = state.time_of_day as u32;
@@ -1434,7 +2085,48 @@ fn main() {
                         ui.label(format!("Time: {:02}:{:02}", hours, minutes));
                         ui.label("T/Y keys: Change time");
                         ui.separator();
-                        
+
+                        // Dev Stats - Weather/Fog/Render
+                        ui.collapsing("Dev Stats", |ui| {
+                            ui.label(format!("Weather: {:?}", state.weather.current_weather));
+                            ui.label(format!("Render Dist: {:.0}", state.render_distance));
+                            let fog = state.atmosphere.fog_params();
+                            ui.label(format!("FOG: density={:.2} start={:.0} end={:.0}", fog[0], fog[1], fog[2]));
+                            let fog_color = state.atmosphere.fog_color();
+                            ui.label(format!("FOG COLOR: ({:.2}, {:.2}, {:.2})", fog_color[0], fog_color[1], fog_color[2]));
+                            if let Some(manager) = CHUNK_MANAGER.get() {
+                                if let Ok(mgr) = manager.lock() {
+                                    let (loaded, loading) = mgr.get_stats();
+                                    ui.label(format!("Chunks: {} loaded, {} loading", loaded, loading));
+                                    ui.label(format!("Load radius: {}", mgr.load_radius));
+                                }
+                            }
+                            // Village System Debug
+                            ui.separator();
+                            ui.label(format!("VILLAGES: {}", state.village_manager.stats_string()));
+                            // Show nearest village
+                            for village in &state.village_manager.villages {
+                                let dist = ((village.center.x - state.player.position.x).powi(2)
+                                          + (village.center.z - state.player.position.z).powi(2)).sqrt();
+                                ui.label(format!("  {} @ {:.0}m ({} longhouses)",
+                                    village.layout.name, dist, village.layout.longhouses.len()));
+                            }
+                            // Animal System Debug
+                            ui.separator();
+                            ui.label(state.animal_manager.debug_info());
+                            // List nearby animals
+                            let nearby = state.animal_manager.animals_near(state.player.position, 50.0);
+                            if !nearby.is_empty() {
+                                ui.label(format!("Nearby (50m): {}", nearby.len()));
+                                for animal in nearby.iter().take(5) {
+                                    let dist = animal.position.distance(state.player.position);
+                                    ui.label(format!("  {} @ {:.0}m - {:?}",
+                                        animal.species.name(), dist, animal.behavior_state));
+                                }
+                            }
+                        });
+                        ui.separator();
+
                         ui.label("Save Name:");
                         ui.text_edit_singleline(&mut state.save_name_input);
 
@@ -1520,13 +2212,26 @@ fn main() {
 
                                     // Render Distance (minimum 200 to ensure chunks load)
                                     ui.label(egui::RichText::new("Render Distance:").color(egui::Color32::BLACK));
+                                    let old_render_dist = state.render_distance;
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 300.0) / 2.0);
-                                        ui.add(egui::Slider::new(&mut state.render_distance, 200.0..=500.0)
+                                        ui.add(egui::Slider::new(&mut state.render_distance, 75.0..=200.0)
                                             .text("Distance")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
+                                    // Update chunk load radius when render distance changes
+                                    if (state.render_distance - old_render_dist).abs() > 0.1 {
+                                        if let Some(manager) = CHUNK_MANAGER.get() {
+                                            if let Ok(mut mgr) = manager.lock() {
+                                                mgr.update_radius_for_render_distance(state.render_distance);
+                                            }
+                                        }
+                                    }
                                     ui.add_space(15.0);
+
+                                    // Audio Settings Header
+                                    ui.label(egui::RichText::new("Audio").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.add_space(10.0);
 
                                     // Master Volume (0-100 scale)
                                     ui.label(egui::RichText::new("Master Volume:").color(egui::Color32::BLACK));
@@ -1536,12 +2241,93 @@ fn main() {
                                             .text("Volume")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
+                                    // Sync with audio system (copy value first to avoid borrow conflict)
+                                    let master_vol = state.master_volume / 100.0;
+                                    state.audio_system.set_master_volume(master_vol);
+                                    ui.add_space(15.0);
+
+                                    // Music Volume
+                                    let mut music_vol = state.audio_system.music_volume * 100.0;
+                                    ui.label(egui::RichText::new("Music Volume:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.add(egui::Slider::new(&mut music_vol, 0.0..=100.0)
+                                            .text("Music")
+                                            .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                                            state.audio_system.set_music_volume(music_vol / 100.0);
+                                        }
+                                    });
+                                    ui.add_space(15.0);
+
+                                    // Ambience Volume
+                                    let mut amb_vol = state.audio_system.ambience_volume * 100.0;
+                                    ui.label(egui::RichText::new("Ambience Volume:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.add(egui::Slider::new(&mut amb_vol, 0.0..=100.0)
+                                            .text("Ambience")
+                                            .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                                            state.audio_system.set_ambience_volume(amb_vol / 100.0);
+                                        }
+                                    });
+                                    ui.add_space(30.0);
+
+                                    // Developer Controls Header
+                                    ui.label(egui::RichText::new("Developer").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.add_space(10.0);
+
+                                    // Time of Day
+                                    ui.label(egui::RichText::new("Time of Day:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.add(egui::Slider::new(&mut state.time_of_day, 0.0..=24.0)
+                                            .text("Hour")
+                                            .custom_formatter(|n, _| {
+                                                let h = n as i32;
+                                                let m = ((n - h as f64) * 60.0) as i32;
+                                                format!("{:02}:{:02}", h % 24, m)
+                                            }));
+                                    });
+                                    ui.add_space(10.0);
+
+                                    // Weather Controls
+                                    ui.label(egui::RichText::new("Weather:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.button("Clear").clicked() {
+                                            state.weather.set_weather(WeatherType::Clear, false);
+                                        }
+                                        if ui.button("Cloudy").clicked() {
+                                            state.weather.set_weather(WeatherType::PartlyCloudy, false);
+                                        }
+                                        if ui.button("Overcast").clicked() {
+                                            state.weather.set_weather(WeatherType::Overcast, false);
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        if ui.button("Stormy").clicked() {
+                                            state.weather.set_weather(WeatherType::Stormy, false);
+                                        }
+                                        if ui.button("Foggy").clicked() {
+                                            state.weather.set_weather(WeatherType::Foggy, false);
+                                        }
+                                    });
+                                    ui.add_space(5.0);
+                                    let current_weather = format!("Current: {:?}", state.weather.current_weather);
+                                    ui.label(egui::RichText::new(current_weather).size(12.0).color(egui::Color32::DARK_GRAY));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        ui.checkbox(&mut state.weather.auto_weather_enabled, "Auto Weather Changes");
+                                    });
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
                                         state.pause_menu_page = PauseMenuPage::Main;
                                         // Apply settings
                                         state.player.speed = state.movement_speed;
+                                        let vol = state.master_volume / 100.0;
+                                        state.audio_system.set_master_volume(vol);
                                     }
                                 }
                                 PauseMenuPage::Controls => {
@@ -1557,8 +2343,13 @@ fn main() {
 
                                     ui.label(egui::RichText::new("Game Controls:").size(18.0).strong().color(egui::Color32::BLACK));
                                     ui.label("ESC - Pause Menu");
-                                    ui.label("T/Y - Change Time of Day");
-                                    ui.label("U/I/O - Change Weather (Clear/Cloudy/Stormy)");
+                                    ui.label("T/Y - Change Time of Day (+/- 1 hour)");
+                                    ui.label("M - Toggle Audio On/Off");
+                                    ui.add_space(10.0);
+
+                                    ui.label(egui::RichText::new("Weather Controls:").size(18.0).strong().color(egui::Color32::BLACK));
+                                    ui.label("[ / ] - Cycle Weather");
+                                    ui.label("\\ - Cycle Fog Level (Off/Light/Medium/Heavy/Dense)");
                                     ui.add_space(30.0);
 
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
@@ -1676,7 +2467,7 @@ fn main() {
 
         // Handle Pipeline Updates (scoped to release locks early)
         {
-            let mut manager = chunk_manager.lock().unwrap();
+            let mut manager = chunk_manager.safe_lock();
 
             // Update Chunk Streaming (Request new chunks / Unload old ones)
             if state.game_state == GameState::Loading || state.game_state == GameState::Playing {
@@ -1704,6 +2495,10 @@ fn main() {
                             building_instances,
                             offset_x, offset_z)) => {
 
+                            // Debug: Show generation counts
+                            println!("[CHUNK] Received chunk ({}, {}): trees={}, rocks={}, detritus_verts={}",
+                                offset_x, offset_z, tree_instances.len(), rock_instances.len(), det_pos.len());
+
                             // Update status
                             state.loading_progress.current_status = format!(
                                 "Uploading chunk at ({}, {})...",
@@ -1722,7 +2517,7 @@ fn main() {
 
                             // Create Pipelines
                             let terrain_pipeline = {
-                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                let shadow_map = shadow_map_mutex.safe_lock();
                                 TerrainPipeline::new(
                                     ctx.device(),
                                     ctx.surface_format(),
@@ -1733,7 +2528,7 @@ fn main() {
 
                             let mut grass_pipeline = None;
                             if !grass_pos.is_empty() {
-                                let shadow_map = shadow_map_mutex.lock().unwrap();
+                                let shadow_map = shadow_map_mutex.safe_lock();
                                 let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                                 drop(shadow_map);
                                 gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
@@ -1741,12 +2536,16 @@ fn main() {
                             }
 
                             let mut tree_pipeline = None;
+                            println!("[CHUNK] Tree instances: {}", tree_instances.len());
                             if !tree_instances.is_empty() {
                                 if let Some(mesh) = state.mesh_registry.get("tree_oak") {
                                     let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), &tree_instances);
                                     tree_pipeline = Some(tp);
+                                    println!("[CHUNK] Created tree pipeline with {} instances", tree_instances.len());
+                                } else {
+                                    println!("[WARN] tree_oak mesh not found in registry!");
                                 }
                             }
 
@@ -1763,6 +2562,12 @@ fn main() {
                                 rock_groups.entry(name).or_default().push(transform);
                             }
 
+                            // Debug: Show rock type breakdown
+                            println!("[CHUNK] Rock types: {:?}", rock_groups.keys().collect::<Vec<_>>());
+                            for (name, transforms) in &rock_groups {
+                                println!("[CHUNK]   {}: {} instances", name, transforms.len());
+                            }
+
                             let mut rock_pipelines = Vec::new();
                             for (name, transforms) in rock_groups {
                                 if let Some(mesh) = state.mesh_registry.get(&name) {
@@ -1770,8 +2575,10 @@ fn main() {
                                     rp.set_mesh(mesh.clone());
                                     rp.upload_instances(ctx.device(), &transforms);
                                     rock_pipelines.push(rp);
+                                    println!("[CHUNK] Created rock pipeline '{}' with {} instances", name, transforms.len());
                                 } else {
-                                    println!("[WARN] Unknown rock type '{}' requested by generator", name);
+                                    println!("[WARN] Unknown rock type '{}' requested - mesh not in registry!", name);
+                                    println!("[WARN] Available meshes: {:?}", state.mesh_registry.keys().collect::<Vec<_>>());
                                 }
                             }
 
@@ -1793,6 +2600,62 @@ fn main() {
                                 }
                             }
 
+                            // Process Village Structures
+                            let village_structures = state.village_manager.get_structures_for_chunk(
+                                offset_x as f32,
+                                offset_z as f32,
+                                chunk_size,
+                            );
+
+                            if !village_structures.is_empty() {
+                                println!("[VILLAGE] Processing {} structures for chunk ({}, {})",
+                                    village_structures.len(), offset_x, offset_z);
+                            }
+
+                            for structure in village_structures {
+                                // Convert flattened vertex data back to BuildingVertex
+                                // Each vertex is 11 floats: pos[3], normal[3], uv[2], color[3]
+                                let num_vertices = structure.mesh_vertices.len() / 11;
+                                let mut vertices = Vec::with_capacity(num_vertices);
+
+                                for i in 0..num_vertices {
+                                    let base = i * 11;
+                                    vertices.push(BuildingVertex {
+                                        position: [
+                                            structure.mesh_vertices[base],
+                                            structure.mesh_vertices[base + 1],
+                                            structure.mesh_vertices[base + 2],
+                                        ],
+                                        normal: [
+                                            structure.mesh_vertices[base + 3],
+                                            structure.mesh_vertices[base + 4],
+                                            structure.mesh_vertices[base + 5],
+                                        ],
+                                        uv: [
+                                            structure.mesh_vertices[base + 6],
+                                            structure.mesh_vertices[base + 7],
+                                        ],
+                                        color: [
+                                            structure.mesh_vertices[base + 8],
+                                            structure.mesh_vertices[base + 9],
+                                            structure.mesh_vertices[base + 10],
+                                        ],
+                                    });
+                                }
+
+                                // Create mesh and pipeline for this structure
+                                let mesh = BuildingPipeline::create_mesh(
+                                    ctx.device(),
+                                    &vertices,
+                                    &structure.mesh_indices,
+                                );
+
+                                let mut pipeline = BuildingPipeline::new(ctx.device(), ctx.surface_format());
+                                pipeline.set_mesh(mesh);
+                                pipeline.upload_instances(ctx.device(), &[structure.transform]);
+                                building_pipelines.push(pipeline);
+                            }
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
@@ -1806,6 +2669,20 @@ fn main() {
                             
                             let coord = ChunkCoord::from_world_pos(Vec3::new(offset_x as f32, 0.0, offset_z as f32), chunk_size);
                             manager.add_chunk(coord, loaded_chunk);
+
+                            // Spawn animals for this chunk
+                            // Note: We need to destructure to avoid borrow checker issues
+                            let player_pos = state.player.position;
+                            let seed = state.seed;
+                            let SharedState { animal_spawner, animal_manager, .. } = &mut *state;
+                            animal_spawner.on_chunk_loaded(
+                                coord.x,
+                                coord.z,
+                                chunk_size,
+                                animal_manager,
+                                player_pos,
+                                seed,
+                            );
 
                             // Update uploaded count
                             state.loading_progress.chunks_uploaded += 1;
@@ -1829,7 +2706,7 @@ fn main() {
         } // Release manager lock
 
         // Render frame (re-acquire locks as needed)
-        let manager = chunk_manager.lock().unwrap();
+        let manager = chunk_manager.safe_lock();
         if state.game_state == GameState::Playing && manager.chunk_count() > 0 {
             let elapsed = start_time.elapsed().as_secs_f32();
 
@@ -1850,7 +2727,7 @@ fn main() {
             });
 
             // Get offscreen target view for post-process rendering
-            let offscreen_guard = offscreen_target_mutex.lock().unwrap();
+            let offscreen_guard = offscreen_target_mutex.safe_lock();
             let offscreen_view = offscreen_guard.as_ref().map(|t| &t.view);
 
             // Calculate sun direction
@@ -1868,7 +2745,7 @@ fn main() {
             let light_dir = if is_day { sun_dir } else { moon_dir };
 
             // Stable shadow projection
-            let shadow_map_size = 2048.0_f32;
+            let shadow_map_size = 1024.0_f32; // Reduced from 2048 for FPS
             let ortho_size = 600.0_f32;
             let shadow_center = Vec3::new(
                 (state.player.position.x / 64.0).round() * 64.0,
@@ -1892,19 +2769,66 @@ fn main() {
             let view_proj = state.camera.view_projection_matrix();
             let frustum = Frustum::from_view_proj(&view_proj);
 
+            // Compute fog parameters for tree shader (same as used in render pass)
+            let fog_params = state.atmosphere.fog_params();
+            let fog_color = state.atmosphere.fog_color();
+            let fog_density = fog_params[0];
+            let fog_start = fog_params[1];
+            let fog_end = fog_params[2];
+
             {
                 for (_coord, chunk) in manager.iter_chunks() {
                     if let Some(grass) = &chunk.grass {
-                        grass.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
+                        grass.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            &light_view_proj,
+                            light_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     if let Some(trees) = &chunk.trees {
-                        trees.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
+                        trees.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     if let Some(detritus) = &chunk.detritus {
-                        detritus.update_camera(ctx.queue(), &view_proj, sun_dir.to_array());
+                        detritus.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     for rock in &chunk.rocks {
-                        rock.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
+                        rock.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     // for building in &chunk.buildings {
                     //     building.update_camera(ctx.queue(), &view_proj);
@@ -1914,7 +2838,7 @@ fn main() {
 
             // Update Water & Dispatch Compute
             // {
-            //     let mut water = water_system_mutex.lock().unwrap();
+            //     let mut water = water_system_mutex.safe_lock();
             //     water.update(ctx.queue(), elapsed, delta);
             //     water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
             //     water.dispatch(&mut encoder);
@@ -1922,8 +2846,8 @@ fn main() {
 
             // 0. Shadow Pass
             {
-                let shadow_map = shadow_map_mutex.lock().unwrap();
-                let shadow_pipeline = shadow_pipeline_mutex.lock().unwrap();
+                let shadow_map = shadow_map_mutex.safe_lock();
+                let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1988,7 +2912,7 @@ fn main() {
 
             // 0.5 Sky Pass (Draw Skybox/Clouds first)
             {
-                let sky_pipeline = sky_pipeline_mutex.lock().unwrap();
+                let sky_pipeline = sky_pipeline_mutex.safe_lock();
                 sky_pipeline.update_uniforms(
                     ctx.queue(),
                     view_proj,
@@ -2024,8 +2948,8 @@ fn main() {
             // 1. Sun/Moon Pass
             {
                 // Acquire locks before starting render pass to ensure they outlive the pass
-                let sun_pipeline = sun_pipeline_mutex.lock().unwrap();
-                let moon_pipeline = moon_pipeline_mutex.lock().unwrap();
+                let sun_pipeline = sun_pipeline_mutex.safe_lock();
+                let moon_pipeline = moon_pipeline_mutex.safe_lock();
 
                 let mut sun_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sun/Moon Pass"),
@@ -2061,7 +2985,8 @@ fn main() {
 
             // 2. Main Render Pass
             {
-                // let water_system_guard = water_system_mutex.lock().unwrap();
+                // let water_system_guard = water_system_mutex.safe_lock();
+                let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2084,11 +3009,12 @@ fn main() {
                     occlusion_query_set: None,
                 });
 
-                // Atmospheric fog from time-of-day system
-                let atmo = &state.atmosphere.state;
-                let fog_color = atmo.fog_color.to_array();
-                let fog_start = atmo.fog_start;
-                let fog_end = atmo.fog_end;
+                // Atmospheric fog from time-of-day system (use validated params)
+                let fog_params = state.atmosphere.fog_params();
+                let fog_color = state.atmosphere.fog_color();
+                let fog_density = fog_params[0];  // Base fog intensity
+                let fog_start = fog_params[1];
+                let fog_end = fog_params[2];
 
                 // Render chunks with frustum culling and LOD
                 let mut terrain_rendered = 0;
@@ -2098,10 +3024,13 @@ fn main() {
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
-                let grass_max_distance = state.render_distance * 0.5;  // Grass at 50% of max
-                let tree_max_distance = state.render_distance;
-                let detritus_max_distance = state.render_distance * 0.75;
-                let building_max_distance = state.render_distance * 1.5; // Buildings visible further
+                // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
+                // player can be up to 181 units from center (corner to center diagonal)
+                // Need at least 200+ to reliably see grass in current and adjacent chunks
+                let grass_max_distance = (state.render_distance * 0.8).max(200.0);  // Minimum 200 for visibility
+                let tree_max_distance = (state.render_distance * 0.7).max(180.0);   // Trees slightly farther
+                let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
+                let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
@@ -2120,6 +3049,7 @@ fn main() {
                         fog_color,
                         fog_start,
                         fog_end,
+                        fog_density,
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
                         state.camera.position.to_array()
@@ -2136,7 +3066,9 @@ fn main() {
                         }
                     }
 
-                    // Trees
+                    // Trees - RE-ENABLED with simple low-poly mesh (~36 tris per tree)
+                    // Previously: 94K tris per instance (247K face OBJ)
+                    // Now: ~36 tris per instance (cylinder trunk + icosphere canopy)
                     if let Some(trees) = &chunk.trees {
                         if dist <= tree_max_distance {
                             trees_rendered += 1;
@@ -2151,12 +3083,12 @@ fn main() {
                         }
                     }
 
-                    // Rocks (Same LOD as trees for now)
-                    for rock in &chunk.rocks {
-                        if dist <= tree_max_distance {
-                            rock.render(&mut render_pass);
-                        }
-                    }
+                    // Rocks - TEMPORARILY DISABLED (unknown rock types in log)
+                    // for rock in &chunk.rocks {
+                    //     if dist <= tree_max_distance {
+                    //         rock.render(&mut render_pass);
+                    //     }
+                    // }
 
                     // Buildings
                     for building in &chunk.buildings {
@@ -2176,6 +3108,10 @@ fn main() {
                     }
                 }
 
+                // Render Animal Orbs
+                orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position);
+                orb_pipeline.render(&mut render_pass);
+
                 // Render Water
                 // water_system_guard.draw(&mut render_pass);
 
@@ -2185,7 +3121,7 @@ fn main() {
 
             // 2.5 Light Shaft Post-Process Pass
             if offscreen_view.is_some() {
-                let light_shaft_pipeline = light_shaft_pipeline_mutex.lock().unwrap();
+                let light_shaft_pipeline = light_shaft_pipeline_mutex.safe_lock();
                 let atmo = &state.atmosphere.state;
 
                 // Calculate sun screen position
@@ -2276,7 +3212,7 @@ fn main() {
 
             // 3. Viewmodel Pass (First-person arms and weapon) - only in playing mode
             if state.game_state == GameState::Playing {
-                let viewmodel_pipeline = viewmodel_pipeline_mutex.lock().unwrap();
+                let viewmodel_pipeline = viewmodel_pipeline_mutex.safe_lock();
 
                 // Update viewmodel uniforms with camera rotation and swing animation
                 viewmodel_pipeline.update_uniforms(
@@ -2322,7 +3258,7 @@ fn main() {
 
                 let tris = state.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let mut renderer = egui_renderer_mutex.lock().unwrap();
+                let mut renderer = egui_renderer_mutex.safe_lock();
                 for (id, image_delta) in &full_output.textures_delta.set {
                     renderer.update_texture(ctx.device(), ctx.queue(), *id, image_delta);
                 }
@@ -2402,7 +3338,7 @@ fn main() {
 
                 let tris = state.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                let mut renderer = egui_renderer_mutex.lock().unwrap();
+                let mut renderer = egui_renderer_mutex.safe_lock();
                 for (id, image_delta) in &full_output.textures_delta.set {
                     renderer.update_texture(ctx.device(), ctx.queue(), *id, image_delta);
                 }

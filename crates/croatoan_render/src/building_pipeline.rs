@@ -2,6 +2,13 @@ use wgpu::util::DeviceExt;
 use glam::{Mat4, Vec3};
 use std::sync::Arc;
 
+/// Maximum vertices per building mesh (safety limit)
+const MAX_BUILDING_VERTICES: usize = 100_000;
+/// Maximum indices per building mesh (safety limit)
+const MAX_BUILDING_INDICES: usize = 300_000;
+/// Maximum building instances per frame (safety limit)
+const MAX_BUILDING_INSTANCES: usize = 1_000;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BuildingVertex {
@@ -176,22 +183,33 @@ impl BuildingPipeline {
         vertices: &[BuildingVertex],
         indices: &[u32],
     ) -> Arc<BuildingMesh> {
+        // Safety checks: validate buffer sizes before GPU allocation
+        if vertices.len() > MAX_BUILDING_VERTICES {
+            log::warn!("Building mesh too large ({} vertices), clamping to {}", vertices.len(), MAX_BUILDING_VERTICES);
+        }
+        if indices.len() > MAX_BUILDING_INDICES {
+            log::warn!("Building mesh too large ({} indices), clamping to {}", indices.len(), MAX_BUILDING_INDICES);
+        }
+
+        let vertex_count = vertices.len().min(MAX_BUILDING_VERTICES);
+        let index_count = indices.len().min(MAX_BUILDING_INDICES);
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Building Vertex Buffer"),
-            contents: bytemuck::cast_slice(vertices),
+            contents: bytemuck::cast_slice(&vertices[..vertex_count]),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Building Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices[..index_count]),
             usage: wgpu::BufferUsages::INDEX,
         });
 
         Arc::new(BuildingMesh {
             vertex_buffer,
             index_buffer,
-            index_count: indices.len() as u32,
+            index_count: index_count as u32,
         })
     }
 
@@ -200,7 +218,19 @@ impl BuildingPipeline {
     }
 
     pub fn upload_instances(&mut self, device: &wgpu::Device, instances: &[Mat4]) {
-        let raw_data: Vec<InstanceRaw> = instances.iter().map(|m| InstanceRaw {
+        if instances.is_empty() {
+            self.instance_count = 0;
+            self.instance_buffer = None;
+            return;
+        }
+
+        // Safety check: clamp instance count
+        if instances.len() > MAX_BUILDING_INSTANCES {
+            log::warn!("Too many building instances ({} requested), clamping to {}", instances.len(), MAX_BUILDING_INSTANCES);
+        }
+        let clamped_count = instances.len().min(MAX_BUILDING_INSTANCES);
+
+        let raw_data: Vec<InstanceRaw> = instances[..clamped_count].iter().map(|m| InstanceRaw {
             model: m.to_cols_array_2d(),
         }).collect();
 
@@ -209,7 +239,7 @@ impl BuildingPipeline {
             contents: bytemuck::cast_slice(&raw_data),
             usage: wgpu::BufferUsages::VERTEX,
         }));
-        self.instance_count = instances.len() as u32;
+        self.instance_count = clamped_count as u32;
     }
 
     pub fn update_uniforms(
@@ -237,18 +267,51 @@ impl BuildingPipeline {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
+    /// Render the buildings
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>) {
-        if let Some(mesh) = &self.mesh {
-            if self.instance_count > 0 {
-                if let Some(instance_buffer) = &self.instance_buffer {
-                    rpass.set_pipeline(&self.pipeline);
-                    rpass.set_bind_group(0, &self.bind_group, &[]);
-                    rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    rpass.set_vertex_buffer(1, instance_buffer.slice(..));
-                    rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..mesh.index_count, 0, 0..self.instance_count);
-                }
+        // Defensive: require mesh, instances, and buffers
+        let mesh = match &self.mesh {
+            Some(m) if m.index_count > 0 => m,
+            _ => {
+                log::trace!("Building render skipped: no mesh or mesh has no indices");
+                return;
             }
+        };
+
+        if self.instance_count == 0 {
+            return;
         }
+
+        let instance_buffer = match &self.instance_buffer {
+            Some(ib) => ib,
+            None => {
+                log::trace!("Building render skipped: no instance buffer");
+                return;
+            }
+        };
+
+        rpass.set_pipeline(&self.pipeline);
+        rpass.set_bind_group(0, &self.bind_group, &[]);
+        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        rpass.set_vertex_buffer(1, instance_buffer.slice(..));
+        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.draw_indexed(0..mesh.index_count, 0, 0..self.instance_count);
+    }
+
+    /// Check if the pipeline has valid data ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.mesh.as_ref().map(|m| m.index_count > 0).unwrap_or(false)
+            && self.instance_buffer.is_some()
+            && self.instance_count > 0
+    }
+
+    /// Get the current instance count
+    #[inline]
+    pub fn instance_count(&self) -> u32 {
+        self.instance_count
     }
 }

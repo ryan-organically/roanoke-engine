@@ -4,6 +4,18 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use std::sync::Arc;
 
+use crate::pipeline_validation::{
+    MeshValidator, PipelineError, PipelineResult,
+    log_pipeline_error, sanitize_vec3, sanitize_float,
+};
+
+/// Maximum vertices per tree mesh (safety limit)
+const MAX_TREE_VERTICES: usize = 50_000;
+/// Maximum indices per tree mesh (safety limit)
+const MAX_TREE_INDICES: usize = 150_000;
+/// Maximum tree instances per frame (safety limit)
+const MAX_TREE_INSTANCES: usize = 10_000;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct TreeVertex {
@@ -15,9 +27,17 @@ struct TreeVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-    sun_dir: [f32; 3],
-    time: f32, // For wind animation
+    view_proj: [[f32; 4]; 4],   // 64 bytes (0-64)
+    sun_dir: [f32; 3],          // 12 bytes (64-76)
+    time: f32,                  // 4 bytes (76-80) - packs with sun_dir
+    view_pos: [f32; 3],         // 12 bytes (80-92)
+    fog_density: f32,           // 4 bytes (92-96) - packs with view_pos
+    fog_color: [f32; 3],        // 12 bytes (96-108)
+    fog_start: f32,             // 4 bytes (108-112) - packs with fog_color
+    fog_end: f32,               // 4 bytes (112-116)
+    _align_gap: [f32; 3],       // 12 bytes (116-128) - bridge to vec3 alignment
+    _padding: [f32; 3],         // 12 bytes (128-140) - matches WGSL vec3
+    _struct_pad: f32,           // 4 bytes (140-144) - struct alignment
 }
 
 #[repr(C)]
@@ -286,7 +306,26 @@ impl TreePipeline {
         }
     }
 
-    /// Create the shared tree mesh buffers
+    /// Create the shared tree mesh buffers with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if mesh data is invalid
+    pub fn try_create_mesh(
+        device: &Device,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+        texture_bind_group: Option<Arc<BindGroup>>,
+    ) -> PipelineResult<TreeMesh> {
+        // Validate mesh data before GPU allocation
+        let validator = MeshValidator::new(MAX_TREE_VERTICES, MAX_TREE_INDICES);
+        validator.validate_model(positions, normals, uvs, indices)?;
+
+        Ok(Self::create_mesh_unchecked(device, positions, normals, uvs, indices, texture_bind_group))
+    }
+
+    /// Create the shared tree mesh buffers (panics on invalid data)
     pub fn create_mesh(
         device: &Device,
         positions: &[[f32; 3]],
@@ -295,12 +334,33 @@ impl TreePipeline {
         indices: &[u32],
         texture_bind_group: Option<Arc<BindGroup>>,
     ) -> TreeMesh {
-        // Interleave vertex data
-        let vertices: Vec<TreeVertex> = (0..positions.len())
+        match Self::try_create_mesh(device, positions, normals, uvs, indices, texture_bind_group) {
+            Ok(mesh) => mesh,
+            Err(e) => {
+                log_pipeline_error("TreePipeline", &e);
+                panic!("Failed to create tree mesh: {}", e);
+            }
+        }
+    }
+
+    /// Create mesh without validation (internal use)
+    fn create_mesh_unchecked(
+        device: &Device,
+        positions: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        uvs: &[[f32; 2]],
+        indices: &[u32],
+        texture_bind_group: Option<Arc<BindGroup>>,
+    ) -> TreeMesh {
+        let vertex_count = positions.len().min(MAX_TREE_VERTICES);
+        let index_count = indices.len().min(MAX_TREE_INDICES);
+
+        // Interleave vertex data with NaN/Inf sanitization
+        let vertices: Vec<TreeVertex> = (0..vertex_count)
             .map(|i| TreeVertex {
-                position: positions[i],
-                normal: normals[i],
-                uv: uvs[i],
+                position: sanitize_vec3(positions[i]),
+                normal: sanitize_vec3(normals[i]),
+                uv: [sanitize_float(uvs[i][0]), sanitize_float(uvs[i][1])],
             })
             .collect();
 
@@ -314,16 +374,16 @@ impl TreePipeline {
         // Create index buffer
         let index_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Tree Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
+            contents: bytemuck::cast_slice(&indices[..index_count]),
             usage: wgpu::BufferUsages::INDEX,
         }));
 
-        log::info!("Created tree mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
+        log::debug!("Created tree mesh: {} vertices, {} triangles", vertices.len(), index_count / 3);
 
         TreeMesh {
             vertex_buffer,
             index_buffer,
-            index_count: indices.len() as u32,
+            index_count: index_count as u32,
             texture_bind_group,
         }
     }
@@ -333,20 +393,73 @@ impl TreePipeline {
         self.mesh = Some(mesh);
     }
 
-    /// Upload instances for a chunk
+    /// Upload instances for a chunk with validation
+    ///
+    /// # Errors
+    /// Returns `PipelineError` if instance count exceeds limit
+    pub fn try_upload_instances(
+        &mut self,
+        device: &Device,
+        instances: &[Mat4],
+    ) -> PipelineResult<()> {
+        if instances.len() > MAX_TREE_INSTANCES {
+            return Err(PipelineError::TooManyInstances {
+                count: instances.len(),
+                max: MAX_TREE_INSTANCES,
+            });
+        }
+        self.upload_instances_unchecked(device, instances);
+        Ok(())
+    }
+
+    /// Upload instances for a chunk (clamps if too many)
     pub fn upload_instances(
         &mut self,
         device: &Device,
         instances: &[Mat4],
     ) {
-        self.instance_count = instances.len() as u32;
-        if self.instance_count == 0 {
+        if instances.is_empty() {
+            self.instance_count = 0;
             self.instance_buffer = None;
             return;
         }
 
+        // Safety check: clamp instance count
+        if instances.len() > MAX_TREE_INSTANCES {
+            log::warn!("Too many tree instances ({} requested), clamping to {}", instances.len(), MAX_TREE_INSTANCES);
+        }
+
+        self.upload_instances_unchecked(device, &instances[..instances.len().min(MAX_TREE_INSTANCES)]);
+    }
+
+    /// Upload instances without validation (internal use)
+    fn upload_instances_unchecked(
+        &mut self,
+        device: &Device,
+        instances: &[Mat4],
+    ) {
+        if instances.is_empty() {
+            self.instance_count = 0;
+            self.instance_buffer = None;
+            return;
+        }
+
+        self.instance_count = instances.len() as u32;
+
+        // Convert to instance data with matrix sanitization
         let instance_data: Vec<TreeInstance> = instances.iter()
-            .map(|m| TreeInstance { model_matrix: m.to_cols_array_2d() })
+            .map(|m| {
+                let cols = m.to_cols_array_2d();
+                // Sanitize each matrix component
+                TreeInstance {
+                    model_matrix: [
+                        [sanitize_float(cols[0][0]), sanitize_float(cols[0][1]), sanitize_float(cols[0][2]), sanitize_float(cols[0][3])],
+                        [sanitize_float(cols[1][0]), sanitize_float(cols[1][1]), sanitize_float(cols[1][2]), sanitize_float(cols[1][3])],
+                        [sanitize_float(cols[2][0]), sanitize_float(cols[2][1]), sanitize_float(cols[2][2]), sanitize_float(cols[2][3])],
+                        [sanitize_float(cols[3][0]), sanitize_float(cols[3][1]), sanitize_float(cols[3][2]), sanitize_float(cols[3][3])],
+                    ],
+                }
+            })
             .collect();
 
         self.instance_buffer = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -356,42 +469,90 @@ impl TreePipeline {
         }));
     }
 
-    /// Update camera uniform
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, sun_dir: [f32; 3], time: f32) {
+    /// Update camera uniform with fog parameters
+    pub fn update_camera(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             sun_dir,
             time,
+            view_pos,
+            fog_density,
+            fog_color,
+            fog_start,
+            fog_end,
+            _align_gap: [0.0; 3],
+            _padding: [0.0; 3],
+            _struct_pad: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
     /// Render the trees
+    ///
+    /// # Safety
+    /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'rpass>(
         &'rpass self,
         render_pass: &mut wgpu::RenderPass<'rpass>,
     ) {
-        if self.mesh.is_none() || self.instance_count == 0 || self.instance_buffer.is_none() {
+        // Early exit if no instances to render
+        if self.instance_count == 0 {
             return;
         }
 
-        let mesh = self.mesh.as_ref().unwrap();
+        // Defensive: require mesh and instance buffer
+        let (mesh, instance_buffer) = match (&self.mesh, &self.instance_buffer) {
+            (Some(m), Some(ib)) => (m, ib),
+            _ => {
+                log::trace!("Tree render skipped: missing mesh or instance buffer");
+                return;
+            }
+        };
+
+        // Validate mesh has triangles
+        if mesh.index_count == 0 {
+            log::trace!("Tree render skipped: mesh has no indices");
+            return;
+        }
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        
-        if let Some(tex_bg) = &mesh.texture_bind_group {
-            render_pass.set_bind_group(1, tex_bg, &[]);
-        } else {
-            render_pass.set_bind_group(1, &self.default_bind_group, &[]);
-        }
+
+        // Use texture bind group if available, otherwise use default
+        let texture_bind_group: &BindGroup = mesh.texture_bind_group
+            .as_ref()
+            .map_or(&self.default_bind_group, |arc| arc.as_ref());
+        render_pass.set_bind_group(1, texture_bind_group, &[]);
 
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, self.instance_buffer.as_ref().unwrap().slice(..));
-        render_pass.set_index_buffer(
-            mesh.index_buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
+        render_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..mesh.index_count, 0, 0..self.instance_count);
+    }
+
+    /// Check if the pipeline has valid data ready for rendering
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.mesh.is_some()
+            && self.instance_buffer.is_some()
+            && self.instance_count > 0
+            && self.mesh.as_ref().map(|m| m.index_count > 0).unwrap_or(false)
+    }
+
+    /// Get the current instance count
+    #[inline]
+    pub fn instance_count(&self) -> u32 {
+        self.instance_count
     }
 }

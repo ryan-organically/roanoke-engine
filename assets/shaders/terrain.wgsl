@@ -7,7 +7,8 @@ struct Uniforms {
     time: f32,
     fog_start: f32,
     fog_end: f32,
-    padding1: vec2<f32>,
+    fog_density: f32,  // Base fog intensity multiplier
+    padding1: f32,
     sun_dir: vec3<f32>,
     padding2: f32,
     view_pos: vec3<f32>,
@@ -30,12 +31,16 @@ struct VertexOutput {
     @location(1) world_pos: vec3<f32>,
     @location(2) shadow_pos: vec3<f32>,
     @location(3) normal: vec3<f32>,
+    @location(4) original_y: f32,  // Pre-animation Y for water detection
 }
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     var world_pos = input.position;
+
+    // Store original Y before animation for water detection in fragment shader
+    output.original_y = input.position.y;
 
     // WATER ANIMATION with shore breaking
     // Water is below y = 0.5 (includes shallow water)
@@ -88,7 +93,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // For water, calculate normals from derivatives to capture wave sparkle
     // For land, use smooth interpolated normals
     var normal: vec3<f32>;
-    let is_water = input.world_pos.y < 0.5; // Water is below this height
+    // Use original_y (pre-animation) for water detection to avoid waves breaking the check
+    let is_water = input.original_y < 0.5;
 
     if (is_water) {
         // Calculate normal from world position derivatives for dynamic waves
@@ -176,6 +182,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Apply lighting to surface color
     var final_color = input.color * lighting;
 
+    // Water: Override color with proper ocean blue (vertex colors can be wrong at boundaries)
+    if (is_water) {
+        // Depth-based water color: deeper = darker teal, shallow = lighter cyan
+        // Use original_y for consistent depth calculation (not animated position)
+        let water_depth = clamp((0.5 - input.original_y) / 5.0, 0.0, 1.0);
+        let deep_color = vec3<f32>(0.02, 0.18, 0.30);   // Deep ocean - dark teal/blue
+        let shallow_color = vec3<f32>(0.08, 0.35, 0.45);   // Shallow - cyan
+        let water_base = mix(shallow_color, deep_color, water_depth);
+        final_color = water_base * lighting;
+    }
+
     // Water Specular Highlight (Sun Sparkle)
     if (is_water) {
         let reflect_dir = reflect(-light_dir, normal);
@@ -188,36 +205,39 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         final_color += specular;
     }
 
-    // FOG CALCULATION (Atmospheric Haze)
-    // Distance from Camera
+    // FOG CALCULATION - Controlled by fog_density uniform (\ key cycles 0-4)
     let dist = distance(input.world_pos, uniforms.view_pos);
-    
-    // FOG CALCULATION (Atmospheric Volumetric Fog)
-    
-    // 1. Distance Fog (Base)
-    let dist_factor = clamp((dist - uniforms.fog_start) / (uniforms.fog_end - uniforms.fog_start), 0.0, 1.0);
-    
-    // 2. Height Fog (Denser at sea level, thins out upwards)
-    let fog_height_falloff = 40.0; // Height where fog disappears
-    let height_factor = 1.0 - clamp((input.world_pos.y + 5.0) / fog_height_falloff, 0.0, 1.0);
-    let height_fog = height_factor * height_factor; // Quadratic falloff for "settled" look
 
-    // Combine Fog Density
-    // Distance fog is always present, height fog adds density in low areas
-    let fog_density = clamp(dist_factor + height_fog * 0.6, 0.0, 1.0);
+    // Skip fog entirely if density is 0
+    if (uniforms.fog_density < 0.01) {
+        return vec4<f32>(final_color, 1.0);
+    }
 
-    // 3. Sun Scattering (Glow when looking at sun)
+    // Distance fog: starts immediately, full at fog_end
+    let dist_factor = dist / uniforms.fog_end;
+    let dist_fog = clamp(dist_factor * dist_factor, 0.0, 1.0); // Quadratic for natural falloff
+
+    // Height fog: denser at low elevations (below y=20)
+    let height_fog = clamp(1.0 - input.world_pos.y / 20.0, 0.0, 0.5);
+
+    // Base atmospheric haze - scales with distance
+    let base_haze = dist / 400.0;
+
+    // Combine fog sources, scaled by fog_density
+    let raw_fog = dist_fog + height_fog + base_haze;
+    let fog_amount = clamp(raw_fog * uniforms.fog_density, 0.0, 1.0);
+
+    // Sun scattering for warm glow when looking toward sun
     let view_dir = normalize(input.world_pos - uniforms.view_pos);
     let sun_dot = max(dot(view_dir, normalize(uniforms.sun_dir)), 0.0);
-    let sun_scatter = pow(sun_dot, 16.0); // Sharp glow near sun
-    
-    // Fog Color with Scattering
-    // Mix base fog color with a warm sun tint based on scatter
-    let scatter_color = vec3<f32>(1.0, 0.9, 0.7); // Warm sunlight
-    let final_fog_color = mix(uniforms.fog_color, scatter_color, sun_scatter * 0.5);
+    let sun_scatter = pow(sun_dot, 8.0);
 
-    // Apply Fog
-    final_color = mix(final_color, final_fog_color, fog_density);
+    // Fog color with sun tint
+    let scatter_color = vec3<f32>(1.0, 0.9, 0.7);
+    let final_fog_color = mix(uniforms.fog_color, scatter_color, sun_scatter * 0.3);
+
+    // Apply fog
+    final_color = mix(final_color, final_fog_color, fog_amount);
 
     return vec4<f32>(final_color, 1.0);
 }

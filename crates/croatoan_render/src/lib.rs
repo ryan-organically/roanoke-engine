@@ -3,6 +3,8 @@ use winit::window::Window;
 use std::sync::Arc;
 
 pub mod camera;
+pub mod pipeline_validation;
+pub mod security;
 pub mod terrain_pipeline;
 pub mod grass_pipeline;
 pub mod tree_pipeline;
@@ -14,6 +16,7 @@ pub mod frustum;
 pub mod building_pipeline;
 pub mod viewmodel_pipeline;
 pub mod light_shaft_pipeline;
+pub mod animal_orb_pipeline;
 
 pub use terrain_pipeline::TerrainPipeline;
 pub use grass_pipeline::GrassPipeline;
@@ -27,6 +30,9 @@ pub use frustum::{Frustum, ChunkBounds};
 pub use building_pipeline::{BuildingPipeline, BuildingMesh, BuildingVertex};
 pub use viewmodel_pipeline::ViewModelPipeline;
 pub use light_shaft_pipeline::LightShaftPipeline;
+pub use animal_orb_pipeline::{AnimalOrbPipeline, OrbInstance};
+pub use pipeline_validation::{PipelineError, PipelineResult, MeshValidator};
+pub use security::{SecurityError, SecurityResult, SecurityStatus, get_security_status};
 
 pub struct GraphicsContext {
     pub surface: Surface<'static>,
@@ -88,12 +94,25 @@ impl GraphicsContext {
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // Choose best available present mode for performance
+        // Mailbox = triple buffering (lowest latency), Fifo = vsync (fallback)
+        let present_mode = if surface_caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            log::info!("Using Mailbox present mode (triple buffering)");
+            wgpu::PresentMode::Mailbox
+        } else if surface_caps.present_modes.contains(&wgpu::PresentMode::AutoVsync) {
+            log::info!("Using AutoVsync present mode");
+            wgpu::PresentMode::AutoVsync
+        } else {
+            log::info!("Using Fifo present mode (vsync)");
+            wgpu::PresentMode::Fifo
+        };
+
         let config = SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

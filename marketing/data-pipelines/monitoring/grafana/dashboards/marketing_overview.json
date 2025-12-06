@@ -1,0 +1,417 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "marketing-overview",
+    "title": "Marketing Data Platform - Overview",
+    "description": "Real-time marketing metrics and pipeline health",
+    "tags": ["marketing", "data-platform", "overview"],
+    "timezone": "utc",
+    "schemaVersion": 38,
+    "refresh": "30s",
+    "time": {
+      "from": "now-24h",
+      "to": "now"
+    },
+    "annotations": {
+      "list": [
+        {
+          "name": "Deployments",
+          "datasource": "prometheus",
+          "expr": "changes(deployment_timestamp{service=\"marketing-api\"}[1h]) > 0",
+          "iconColor": "blue"
+        },
+        {
+          "name": "Alerts",
+          "datasource": "prometheus",
+          "expr": "ALERTS{alertstate=\"firing\", team=\"marketing\"}",
+          "iconColor": "red"
+        }
+      ]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "platform",
+          "type": "query",
+          "datasource": "prometheus",
+          "query": "label_values(social_events_total, platform)",
+          "includeAll": true,
+          "multi": true
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Key Metrics",
+        "type": "row",
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Social Mentions (24h)",
+        "type": "stat",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+        "targets": [
+          {
+            "expr": "sum(increase(social_events_total{event_type=\"MENTION\"}[24h]))",
+            "legendFormat": "Mentions"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"]
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 1000},
+                {"color": "green", "value": 5000}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Average Sentiment",
+        "type": "gauge",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+        "targets": [
+          {
+            "expr": "avg(sentiment_score_avg{platform=~\"$platform\"})",
+            "legendFormat": "Sentiment"
+          }
+        ],
+        "options": {
+          "showThresholdLabels": false,
+          "showThresholdMarkers": true
+        },
+        "fieldConfig": {
+          "defaults": {
+            "min": -1,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": -1},
+                {"color": "orange", "value": -0.2},
+                {"color": "yellow", "value": 0},
+                {"color": "green", "value": 0.2}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Ad Spend (Today)",
+        "type": "stat",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+        "targets": [
+          {
+            "expr": "sum(campaign_spend_total{date=~\".*\"})",
+            "legendFormat": "Spend"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "Conversion Rate",
+        "type": "stat",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+        "targets": [
+          {
+            "expr": "sum(rate(conversions_total[24h])) / sum(rate(clicks_total[24h])) * 100",
+            "legendFormat": "CVR"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 2},
+                {"color": "green", "value": 5}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Pipeline Events/sec",
+        "type": "stat",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+        "targets": [
+          {
+            "expr": "sum(rate(kafka_consumer_messages_consumed_total[5m]))",
+            "legendFormat": "Events/sec"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 1000},
+                {"color": "green", "value": 5000}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Active Alerts",
+        "type": "stat",
+        "datasource": "prometheus",
+        "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+        "targets": [
+          {
+            "expr": "count(ALERTS{alertstate=\"firing\", team=\"marketing\"})",
+            "legendFormat": "Alerts"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 1},
+                {"color": "red", "value": 5}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "Social Metrics",
+        "type": "row",
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}
+      },
+      {
+        "id": 11,
+        "title": "Social Events by Platform",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+        "targets": [
+          {
+            "expr": "sum(rate(social_events_total{platform=~\"$platform\"}[5m])) by (platform)",
+            "legendFormat": "{{platform}}"
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "calcs": ["sum", "mean"]
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 20
+            }
+          }
+        }
+      },
+      {
+        "id": 12,
+        "title": "Sentiment Trend",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+        "targets": [
+          {
+            "expr": "avg(sentiment_score_avg{platform=~\"$platform\"}) by (platform)",
+            "legendFormat": "{{platform}}"
+          },
+          {
+            "expr": "avg(sentiment_score_avg)",
+            "legendFormat": "Overall"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "min": -1,
+            "max": 1,
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth"
+            }
+          }
+        }
+      },
+      {
+        "id": 20,
+        "title": "Campaign Performance",
+        "type": "row",
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14}
+      },
+      {
+        "id": 21,
+        "title": "Impressions vs Clicks",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+        "targets": [
+          {
+            "expr": "sum(rate(impressions_total[5m]))",
+            "legendFormat": "Impressions"
+          },
+          {
+            "expr": "sum(rate(clicks_total[5m])) * 100",
+            "legendFormat": "Clicks (x100)"
+          }
+        ]
+      },
+      {
+        "id": 22,
+        "title": "Cost Metrics",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+        "targets": [
+          {
+            "expr": "avg(cpc_dollars) by (platform)",
+            "legendFormat": "CPC {{platform}}"
+          },
+          {
+            "expr": "avg(cpm_dollars) by (platform)",
+            "legendFormat": "CPM {{platform}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD"
+          }
+        }
+      },
+      {
+        "id": 30,
+        "title": "Pipeline Health",
+        "type": "row",
+        "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23}
+      },
+      {
+        "id": 31,
+        "title": "Kafka Consumer Lag",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 24},
+        "targets": [
+          {
+            "expr": "sum(kafka_consumer_lag) by (topic)",
+            "legendFormat": "{{topic}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 10000},
+                {"color": "red", "value": 100000}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 32,
+        "title": "Processing Job Status",
+        "type": "state-timeline",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24},
+        "targets": [
+          {
+            "expr": "spark_job_status{job=~\".*aggregation.*\"}",
+            "legendFormat": "{{job}}"
+          },
+          {
+            "expr": "flink_job_status{job=~\".*sentiment.*\"}",
+            "legendFormat": "{{job}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {"type": "value", "options": {"0": {"text": "Failed", "color": "red"}}},
+              {"type": "value", "options": {"1": {"text": "Running", "color": "green"}}},
+              {"type": "value", "options": {"2": {"text": "Pending", "color": "yellow"}}}
+            ]
+          }
+        }
+      },
+      {
+        "id": 33,
+        "title": "API Response Times",
+        "type": "timeseries",
+        "datasource": "prometheus",
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{service=\"marketing-api\"}[5m]))",
+            "legendFormat": "p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service=\"marketing-api\"}[5m]))",
+            "legendFormat": "p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service=\"marketing-api\"}[5m]))",
+            "legendFormat": "p99"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 0.2},
+                {"color": "red", "value": 0.5}
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
