@@ -51,7 +51,8 @@
       "Bash(xargs ls:*)",
       "Bash(done)",
       "Bash(fi)",
-      "Bash(du:*)"
+      "Bash(du:*)",
+      "Bash(git merge:*)"
     ],
     "deny": [],
     "ask": []
