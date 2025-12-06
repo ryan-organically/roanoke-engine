@@ -1,7 +1,7 @@
 //! Animal entity - runtime state for individual animals
 
 use super::behavior::BehaviorState;
-use super::types::{AnimalSpecies, StatusEffectType};
+use super::types::{AnimalSpecies, StatusEffectType, WolfGroupType};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -93,6 +93,15 @@ pub struct Animal {
     // Spawning
     pub spawn_chunk: (i32, i32),
     pub despawn_timer: Option<f32>,
+
+    // Wolf-specific state
+    pub wolf_group_type: Option<WolfGroupType>,
+    pub taming_progress: f32,        // 0.0 - 1.0, progress toward taming
+    pub curiosity_level: f32,        // 0.0 - 1.0, how curious the wolf is
+    pub curiosity_target: Option<Vec3>, // Position wolf is investigating
+    pub last_player_interaction: Option<Instant>,
+    pub positive_interactions: u32,  // Count of positive interactions (feeding, etc.)
+    pub flee_chance_roll: f32,       // Pre-rolled chance for pair flee behavior
 }
 
 impl Animal {
@@ -131,7 +140,70 @@ impl Animal {
             animation_time: 0.0,
             spawn_chunk: chunk,
             despawn_timer: None,
+            wolf_group_type: None,
+            taming_progress: 0.0,
+            curiosity_level: 0.0,
+            curiosity_target: None,
+            last_player_interaction: None,
+            positive_interactions: 0,
+            flee_chance_roll: 0.0,
         }
+    }
+
+    /// Create a wolf with specific group behavior
+    pub fn new_wolf(
+        id: AnimalId,
+        species: AnimalSpecies,
+        position: Vec3,
+        health: f32,
+        chunk: (i32, i32),
+        group_type: WolfGroupType,
+        flee_roll: f32,
+    ) -> Self {
+        let mut animal = Self::new(id, species, position, health, chunk);
+        animal.wolf_group_type = Some(group_type);
+        animal.flee_chance_roll = flee_roll;
+
+        // Lone wolves start curious
+        if group_type == WolfGroupType::Lone {
+            animal.curiosity_level = 0.5;
+        }
+
+        animal
+    }
+
+    /// Check if this is a lone wolf (tameable)
+    pub fn is_lone_wolf(&self) -> bool {
+        self.wolf_group_type == Some(WolfGroupType::Lone)
+    }
+
+    /// Check if this is a wolf pair
+    pub fn is_wolf_pair(&self) -> bool {
+        self.wolf_group_type == Some(WolfGroupType::Pair)
+    }
+
+    /// Check if this wolf can be tamed (lone wolf only)
+    pub fn can_be_tamed(&self) -> bool {
+        self.is_lone_wolf() && self.species.is_tameable()
+    }
+
+    /// Record a positive interaction (feeding, peaceful proximity)
+    pub fn record_positive_interaction(&mut self) {
+        self.positive_interactions += 1;
+        self.last_player_interaction = Some(Instant::now());
+        self.curiosity_level = (self.curiosity_level + 0.1).min(1.0);
+    }
+
+    /// Advance taming progress based on interaction quality
+    pub fn advance_taming(&mut self, amount: f32) {
+        if self.can_be_tamed() {
+            self.taming_progress = (self.taming_progress + amount).min(1.0);
+        }
+    }
+
+    /// Check if wolf is fully tamed
+    pub fn is_tamed(&self) -> bool {
+        self.taming_progress >= 1.0
     }
 
     /// Check if the animal is alive
@@ -161,6 +233,9 @@ impl Animal {
             BehaviorState::Attack(_) => 0.3,
             BehaviorState::Flee(_) => 1.2, // Faster when fleeing
             BehaviorState::Dead => 0.0,
+            // Wolf-specific states
+            BehaviorState::Curious(_) => 0.4,     // Slow curious movement
+            BehaviorState::Approaching => 0.3,    // Slow approach
         };
 
         base_speed * state_modifier

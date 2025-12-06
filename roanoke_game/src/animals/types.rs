@@ -212,12 +212,38 @@ impl AnimalSpecies {
     }
 
     /// Get pack size range if this is a pack animal
+    /// Note: For wolves, use wolf_group_config() for more nuanced spawning
     pub fn pack_size(&self) -> Option<(u8, u8)> {
         match self {
-            Self::GrayWolf => Some((2, 6)),
-            Self::RedWolf => Some((2, 4)),
+            Self::GrayWolf => Some((1, 6)),  // Now includes lone wolves
+            Self::RedWolf => Some((1, 4)),   // Now includes lone wolves
             _ => None,
         }
+    }
+
+    /// Get wolf-specific group configuration with probabilities
+    /// Returns None for non-wolf species
+    pub fn wolf_group_config(&self) -> Option<WolfGroupConfig> {
+        match self {
+            Self::GrayWolf => Some(WolfGroupConfig {
+                lone_wolf_chance: 0.20,      // 20% chance of lone wolf
+                pair_chance: 0.25,            // 25% chance of pair
+                small_pack_chance: 0.35,      // 35% chance of 3-4 wolves
+                large_pack_chance: 0.20,      // 20% chance of 5-6 wolves
+            }),
+            Self::RedWolf => Some(WolfGroupConfig {
+                lone_wolf_chance: 0.25,      // Red wolves more often alone
+                pair_chance: 0.30,            // More often in pairs
+                small_pack_chance: 0.35,      // 3-4 wolves
+                large_pack_chance: 0.10,      // Rarely large packs
+            }),
+            _ => None,
+        }
+    }
+
+    /// Check if this species can be tamed
+    pub fn is_tameable(&self) -> bool {
+        matches!(self, Self::GrayWolf | Self::RedWolf)
     }
 
     /// Get habitats where this species can spawn
@@ -638,6 +664,74 @@ impl StatusEffectType {
             Self::Knockdown | Self::Knockback | Self::Stun => false,
             _ => true,
         }
+    }
+}
+
+/// Wolf group type - determines behavior patterns
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WolfGroupType {
+    /// Single wolf - curious, potentially tameable
+    Lone,
+    /// Two wolves - usually flee, sometimes aggressive
+    Pair,
+    /// 3-4 wolves - standard pack hunting
+    SmallPack,
+    /// 5-6 wolves - aggressive coordinated hunting
+    LargePack,
+}
+
+impl WolfGroupType {
+    /// Determine group type from count
+    pub fn from_count(count: u8) -> Self {
+        match count {
+            1 => Self::Lone,
+            2 => Self::Pair,
+            3..=4 => Self::SmallPack,
+            _ => Self::LargePack,
+        }
+    }
+
+    /// Get the pack size for this group type
+    pub fn size_range(&self) -> (u8, u8) {
+        match self {
+            Self::Lone => (1, 1),
+            Self::Pair => (2, 2),
+            Self::SmallPack => (3, 4),
+            Self::LargePack => (5, 6),
+        }
+    }
+}
+
+/// Configuration for wolf group spawning probabilities
+#[derive(Debug, Clone, Copy)]
+pub struct WolfGroupConfig {
+    pub lone_wolf_chance: f32,
+    pub pair_chance: f32,
+    pub small_pack_chance: f32,
+    pub large_pack_chance: f32,
+}
+
+impl WolfGroupConfig {
+    /// Select a group type based on a random value (0.0 - 1.0)
+    pub fn select_group_type(&self, roll: f32) -> WolfGroupType {
+        let mut cumulative = 0.0;
+
+        cumulative += self.lone_wolf_chance;
+        if roll < cumulative {
+            return WolfGroupType::Lone;
+        }
+
+        cumulative += self.pair_chance;
+        if roll < cumulative {
+            return WolfGroupType::Pair;
+        }
+
+        cumulative += self.small_pack_chance;
+        if roll < cumulative {
+            return WolfGroupType::SmallPack;
+        }
+
+        WolfGroupType::LargePack
     }
 }
 

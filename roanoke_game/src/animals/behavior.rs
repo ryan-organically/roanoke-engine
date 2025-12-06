@@ -1,7 +1,7 @@
 //! AI behavior system using Hierarchical Finite State Machines
 
 use super::entity::{Animal, AnimalId, PackId, Target};
-use super::types::{AggressionType, BehaviorType};
+use super::types::{AggressionType, BehaviorType, WolfGroupType};
 use glam::Vec3;
 
 /// High-level behavior states
@@ -15,6 +15,9 @@ pub enum BehaviorState {
     Attack(AttackState),
     Flee(FleeState),
     Dead,
+    // Wolf-specific states
+    Curious(CuriousState),
+    Approaching,
 }
 
 /// Alert sub-states
@@ -48,6 +51,15 @@ pub enum FleeState {
     Running,
     Hiding,
     Cornered,
+}
+
+/// Curious sub-states (for lone wolves)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CuriousState {
+    Watching,      // Observing from distance
+    Investigating, // Moving closer to investigate
+    Circling,      // Circling around the player
+    Sniffing,      // Close proximity, checking player out
 }
 
 /// Context for behavior updates
@@ -145,6 +157,23 @@ pub fn update_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
         BehaviorState::Flee(sub) => update_flee_state(animal, sub, ctx),
 
         BehaviorState::Dead => BehaviorState::Dead,
+
+        // Wolf-specific states - handled by update_wolf_behavior
+        // If regular behavior gets these states, transition to appropriate standard state
+        BehaviorState::Curious(_) => {
+            if animal.awareness > 0.8 {
+                BehaviorState::Alert(AlertState::Looking)
+            } else {
+                BehaviorState::Idle
+            }
+        }
+        BehaviorState::Approaching => {
+            if player_dist < stats.attack_range {
+                BehaviorState::Alert(AlertState::Warning)
+            } else {
+                BehaviorState::Idle
+            }
+        }
     };
 
     animal.behavior_state = new_state;
@@ -871,4 +900,359 @@ pub fn calculate_circle_position(
 
     let movement = (right + forward * radial_adjust).normalize_or_zero() * circle_speed * dt;
     current_pos + movement
+}
+
+// === Wolf-Specific Behavior System ===
+
+/// Update wolf behavior based on group type
+/// This is called instead of standard update_behavior for wolves
+pub fn update_wolf_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
+    match animal.wolf_group_type {
+        Some(WolfGroupType::Lone) => update_lone_wolf_behavior(animal, ctx),
+        Some(WolfGroupType::Pair) => update_wolf_pair_behavior(animal, ctx),
+        Some(WolfGroupType::SmallPack) | Some(WolfGroupType::LargePack) => {
+            // Use standard pack behavior for packs
+            update_behavior(animal, ctx);
+        }
+        None => {
+            // Not a wolf or unknown type, use standard behavior
+            update_behavior(animal, ctx);
+        }
+    }
+}
+
+/// Lone wolf behavior - curious, potentially tameable
+/// Lone wolves observe the player from a distance, may approach if player is non-threatening
+fn update_lone_wolf_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
+    let stats = animal.species.base_stats();
+    let to_player = ctx.player_pos - animal.position;
+    let player_dist = to_player.length();
+    let player_in_detection = player_dist < stats.detection_range * 1.5; // Extended range for curiosity
+
+    // Check if recently damaged - revert to defensive behavior
+    if let Some(damage_time) = animal.last_damage_time {
+        if damage_time.elapsed().as_secs_f32() < 30.0 {
+            // Recently hurt - flee and don't be curious
+            animal.behavior_state = BehaviorState::Flee(FleeState::Running);
+            animal.target = Some(Target::FleeFrom(ctx.player_pos));
+            animal.curiosity_level = (animal.curiosity_level - 0.3).max(0.0);
+            execute_state(animal, ctx);
+            return;
+        }
+    }
+
+    // Flee condition check
+    if animal.current_health <= animal.species.flee_health() && animal.is_alive() {
+        animal.behavior_state = BehaviorState::Flee(FleeState::Running);
+        animal.target = Some(Target::FleeFrom(ctx.player_pos));
+        execute_state(animal, ctx);
+        return;
+    }
+
+    // Update curiosity based on player proximity and behavior
+    if player_in_detection {
+        // Player detected - increase curiosity if moving slowly or stationary
+        let player_speed = ctx.player_velocity.length();
+        if player_speed < 3.0 {
+            // Player is slow/stationary - increase curiosity
+            animal.curiosity_level = (animal.curiosity_level + 0.05 * ctx.dt).min(1.0);
+        } else if player_speed > 8.0 {
+            // Player running - decrease curiosity, become wary
+            animal.curiosity_level = (animal.curiosity_level - 0.1 * ctx.dt).max(0.0);
+        }
+    } else {
+        // Player not detected - slowly decrease curiosity
+        animal.curiosity_level = (animal.curiosity_level - 0.02 * ctx.dt).max(0.0);
+    }
+
+    // State machine for lone wolf
+    let new_state = match animal.behavior_state {
+        BehaviorState::Idle => {
+            if player_in_detection && animal.curiosity_level > 0.3 {
+                // Become curious
+                BehaviorState::Curious(CuriousState::Watching)
+            } else if rand_chance(0.01 * ctx.dt) {
+                BehaviorState::Patrol
+            } else {
+                BehaviorState::Idle
+            }
+        }
+
+        BehaviorState::Patrol => {
+            if player_in_detection && animal.curiosity_level > 0.2 {
+                BehaviorState::Curious(CuriousState::Watching)
+            } else if animal.position.distance(animal.home_position) > animal.territory_radius {
+                animal.target = Some(Target::Position(animal.home_position));
+                BehaviorState::Patrol
+            } else {
+                BehaviorState::Patrol
+            }
+        }
+
+        BehaviorState::Curious(curious_state) => {
+            update_curious_state(animal, curious_state, ctx)
+        }
+
+        BehaviorState::Alert(alert_state) => {
+            if animal.curiosity_level > 0.5 {
+                // Transition to curious instead of aggressive
+                BehaviorState::Curious(CuriousState::Watching)
+            } else if animal.awareness < 0.2 {
+                BehaviorState::Idle
+            } else {
+                BehaviorState::Alert(alert_state)
+            }
+        }
+
+        BehaviorState::Approaching => {
+            // Approaching player for potential taming
+            if player_dist < 5.0 {
+                // Close enough - sniff/investigate
+                BehaviorState::Curious(CuriousState::Sniffing)
+            } else if player_dist > stats.detection_range * 2.0 {
+                // Lost interest
+                BehaviorState::Idle
+            } else {
+                BehaviorState::Approaching
+            }
+        }
+
+        // Fall through to standard behaviors
+        _ => {
+            update_behavior(animal, ctx);
+            return;
+        }
+    };
+
+    animal.behavior_state = new_state;
+    execute_state(animal, ctx);
+}
+
+/// Update curious sub-state for lone wolves
+fn update_curious_state(
+    animal: &mut Animal,
+    current: CuriousState,
+    ctx: &BehaviorContext,
+) -> BehaviorState {
+    let player_dist = animal.position.distance(ctx.player_pos);
+    let player_speed = ctx.player_velocity.length();
+    let stats = animal.species.base_stats();
+
+    // If player runs at the wolf, flee
+    if player_speed > 6.0 && player_dist < 15.0 {
+        let player_dir = ctx.player_velocity.normalize_or_zero();
+        let to_wolf = (animal.position - ctx.player_pos).normalize_or_zero();
+        let approaching = player_dir.dot(to_wolf) > 0.5;
+
+        if approaching {
+            animal.curiosity_level = (animal.curiosity_level - 0.2).max(0.0);
+            return BehaviorState::Flee(FleeState::Running);
+        }
+    }
+
+    match current {
+        CuriousState::Watching => {
+            // Watch from a safe distance (15-25 units)
+            let safe_distance = 20.0;
+            animal.look_at(ctx.player_pos);
+
+            if animal.curiosity_level > 0.6 && player_dist > safe_distance * 0.8 {
+                // Very curious - start investigating
+                BehaviorState::Curious(CuriousState::Investigating)
+            } else if animal.curiosity_level < 0.2 {
+                // Lost interest
+                BehaviorState::Idle
+            } else if player_dist < safe_distance * 0.5 {
+                // Player too close - back off
+                let away_dir = (animal.position - ctx.player_pos).normalize_or_zero();
+                animal.target = Some(Target::Position(animal.position + away_dir * 10.0));
+                BehaviorState::Curious(CuriousState::Watching)
+            } else {
+                // Maintain watching distance
+                if player_dist > safe_distance * 1.5 {
+                    // Move closer to watch
+                    let toward_player = (ctx.player_pos - animal.position).normalize_or_zero();
+                    animal.target = Some(Target::Position(
+                        ctx.player_pos - toward_player * safe_distance,
+                    ));
+                }
+                BehaviorState::Curious(CuriousState::Watching)
+            }
+        }
+
+        CuriousState::Investigating => {
+            // Move closer, circle around player
+            let investigate_distance = 12.0;
+            animal.look_at(ctx.player_pos);
+
+            if animal.curiosity_level > 0.8 && player_dist < investigate_distance {
+                // Very curious and close - start circling
+                BehaviorState::Curious(CuriousState::Circling)
+            } else if animal.curiosity_level < 0.4 {
+                // Lost some interest - go back to watching
+                BehaviorState::Curious(CuriousState::Watching)
+            } else {
+                // Move toward investigate distance
+                let toward_player = (ctx.player_pos - animal.position).normalize_or_zero();
+                animal.target = Some(Target::Position(
+                    ctx.player_pos - toward_player * investigate_distance,
+                ));
+                BehaviorState::Curious(CuriousState::Investigating)
+            }
+        }
+
+        CuriousState::Circling => {
+            // Circle around the player at close range
+            let circle_dist = 8.0;
+            animal.look_at(ctx.player_pos);
+
+            // Calculate circle position
+            let circle_pos = calculate_circle_position(
+                animal.position,
+                ctx.player_pos,
+                circle_dist,
+                stats.speed * 0.5,
+                ctx.dt,
+            );
+            animal.target = Some(Target::Position(circle_pos));
+
+            if animal.curiosity_level > 0.95 && player_speed < 2.0 {
+                // Maximum curiosity and player is still - approach for sniffing
+                BehaviorState::Curious(CuriousState::Sniffing)
+            } else if animal.curiosity_level < 0.5 {
+                // Back off to investigating
+                BehaviorState::Curious(CuriousState::Investigating)
+            } else {
+                BehaviorState::Curious(CuriousState::Circling)
+            }
+        }
+
+        CuriousState::Sniffing => {
+            // Very close, sniffing the player - potential taming moment
+            let sniff_distance = 4.0;
+            animal.look_at(ctx.player_pos);
+
+            if player_dist > sniff_distance * 2.0 {
+                // Player moved away
+                BehaviorState::Curious(CuriousState::Circling)
+            } else if player_speed > 4.0 {
+                // Player moving too fast
+                BehaviorState::Curious(CuriousState::Watching)
+            } else {
+                // Stay close, this is the taming opportunity
+                let toward_player = (ctx.player_pos - animal.position).normalize_or_zero();
+                animal.target = Some(Target::Position(
+                    ctx.player_pos - toward_player * sniff_distance,
+                ));
+
+                // Increase taming progress while sniffing
+                animal.advance_taming(0.01 * ctx.dt);
+
+                BehaviorState::Curious(CuriousState::Sniffing)
+            }
+        }
+    }
+}
+
+/// Wolf pair behavior - usually flee, sometimes aggressive
+/// Pairs are skittish but can be dangerous if they decide to attack
+fn update_wolf_pair_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
+    let stats = animal.species.base_stats();
+    let to_player = ctx.player_pos - animal.position;
+    let player_dist = to_player.length();
+    let player_in_detection = player_dist < stats.detection_range;
+
+    // Check flee/attack threshold
+    // flee_chance_roll < 0.7 = flee (70%), >= 0.7 = aggressive (30%)
+    let should_flee = animal.flee_chance_roll < 0.7;
+
+    // Flee condition check
+    if animal.current_health <= animal.species.flee_health() && animal.is_alive() {
+        animal.behavior_state = BehaviorState::Flee(FleeState::Running);
+        animal.target = Some(Target::FleeFrom(ctx.player_pos));
+        execute_state(animal, ctx);
+        return;
+    }
+
+    // Update awareness
+    update_awareness(animal, player_in_detection, ctx.dt);
+
+    let new_state = match animal.behavior_state {
+        BehaviorState::Idle => {
+            if player_in_detection && animal.awareness > 0.5 {
+                if should_flee {
+                    // Pair decides to flee
+                    animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                    BehaviorState::Flee(FleeState::Running)
+                } else {
+                    // Pair decides to be aggressive
+                    animal.target = Some(Target::Player);
+                    BehaviorState::Alert(AlertState::Warning)
+                }
+            } else if rand_chance(0.01 * ctx.dt) {
+                BehaviorState::Patrol
+            } else {
+                BehaviorState::Idle
+            }
+        }
+
+        BehaviorState::Patrol => {
+            if player_in_detection && animal.awareness > 0.3 {
+                if should_flee {
+                    BehaviorState::Alert(AlertState::Looking)
+                } else {
+                    BehaviorState::Alert(AlertState::Warning)
+                }
+            } else {
+                BehaviorState::Patrol
+            }
+        }
+
+        BehaviorState::Alert(alert_state) => {
+            if animal.awareness > 0.8 {
+                if should_flee {
+                    animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                    BehaviorState::Flee(FleeState::Running)
+                } else {
+                    // Aggressive pair attacks
+                    animal.target = Some(Target::Player);
+                    BehaviorState::Pursue(PursueState::Chasing)
+                }
+            } else if animal.awareness < 0.2 {
+                BehaviorState::Idle
+            } else {
+                BehaviorState::Alert(alert_state)
+            }
+        }
+
+        BehaviorState::Flee(FleeState::Running) => {
+            if player_dist > stats.detection_range * 3.0 {
+                // Escaped far enough
+                BehaviorState::Flee(FleeState::Hiding)
+            } else {
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            }
+        }
+
+        BehaviorState::Flee(FleeState::Hiding) => {
+            animal.awareness = (animal.awareness - 0.1 * ctx.dt).max(0.0);
+            if animal.awareness < 0.1 {
+                BehaviorState::Idle
+            } else if player_dist < stats.detection_range {
+                BehaviorState::Flee(FleeState::Running)
+            } else {
+                BehaviorState::Flee(FleeState::Hiding)
+            }
+        }
+
+        // Fall through to standard behavior for attack states
+        _ => {
+            update_behavior(animal, ctx);
+            return;
+        }
+    };
+
+    animal.behavior_state = new_state;
+    execute_state(animal, ctx);
 }

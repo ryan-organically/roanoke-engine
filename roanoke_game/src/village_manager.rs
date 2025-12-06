@@ -8,6 +8,11 @@
 //!
 //! NPC orb instances are cached and only recomputed when positions change.
 //! This eliminates per-frame matrix generation for 80+ NPCs.
+//!
+//! # NPC Movement System
+//!
+//! NPCs follow schedule-based paths within their village, creating a
+//! living, breathing settlement experience.
 
 use glam::{Vec3, Mat4};
 use croatoan_wfc::{
@@ -19,13 +24,60 @@ use croatoan_procgen::{VillageRecipe, VillageId, generate_village, LonghouseStyl
 /// NPC orb instance data type for GPU upload
 pub type NpcOrbInstance = ([f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 3], f32);
 
-/// NPC orb data for rendering
+/// NPC schedule activity
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NpcActivity {
+    Sleeping,
+    Working,
+    Eating,
+    Socializing,
+    Patrolling,
+    Praying,
+    Gathering,
+}
+
+impl NpcActivity {
+    /// Get movement speed multiplier for activity
+    pub fn speed_mult(&self) -> f32 {
+        match self {
+            Self::Sleeping => 0.0,
+            Self::Working => 0.3,
+            Self::Eating => 0.0,
+            Self::Socializing => 0.5,
+            Self::Patrolling => 0.8,
+            Self::Praying => 0.0,
+            Self::Gathering => 0.6,
+        }
+    }
+}
+
+/// NPC orb data for rendering with movement
 #[derive(Debug, Clone)]
 pub struct NpcOrb {
     pub position: Vec3,
     pub color: [f32; 3],
     pub name: String,
     pub role: String,
+    // Movement data
+    pub home_position: Vec3,
+    pub target_position: Vec3,
+    pub velocity: Vec3,
+    pub current_activity: NpcActivity,
+    pub activity_time: f32,
+    pub walk_timer: f32,
+    // For communication beams
+    pub awareness_target: Option<usize>, // Index of NPC they're aware of
+    pub emissive: f32,
+}
+
+/// Communication beam between NPCs (visual dialogue)
+#[derive(Debug, Clone)]
+pub struct CommunicationBeam {
+    pub from_idx: usize,
+    pub to_idx: usize,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub lifetime: f32,
 }
 
 /// Manages all villages in the world
@@ -38,6 +90,12 @@ pub struct VillageManager {
     initialized: bool,
     /// NPC orbs for visualization
     pub npc_orbs: Vec<NpcOrb>,
+    /// Communication beams between NPCs
+    pub communication_beams: Vec<CommunicationBeam>,
+    /// Current game hour (0-24) for schedules
+    current_hour: f32,
+    /// Village center for reference
+    village_center: Vec3,
 
     // ========================================================================
     // FPS OPTIMIZATION: Instance Cache System
@@ -56,6 +114,9 @@ impl VillageManager {
             seed,
             initialized: false,
             npc_orbs: Vec::new(),
+            communication_beams: Vec::new(),
+            current_hour: 8.0,
+            village_center: Vec3::ZERO,
             cached_instances: Vec::new(),
             instances_dirty: true,
         }
@@ -176,11 +237,15 @@ impl VillageManager {
     /// Add NPC orbs from a village for visualization
     /// Uses NPC positions stored in NpcData.position (Vec2: x, z)
     fn add_village_npcs_as_orbs(&mut self, village: &WorldVillage) {
-        for npc in &village.layout.npcs {
+        // Store village center for movement calculations
+        self.village_center = village.center;
+
+        for (idx, npc) in village.layout.npcs.iter().enumerate() {
             // Use NPC's stored position (Vec2 with x, y representing world x, z)
             let npc_x = npc.position.x;
             let npc_z = npc.position.y; // Vec2.y is world Z coordinate
             let (height, _) = get_height_at(npc_x, npc_z, self.seed);
+            let pos = Vec3::new(npc_x, height + 1.5, npc_z);
 
             // Color based on role
             let color = match npc.role {
@@ -195,11 +260,30 @@ impl VillageManager {
                 croatoan_procgen::NpcRole::Villager => [0.5, 0.5, 0.4],  // Tan
             };
 
+            // Determine initial activity based on role
+            let initial_activity = match npc.role {
+                croatoan_procgen::NpcRole::Warrior => NpcActivity::Patrolling,
+                croatoan_procgen::NpcRole::Hunter => NpcActivity::Gathering,
+                croatoan_procgen::NpcRole::Farmer => NpcActivity::Working,
+                croatoan_procgen::NpcRole::Chief | croatoan_procgen::NpcRole::Elder => NpcActivity::Socializing,
+                croatoan_procgen::NpcRole::Shaman => NpcActivity::Praying,
+                croatoan_procgen::NpcRole::Child => NpcActivity::Socializing,
+                _ => NpcActivity::Working,
+            };
+
             self.npc_orbs.push(NpcOrb {
-                position: Vec3::new(npc_x, height + 1.5, npc_z),
+                position: pos,
                 color,
                 name: npc.name.clone(),
                 role: format!("{:?}", npc.role),
+                home_position: pos,
+                target_position: pos,
+                velocity: Vec3::ZERO,
+                current_activity: initial_activity,
+                activity_time: (idx as f32 * 0.7) % 30.0, // Stagger activity timers
+                walk_timer: idx as f32 * 0.3, // Stagger walking
+                awareness_target: None,
+                emissive: 0.3,
             });
         }
 
@@ -340,7 +424,7 @@ impl VillageManager {
                 cols[2],
                 cols[3],
                 orb.color,
-                0.5, // Emissive intensity
+                orb.emissive, // Dynamic emissive from NPC state
             ));
         }
     }
@@ -402,6 +486,275 @@ impl VillageManager {
 
         format!("{} villages, {} longhouses, {} fire pits, {} NPCs",
             self.villages.len(), total_longhouses, total_fire_pits, self.npc_orbs.len())
+    }
+
+    // ========================================================================
+    // NPC Movement and Communication System
+    // ========================================================================
+
+    /// Update NPC positions, activities, and communication beams
+    /// Call this every frame with delta time and current game hour
+    pub fn update(&mut self, dt: f32, game_hour: f32, player_pos: Vec3) {
+        self.current_hour = game_hour;
+
+        // Update communication beam lifetimes
+        self.communication_beams.retain_mut(|beam| {
+            beam.lifetime -= dt;
+            beam.intensity = (beam.lifetime / 3.0).clamp(0.0, 1.0);
+            beam.lifetime > 0.0
+        });
+
+        // Skip if no NPCs
+        if self.npc_orbs.is_empty() {
+            return;
+        }
+
+        let npc_count = self.npc_orbs.len();
+        let base_speed = 2.5; // Units per second
+
+        // First pass: Update activity and pick new targets
+        for idx in 0..npc_count {
+            // Get needed values first (avoiding borrow issues)
+            let role = self.npc_orbs[idx].role.clone();
+            let home_position = self.npc_orbs[idx].home_position;
+            let position = self.npc_orbs[idx].position;
+            let target_position = self.npc_orbs[idx].target_position;
+            let current_activity = self.npc_orbs[idx].current_activity;
+            let walk_timer = self.npc_orbs[idx].walk_timer;
+
+            // Update activity timer
+            self.npc_orbs[idx].activity_time += dt;
+            self.npc_orbs[idx].walk_timer += dt;
+
+            // Determine activity based on time of day
+            let new_activity = self.get_activity_for_hour(game_hour, &role);
+            if current_activity != new_activity {
+                self.npc_orbs[idx].current_activity = new_activity;
+                self.npc_orbs[idx].activity_time = 0.0;
+            }
+
+            // Pick new target periodically or when arrived
+            let dist_to_target = position.distance(target_position);
+            let should_pick_target = dist_to_target < 1.0 || walk_timer > 8.0;
+            let activity_for_target = self.npc_orbs[idx].current_activity;
+
+            if should_pick_target && activity_for_target.speed_mult() > 0.0 {
+                self.npc_orbs[idx].walk_timer = 0.0;
+
+                // Pick target based on activity
+                let new_target = self.pick_target_for_activity(
+                    idx,
+                    activity_for_target,
+                    home_position,
+                );
+                self.npc_orbs[idx].target_position = new_target;
+            }
+
+            // Calculate movement toward target
+            let to_target = self.npc_orbs[idx].target_position - position;
+            let dist = to_target.length();
+            let speed_mult = self.npc_orbs[idx].current_activity.speed_mult();
+
+            if dist > 0.5 && speed_mult > 0.0 {
+                let direction = to_target / dist;
+                let speed = base_speed * speed_mult;
+                self.npc_orbs[idx].velocity = direction * speed;
+            } else {
+                self.npc_orbs[idx].velocity = Vec3::ZERO;
+            }
+        }
+
+        // Second pass: Apply movement and check for nearby interactions
+        let mut new_beams: Vec<CommunicationBeam> = Vec::new();
+
+        for idx in 0..npc_count {
+            // Apply velocity
+            let vel = self.npc_orbs[idx].velocity;
+            if vel.length_squared() > 0.01 {
+                self.npc_orbs[idx].position += vel * dt;
+
+                // Keep height correct
+                let (h, _) = get_height_at(
+                    self.npc_orbs[idx].position.x,
+                    self.npc_orbs[idx].position.z,
+                    self.seed,
+                );
+                self.npc_orbs[idx].position.y = h + 1.5;
+            }
+
+            // Check for nearby NPCs to create communication beams
+            // Only check every few frames to save performance (use walk_timer as proxy)
+            if self.npc_orbs[idx].walk_timer < 0.5 {
+                for other_idx in (idx + 1)..npc_count {
+                    let pos_a = self.npc_orbs[idx].position;
+                    let pos_b = self.npc_orbs[other_idx].position;
+                    let dist = pos_a.distance(pos_b);
+
+                    // Close NPCs may interact
+                    if dist < 8.0 && dist > 1.0 {
+                        // Both must be in social activities
+                        let act_a = self.npc_orbs[idx].current_activity;
+                        let act_b = self.npc_orbs[other_idx].current_activity;
+
+                        let can_interact = matches!(
+                            (act_a, act_b),
+                            (NpcActivity::Socializing, NpcActivity::Socializing)
+                                | (NpcActivity::Working, NpcActivity::Working)
+                                | (NpcActivity::Eating, NpcActivity::Eating)
+                        );
+
+                        if can_interact {
+                            // Blend colors for beam
+                            let color_a = self.npc_orbs[idx].color;
+                            let color_b = self.npc_orbs[other_idx].color;
+                            let beam_color = [
+                                (color_a[0] + color_b[0]) * 0.5,
+                                (color_a[1] + color_b[1]) * 0.5,
+                                (color_a[2] + color_b[2]) * 0.5,
+                            ];
+
+                            // Check if beam already exists
+                            let beam_exists = self.communication_beams.iter().any(|b| {
+                                (b.from_idx == idx && b.to_idx == other_idx)
+                                    || (b.from_idx == other_idx && b.to_idx == idx)
+                            });
+
+                            if !beam_exists {
+                                new_beams.push(CommunicationBeam {
+                                    from_idx: idx,
+                                    to_idx: other_idx,
+                                    color: beam_color,
+                                    intensity: 1.0,
+                                    lifetime: 3.0,
+                                });
+
+                                // Update awareness targets
+                                self.npc_orbs[idx].awareness_target = Some(other_idx);
+                                self.npc_orbs[other_idx].awareness_target = Some(idx);
+
+                                // Increase emissive when communicating
+                                self.npc_orbs[idx].emissive = 0.6;
+                                self.npc_orbs[other_idx].emissive = 0.6;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Decay emissive
+            self.npc_orbs[idx].emissive = (self.npc_orbs[idx].emissive - dt * 0.1).max(0.3);
+        }
+
+        // Add new beams
+        self.communication_beams.extend(new_beams);
+
+        // Player proximity awareness - NPCs notice player
+        for idx in 0..npc_count {
+            let dist_to_player = self.npc_orbs[idx].position.distance(player_pos);
+            if dist_to_player < 15.0 {
+                // NPC notices player - glow slightly
+                self.npc_orbs[idx].emissive = 0.5;
+            }
+        }
+
+        // Mark instances dirty so rendering updates
+        self.instances_dirty = true;
+    }
+
+    /// Get appropriate activity for the hour based on role
+    fn get_activity_for_hour(&self, hour: f32, role: &str) -> NpcActivity {
+        // Night time (22:00 - 6:00)
+        if hour >= 22.0 || hour < 6.0 {
+            return NpcActivity::Sleeping;
+        }
+
+        // Early morning (6:00 - 8:00)
+        if hour < 8.0 {
+            return NpcActivity::Eating;
+        }
+
+        // Work hours (8:00 - 17:00)
+        if hour < 17.0 {
+            return match role {
+                "Warrior" => NpcActivity::Patrolling,
+                "Hunter" => NpcActivity::Gathering,
+                "Shaman" => NpcActivity::Praying,
+                "Child" => NpcActivity::Socializing,
+                _ => NpcActivity::Working,
+            };
+        }
+
+        // Evening (17:00 - 20:00)
+        if hour < 20.0 {
+            return NpcActivity::Eating;
+        }
+
+        // Late evening (20:00 - 22:00)
+        NpcActivity::Socializing
+    }
+
+    /// Pick a target position based on current activity
+    fn pick_target_for_activity(&self, _npc_idx: usize, activity: NpcActivity, home: Vec3) -> Vec3 {
+        // Simple hash for pseudo-random offset
+        let time_hash = (self.current_hour * 1000.0) as u64;
+        let hash = time_hash.wrapping_mul(0x517cc1b727220a95);
+        let rand_x = ((hash >> 32) as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let rand_z = ((hash & 0xFFFFFFFF) as f32 / u32::MAX as f32) * 2.0 - 1.0;
+
+        match activity {
+            NpcActivity::Sleeping => home, // Stay at home
+            NpcActivity::Working => {
+                // Move around near home
+                home + Vec3::new(rand_x * 10.0, 0.0, rand_z * 10.0)
+            }
+            NpcActivity::Eating => {
+                // Move toward village center (fire pit area)
+                let toward_center = (self.village_center - home).normalize_or_zero();
+                home + toward_center * 15.0 + Vec3::new(rand_x * 5.0, 0.0, rand_z * 5.0)
+            }
+            NpcActivity::Socializing => {
+                // Move toward village center
+                let toward_center = (self.village_center - home).normalize_or_zero();
+                home + toward_center * 20.0 + Vec3::new(rand_x * 8.0, 0.0, rand_z * 8.0)
+            }
+            NpcActivity::Patrolling => {
+                // Circle around village perimeter
+                let angle = self.current_hour * 0.3;
+                let radius = 40.0;
+                self.village_center + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius)
+            }
+            NpcActivity::Praying => {
+                // Stay near prayer site (offset from center)
+                self.village_center + Vec3::new(30.0 + rand_x * 5.0, 0.0, 30.0 + rand_z * 5.0)
+            }
+            NpcActivity::Gathering => {
+                // Wander outward from village
+                let angle = self.current_hour * 0.5 + rand_x;
+                let radius = 50.0 + rand_z * 20.0;
+                self.village_center + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius)
+            }
+        }
+    }
+
+    /// Get communication beam render data
+    pub fn get_beam_render_data(&self) -> Vec<([f32; 3], [f32; 3], [f32; 3], f32)> {
+        self.communication_beams
+            .iter()
+            .filter_map(|beam| {
+                if beam.from_idx < self.npc_orbs.len() && beam.to_idx < self.npc_orbs.len() {
+                    let from = self.npc_orbs[beam.from_idx].position;
+                    let to = self.npc_orbs[beam.to_idx].position;
+                    Some((
+                        [from.x, from.y, from.z],
+                        [to.x, to.y, to.z],
+                        beam.color,
+                        beam.intensity,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 

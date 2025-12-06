@@ -10,10 +10,10 @@
 //! 3. **Lazy pack updates**: Only recalculate morale when members change
 //! 4. **Reduced query radius**: 25 units (was 50) - 4x fewer cell checks
 
-use super::behavior::{update_behavior, BehaviorContext, BehaviorState};
+use super::behavior::{update_behavior, update_wolf_behavior, BehaviorContext, BehaviorState};
 use super::entity::{Animal, AnimalId, PackId, Target};
 use super::spatial::SpatialHash;
-use super::types::{AnimalSpecies, Difficulty, TimeOfDay};
+use super::types::{AnimalSpecies, Difficulty, TimeOfDay, WolfGroupType};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -71,6 +71,30 @@ pub struct AnimalManager {
     frame_cache: FrameCache,
 }
 
+/// Wolf group tracking for specialized behavior
+#[derive(Debug)]
+pub struct WolfGroup {
+    pub pack_id: PackId,
+    pub group_type: WolfGroupType,
+    pub species: AnimalSpecies,
+    pub members: Vec<AnimalId>,
+    pub pair_flee_triggered: bool,  // For pairs: has flee been triggered?
+    pub pair_aggro_triggered: bool, // For pairs: has aggression been triggered?
+}
+
+impl WolfGroup {
+    pub fn new(pack_id: PackId, species: AnimalSpecies, group_type: WolfGroupType) -> Self {
+        Self {
+            pack_id,
+            group_type,
+            species,
+            members: Vec::new(),
+            pair_flee_triggered: false,
+            pair_aggro_triggered: false,
+        }
+    }
+}
+
 /// Pack of animals that coordinate behavior
 /// Uses lazy evaluation - only recalculates when dirty flag is set
 #[derive(Debug)]
@@ -85,6 +109,8 @@ pub struct Pack {
     dirty: bool,
     /// Cached member count for change detection
     last_member_count: usize,
+    /// Wolf group type if this is a wolf pack
+    pub wolf_group_type: Option<WolfGroupType>,
 }
 
 impl Pack {
@@ -97,6 +123,20 @@ impl Pack {
             morale: 1.0,
             dirty: true,
             last_member_count: 0,
+            wolf_group_type: None,
+        }
+    }
+
+    fn new_wolf_group(id: PackId, species: AnimalSpecies, group_type: WolfGroupType) -> Self {
+        Self {
+            id,
+            species,
+            members: Vec::new(),
+            alpha: None,
+            morale: 1.0,
+            dirty: true,
+            last_member_count: 0,
+            wolf_group_type: Some(group_type),
         }
     }
 
@@ -219,6 +259,58 @@ impl AnimalManager {
         id
     }
 
+    /// Create a wolf group with specific behavior type
+    pub fn create_wolf_group(&mut self, species: AnimalSpecies, group_type: WolfGroupType) -> PackId {
+        let id = PackId(self.next_pack_id);
+        self.next_pack_id += 1;
+        self.packs.insert(id, Pack::new_wolf_group(id, species, group_type));
+        id
+    }
+
+    /// Spawn a wolf with group-specific behavior
+    pub fn spawn_wolf(
+        &mut self,
+        species: AnimalSpecies,
+        position: Vec3,
+        chunk: (i32, i32),
+        pack_id: Option<PackId>,
+        group_type: WolfGroupType,
+    ) -> AnimalId {
+        let id = AnimalId(self.next_id);
+        self.next_id += 1;
+
+        // Calculate health with difficulty modifier
+        let base_health = species.base_stats().health;
+        let modified_health = base_health * self.difficulty.health_multiplier();
+
+        // Generate flee roll for pair behavior (70% flee, 30% aggressive)
+        let flee_roll = (id.0 as f32 * 0.618033988749895) % 1.0; // Golden ratio hash
+
+        let mut animal = Animal::new_wolf(
+            id,
+            species,
+            position,
+            modified_health,
+            chunk,
+            group_type,
+            flee_roll,
+        );
+        animal.pack_id = pack_id;
+
+        // Add to pack if specified
+        if let Some(pack_id) = pack_id {
+            if let Some(pack) = self.packs.get_mut(&pack_id) {
+                pack.members.push(id);
+            }
+        }
+
+        self.spatial.insert(id, position);
+        self.animals.insert(id, animal);
+        self.total_spawned += 1;
+
+        id
+    }
+
     /// Despawn an animal
     pub fn despawn(&mut self, id: AnimalId) {
         if let Some(animal) = self.animals.remove(&id) {
@@ -319,7 +411,12 @@ impl AnimalManager {
             // Update behavior
             if let Some(animal) = self.animals.get_mut(&id) {
                 if animal.is_alive() {
-                    update_behavior(animal, &ctx);
+                    // Use wolf-specific behavior for wolves with group types
+                    if animal.wolf_group_type.is_some() {
+                        update_wolf_behavior(animal, &ctx);
+                    } else {
+                        update_behavior(animal, &ctx);
+                    }
 
                     // Update cooldowns and effects
                     animal.update_cooldowns(dt);

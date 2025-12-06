@@ -23,16 +23,18 @@ struct GrassVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],      // 64 bytes (0-64)
+    view_proj: [[f32; 4]; 4],       // 64 bytes (0-64)
     light_view_proj: [[f32; 4]; 4], // 64 bytes (64-128)
     time: f32,                      // 4 bytes (128-132)
-    _padding1: [f32; 3],            // 12 bytes (132-144)
-    sun_dir: [f32; 3],              // 12 bytes (144-156)
-    fog_density: f32,               // 4 bytes (156-160)
-    view_pos: [f32; 3],             // 12 bytes (160-172)
-    fog_start: f32,                 // 4 bytes (172-176)
-    fog_color: [f32; 3],            // 12 bytes (176-188)
-    fog_end: f32,                   // 4 bytes (188-192) -> Total 192 bytes (aligned to 16)
+    _gap1: [f32; 3],                // 12 bytes (132-144) - align _padding1 to 16-byte
+    _padding1: [f32; 3],            // 12 bytes (144-156)
+    _gap2: f32,                     // 4 bytes (156-160) - align sun_dir to 16-byte
+    sun_dir: [f32; 3],              // 12 bytes (160-172)
+    fog_density: f32,               // 4 bytes (172-176)
+    view_pos: [f32; 3],             // 12 bytes (176-188)
+    fog_start: f32,                 // 4 bytes (188-192)
+    fog_color: [f32; 3],            // 12 bytes (192-204)
+    fog_end: f32,                   // 4 bytes (204-208)
 }
 
 pub struct GrassPipeline {
@@ -288,7 +290,9 @@ impl GrassPipeline {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
             time,
+            _gap1: [0.0; 3],
             _padding1: [0.0; 3],
+            _gap2: 0.0,
             sun_dir,
             fog_density,
             view_pos,

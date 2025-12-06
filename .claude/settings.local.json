@@ -48,7 +48,10 @@
       "Bash(cargo fix:*)",
       "Bash(1)",
       "Bash(wc:*)",
-      "Bash(xargs ls:*)"
+      "Bash(xargs ls:*)",
+      "Bash(done)",
+      "Bash(fi)",
+      "Bash(du:*)"
     ],
     "deny": [],
     "ask": []

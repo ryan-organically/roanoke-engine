@@ -1,153 +1,254 @@
 # Roanoke Engine - Development Log
 
-A procedural 3D game engine built in Rust with wgpu, focusing on Git-friendly asset generation.
+**Last Updated**: 2024-12-06
+**Version**: v0.0.2-dev
+
+A procedural 3D open-world game engine built in Rust with wgpu, set in 1580s Virginia.
+
+---
 
 ## Project Overview
 
 **Stack:** Rust, wgpu 0.19, winit 0.29, glam, egui
-**Lines of Code:** ~5,000 (excluding generated/target)
-**Development Time:** ~12 hours
+**Lines of Code:** ~61,000+ (excluding generated/target)
+**Status:** Active Development
+
+---
 
 ## Architecture
 
 ```
-roanoke_game/              Main game executable (~1000 lines)
-  ├── main.rs              Game loop, rendering, UI
-  ├── player.rs            Player movement (67 lines)
-  └── chunk_manager.rs     Chunk streaming infrastructure (140 lines)
+roanoke_game/src/           (~45,000 lines)
+├── main.rs                 Game loop, rendering, UI
+├── game_state.rs           Shared state management
+├── village_manager.rs      Village streaming & NPC tracking
+├── audio_system.rs         Audio playback
+├── procedural_synth.rs     Procedural audio generation
+├── safe_ops.rs             Safe math operations
+├── systems_manager.rs      System orchestration
+├── data_pipeline.rs        Data flow management
+│
+├── animals/                Dangerous wildlife system
+│   ├── manager.rs          Quantum Spatial Cache (O(n) queries)
+│   ├── behavior.rs         Hierarchical FSM AI
+│   ├── spawner.rs          Chunk-based procedural spawning
+│   ├── combat.rs           Damage processing
+│   ├── spatial.rs          Spatial hashing
+│   └── types.rs            10 species definitions
+│
+├── npc/                    NPC & village inhabitants
+│   ├── npc_manager.rs      Central orchestration
+│   ├── dialogue.rs         Branching dialogue trees
+│   ├── relationships.rs    Memory & disposition tracking
+│   └── trading.rs          Trade inventories & bartering
+│
+├── flora/                  Plant system
+│   ├── growth.rs           Plant lifecycle
+│   ├── harvest.rs          Harvesting mechanics
+│   └── medicinal.rs        Medicinal plant effects
+│
+├── economy/                Economic system
+│   ├── currency.rs         Wampum/Tobacco dual currency
+│   ├── inventory.rs        Item storage
+│   ├── item.rs             Item definitions
+│   ├── loot.rs             Loot tables
+│   └── drops.rs            Drop mechanics
+│
+├── progression/            Player progression
+│   ├── skills.rs           Skill trees
+│   ├── faction.rs          Faction definitions
+│   ├── faction_manager.rs  Reputation tracking
+│   ├── quests.rs           Quest system
+│   └── player_state.rs     Player data
+│
+├── ecology/                Ecological simulation
+│   ├── population.rs       Animal populations
+│   ├── habitat.rs          Habitat management
+│   └── consequences.rs     Player action effects
+│
+├── naval/                  Ship & naval combat
+│   ├── ships.rs            Ship definitions
+│   ├── sailing.rs          Sailing mechanics
+│   ├── combat.rs           Naval combat
+│   └── crew.rs             Crew management
+│
+├── weather/                Weather system
+│   ├── storms.rs           Storm generation
+│   └── effects.rs          Weather effects
+│
+└── encyclopedia/           Discovery tracking
+    ├── entries.rs          Encyclopedia entries
+    └── observer.rs         Discovery detection
 
-crates/
-  croatoan_core/           Window/event handling
-  croatoan_render/         GPU pipelines (~1,400 lines)
-    ├── terrain_pipeline.rs
-    ├── grass_pipeline.rs
-    ├── tree_pipeline.rs
-    ├── shadows.rs
-    ├── frustum.rs         Frustum culling (NEW)
-    └── sky_pipeline.rs
-  croatoan_wfc/            World generation (~620 lines)
-    ├── mesh_gen.rs        Terrain mesh
-    ├── vegetation.rs      Grass placement
-    └── trees.rs           Tree placement
-  croatoan_procgen/        Procedural generation (~580 lines)
-    └── tree.rs            L-System trees
-  croatoan_neural/         (Placeholder for AI)
+crates/                     (~16,500 lines)
+├── croatoan_core/          Window/event handling
+│
+├── croatoan_render/        GPU pipelines
+│   ├── terrain_pipeline.rs Terrain rendering
+│   ├── grass_pipeline.rs   Grass with wind
+│   ├── tree_pipeline.rs    Tree instancing
+│   ├── building_pipeline.rs Building rendering
+│   ├── animal_orb_pipeline.rs Animal visualization
+│   ├── shadows.rs          Shadow mapping
+│   ├── frustum.rs          Frustum culling
+│   ├── sky_pipeline.rs     Sky rendering
+│   └── light_shaft_pipeline.rs God rays
+│
+├── croatoan_wfc/           World generation
+│   ├── mesh_gen.rs         Terrain mesh
+│   ├── biome.rs            Biome definitions
+│   ├── biome_spawner.rs    Biome-based spawning
+│   ├── vegetation.rs       Grass placement
+│   ├── trees.rs            Tree placement
+│   ├── rocks.rs            Rock placement
+│   ├── villages.rs         Village world integration
+│   ├── rivers.rs           River generation
+│   ├── caves.rs            Cave generation
+│   └── terrain.rs          Terrain generation
+│
+├── croatoan_procgen/       Procedural generation
+│   ├── tree.rs             L-System trees
+│   ├── grass.rs            Grass geometry
+│   ├── rock.rs             Rock meshes
+│   ├── longhouse.rs        Longhouse generation
+│   ├── npc.rs              NPC appearance generation
+│   └── village.rs          Village layout
+│
+└── croatoan_neural/        (Placeholder)
 
-assets/shaders/
-  ├── terrain.wgsl         Dynamic lighting, shadows, fog
-  ├── grass.wgsl           Wind animation, shadows
-  ├── tree.wgsl
-  └── sky.wgsl
+assets/shaders/             (~15 WGSL files)
+├── terrain.wgsl            Terrain with lighting, shadows, fog
+├── grass.wgsl              Wind animation, shadows
+├── tree.wgsl               Tree rendering with fog
+├── sky.wgsl                Sky gradient, clouds
+├── water.wgsl              Water surface
+├── water_compute.wgsl      Wave simulation
+├── light_shafts.wgsl       God rays post-process
+├── building.wgsl           Building rendering
+├── animal_orb.wgsl         Animal visualization
+└── detritus.wgsl           Ground clutter
 ```
+
+---
 
 ## Implemented Systems
 
-### Terrain Generation
-- Noise-based heightmap (Perlin/FBM)
-- Biome zones: Ocean → Beach → Scrubland → Forest
-- 25 chunks (5x5 grid), 256 units each = 1.28km² world
-- Background thread generation with progressive loading
+### Core Engine
+- Chunked terrain streaming with LOD
+- Dynamic time-of-day (T/Y keys)
+- Weather system (5 types: Clear, PartlyCloudy, Overcast, Stormy, Foggy)
+- Save/load system (JSON)
+- First-person camera with collision
+- egui-based UI
 
-### Vegetation System
-- **Grass:** Curved ribbon geometry, biome-density based (10-100%)
-- **Trees:** L-System branching, 7 species (Oak, Pine, Willow, Birch, Palm, Maple, Spruce)
-- Per-chunk generation, automatic biome filtering
+### World Generation
+- Noise-based terrain (Perlin/FBM)
+- Biome system (Ocean, Beach, Grassland, Forest, Mountain, Swamp)
+- Native American longhouse villages (3 architectural styles)
+- Rivers and caves
+- Procedural vegetation (grass, trees, rocks)
+
+### NPC System
+- Village NPCs with roles (Chief, Shaman, Warrior, Hunter, etc.)
+- Daily schedules with hourly activities
+- Branching dialogue trees with faction checks
+- Trading with reputation requirements
+- Relationship and memory tracking
+
+### Animal System
+- 10 dangerous species with unique behaviors
+- Hierarchical FSM AI (Idle, Alert, Pursue, Attack, Flee)
+- Pack behavior for wolves
+- Quantum Spatial Cache for O(n) queries
+- Status effects (Bleeding, Poisoned, Stunned)
+
+### Economy System
+- Dual currency (Wampum + Tobacco)
+- Item provenance tracking
+- Loot tables with rarity
+- Trading mechanics
+
+### Progression
+- Skill trees (Hunting, Archaeology, etc.)
+- Faction reputation system
+- Quest infrastructure
 
 ### Rendering
 - Forward rendering with depth testing
-- **Dynamic time-of-day system** (T/Y keys to change)
-- **Directional sun lighting** with elevation-based color
-- **Shadow mapping** (2048x2048) with texel-snapped projection
-- **Frustum culling** - skip chunks outside camera view
-- **Distance LOD** - grass culled at 350u, trees at 600u
-- Fog system (400-800 unit range), color matches sky
-- Wind animation in grass shader
+- Shadow mapping (2048x2048) with texel snapping
+- Frustum culling (~50% fewer draw calls)
+- Distance-based LOD
+- God rays post-process
+- Fog system (atmosphere-driven)
 
-### Game Systems
-- Save/load system (JSON)
-- Main menu with seed input
-- First-person camera controls
-- Loading screen with progress
-- FPS and time display
-- **Sun & Moon Billboards** (Visual celestial bodies)
-
-## Technical Decisions
-
-### Procedural Generation Philosophy
-Instead of storing OBJ files (50MB+ each), store generation recipes (~500 bytes):
-- Tree recipe → Infinite tree variations
-- Grass recipe → Infinite blade variations
-- Result: Entire world in <50KB of recipes
-
-### Memory Management
-Original approach crashed (8.3GB buffer). Fixed by:
-- Reducing chunk count: 625 → 25
-- Per-chunk pipelines instead of global accumulation
-- L-System iterations: 6 → 3-4
-- Tree density: 0.02 → 0.001
-
-### Shadow Stability
-Shadow flickering fixed by:
-- Snapping light projection to texel grid
-- Using player position (not camera target) for shadow center
-- Adjusting depth bias (constant: 4, slope: 2.5)
+---
 
 ## Performance Optimizations
 
-| Optimization | Impact |
-|--------------|--------|
-| Frustum culling | ~50% fewer draw calls when looking at horizon |
-| Grass distance cull | Eliminates invisible grass beyond fog |
-| Tree distance cull | Reduces far-field rendering |
-| Texel-snapped shadows | Eliminates shadow swimming |
+### FPS Recovery (2024-12-05)
+| Issue | Solution | Impact |
+|-------|----------|--------|
+| O(n²) animal queries | Quantum Spatial Cache | 50-80% FPS gain |
+| Per-frame NPC buffer | Cached with dirty flags | 5-10% FPS gain |
+| SystemTime RNG | PCG hash-based PRNG | 2-5% FPS gain |
+| 247K tri trees | Simple 36-tri mesh | 2,600x reduction |
+| Query radius 50u | Reduced to 25u | 4x fewer cells |
 
-## Known Issues
+### Current Bottlenecks
+- Rock/pebbles: 78K instances/chunk (needs distance culling)
+- Fog: Only tints ground (needs atmospheric fix)
 
-### Still Needs Work
-- Grass doesn't cast shadows (vertex stride mismatch - intentional skip)
-- Full chunk streaming not integrated (infrastructure ready in chunk_manager.rs)
-- Tree collision detection not implemented
+---
 
-## Performance Targets
+## Development History
 
-| Metric | Current |
-|--------|---------|
-| Chunks | 25 (5x5) |
-| World Size | 1.28 km² |
-| Terrain vertices | ~105K |
-| Grass vertices | ~1.5M |
-| Tree vertices | ~300K |
-| Total VRAM | ~100MB |
-| Target FPS | 60 |
+### Foundation (2024-11)
+1. Initial terrain generation with noise
+2. Procedural grass system with wind
+3. L-System tree generation
+4. Shadow system implementation
+5. Frustum culling
+6. Distance-based LOD
+
+### Systems Expansion (2024-12)
+7. Animal system with 10 species
+8. Native American village generation
+9. NPC system with dialogue, trading, relationships
+10. Economy system with dual currency
+11. Flora/medicinal plant system
+12. Naval combat framework
+13. Faction and reputation system
+14. FPS optimization (Quantum Spatial Cache)
+15. Tree restoration (247K → 36 triangles)
+16. Documentation consolidation
+
+---
 
 ## How to Run
 
 ```bash
-cargo run -p roanoke_game --release
+cargo run --release
 ```
 
 **Controls:**
-- WASD: Move
-- Mouse: Look
-- Space: Jump
-- T: Advance time (+1 hour)
-- Y: Reverse time (-1 hour)
-- Enter seed → "New Game"
+| Key | Action |
+|-----|--------|
+| WASD | Move |
+| Mouse | Look |
+| Space | Jump |
+| T/Y | Time forward/back |
+| \ | Fog density |
+| Esc | Menu |
 
-## Development History
+---
 
-1. Initial terrain generation with noise
-2. Procedural grass system with wind animation
-3. L-System tree generation (7 species)
-4. Per-chunk vegetation with biome filtering
-5. Memory optimization (8.3GB crash fix)
-6. Shadow system implementation (partial)
-7. Loading screen with progress tracking
-8. **Dynamic directional lighting with elevation-based color**
-9. **Time-of-day system with keyboard controls**
-10. **Shadow stabilization (texel snapping)**
-11. **Frustum culling for chunks**
-12. **Distance-based LOD culling**
-13. **Dynamic sky/fog color based on time**
-14. **Chunk streaming infrastructure (ready for integration)**
-15. **Fully Procedural Tree Generation (L-Systems) replacing OBJ loading**
+## Documentation
+
+See `AGENT_DIRECTIVE.md` in project root for:
+- Current project state
+- Document navigation
+- Development workflow
+
+---
+
+*This log tracks major development milestones. For current status, see `docs/status/MASTER_AUDIT.md`.*

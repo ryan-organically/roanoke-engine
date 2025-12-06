@@ -294,6 +294,9 @@ impl SystemsManager {
             BehaviorState::Attack(_) => Some(BehaviorWitnessType::AttackingPrey),
             BehaviorState::Flee(_) => Some(BehaviorWitnessType::FleeingPredator),
             BehaviorState::Dead => None,
+            // Wolf-specific curious behavior - interesting to observe
+            BehaviorState::Curious(_) => Some(BehaviorWitnessType::PackCommunication),
+            BehaviorState::Approaching => None, // Just approaching, not a notable behavior
         }
     }
 

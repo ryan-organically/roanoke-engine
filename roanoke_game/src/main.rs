@@ -1429,6 +1429,10 @@ fn main() {
                 // Update game progression (quests, events, NPC schedules)
                 state.game_progression.update(delta, player_pos, player_vel, &faction_rep);
 
+                // Update village NPC movement and communication
+                let game_hour = (state.game_progression.game_time % 24.0) as f32;
+                state.village_manager.update(delta, game_hour, player_pos);
+
                 // Check for achievements
                 let game_time = state.game_progression.game_time;
                 let new_achievements = state.game_progression.player_progression.check_all_achievements(game_time);
@@ -3020,9 +3024,11 @@ fn main() {
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
-                // AGGRESSIVELY REDUCED for FPS optimization
-                let grass_max_distance = state.render_distance * 0.25;  // Grass only nearby (was 0.75)
-                let tree_max_distance = state.render_distance * 0.35; // Trees medium distance (was 0.5)
+                // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
+                // player can be up to 181 units from center (corner to center diagonal)
+                // Need at least 200+ to reliably see grass in current and adjacent chunks
+                let grass_max_distance = (state.render_distance * 0.8).max(200.0);  // Minimum 200 for visibility
+                let tree_max_distance = (state.render_distance * 0.7).max(180.0);   // Trees slightly farther
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 

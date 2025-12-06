@@ -86,8 +86,27 @@ impl AnimalSpawner {
 
             // Select species based on spawn rates
             if let Some(species) = self.select_species(&eligible, spawn_seed, &manager.difficulty) {
-                // Pack spawning
-                if let Some((min, max)) = species.pack_size() {
+                // Wolf-specific spawning with group types
+                if let Some(wolf_config) = species.wolf_group_config() {
+                    let group_roll = seeded_float(spawn_seed.wrapping_add(7919));
+                    let group_type = wolf_config.select_group_type(group_roll);
+                    let (min, max) = group_type.size_range();
+                    let pack_size = if min == max { min } else { seeded_range(spawn_seed, min, max) };
+
+                    // Create pack/group tracking
+                    let pack_id = manager.create_wolf_group(species, group_type);
+
+                    for i in 0..pack_size {
+                        let offset = Vec3::new(
+                            seeded_float(spawn_seed + i as u32 * 17) * 6.0 - 3.0,
+                            0.0,
+                            seeded_float(spawn_seed + i as u32 * 31) * 6.0 - 3.0,
+                        );
+                        let member_pos = spawn_pos + offset;
+                        manager.spawn_wolf(species, member_pos, (chunk_x, chunk_z), Some(pack_id), group_type);
+                    }
+                } else if let Some((min, max)) = species.pack_size() {
+                    // Non-wolf pack spawning
                     let pack_size = seeded_range(spawn_seed, min, max);
                     let pack_id = manager.create_pack(species);
 
