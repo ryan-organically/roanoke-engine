@@ -1,0 +1,444 @@
+{
+  "namespace": "com.roanoke.marketing.events",
+  "type": "record",
+  "name": "SocialEvent",
+  "doc": "Schema for social media events ingested from various platforms",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Unique identifier for this event (UUID v4)"
+    },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "SocialEventType",
+        "symbols": [
+          "MENTION",
+          "POST",
+          "COMMENT",
+          "SHARE",
+          "LIKE",
+          "FOLLOW",
+          "UNFOLLOW",
+          "MESSAGE",
+          "REACTION",
+          "HASHTAG_USE",
+          "VIDEO_VIEW",
+          "STREAM_START",
+          "STREAM_END"
+        ]
+      }
+    },
+    {
+      "name": "timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Event timestamp in milliseconds since epoch (UTC)"
+    },
+    {
+      "name": "ingestion_timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "When this event was ingested into our system"
+    },
+    {
+      "name": "platform",
+      "type": {
+        "type": "enum",
+        "name": "SocialPlatform",
+        "symbols": [
+          "TWITTER",
+          "TIKTOK",
+          "DISCORD",
+          "REDDIT",
+          "YOUTUBE",
+          "TWITCH",
+          "INSTAGRAM",
+          "FACEBOOK",
+          "STEAM",
+          "OTHER"
+        ]
+      }
+    },
+    {
+      "name": "platform_event_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Original event ID from the source platform"
+    },
+    {
+      "name": "author",
+      "type": {
+        "type": "record",
+        "name": "SocialAuthor",
+        "fields": [
+          {
+            "name": "platform_user_id",
+            "type": "string",
+            "doc": "User ID on the source platform"
+          },
+          {
+            "name": "username",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "display_name",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "follower_count",
+            "type": ["null", "long"],
+            "default": null
+          },
+          {
+            "name": "is_verified",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "account_created",
+            "type": ["null", {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            }],
+            "default": null
+          },
+          {
+            "name": "is_known_creator",
+            "type": "boolean",
+            "default": false,
+            "doc": "Whether this user is in our verified creator program"
+          },
+          {
+            "name": "creator_tier",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "Creator program tier if applicable (nano, micro, mid, macro)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "content",
+      "type": {
+        "type": "record",
+        "name": "SocialContent",
+        "fields": [
+          {
+            "name": "text",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "Text content (may be truncated for storage)"
+          },
+          {
+            "name": "text_hash",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "SHA-256 hash of full text for deduplication"
+          },
+          {
+            "name": "language",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "ISO 639-1 language code"
+          },
+          {
+            "name": "media_type",
+            "type": ["null", {
+              "type": "enum",
+              "name": "MediaType",
+              "symbols": ["TEXT", "IMAGE", "VIDEO", "AUDIO", "LINK", "MIXED"]
+            }],
+            "default": null
+          },
+          {
+            "name": "media_urls",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          },
+          {
+            "name": "hashtags",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          },
+          {
+            "name": "mentions",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          },
+          {
+            "name": "urls",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "engagement",
+      "type": {
+        "type": "record",
+        "name": "EngagementMetrics",
+        "fields": [
+          {
+            "name": "likes",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "shares",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "comments",
+            "type": "long",
+            "default": 0
+          },
+          {
+            "name": "views",
+            "type": ["null", "long"],
+            "default": null
+          },
+          {
+            "name": "reach",
+            "type": ["null", "long"],
+            "default": null
+          },
+          {
+            "name": "impressions",
+            "type": ["null", "long"],
+            "default": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "sentiment",
+      "type": {
+        "type": "record",
+        "name": "SentimentAnalysis",
+        "fields": [
+          {
+            "name": "score",
+            "type": ["null", "float"],
+            "default": null,
+            "doc": "Sentiment score from -1.0 (negative) to 1.0 (positive)"
+          },
+          {
+            "name": "magnitude",
+            "type": ["null", "float"],
+            "default": null,
+            "doc": "Sentiment magnitude/strength (0.0 to 1.0)"
+          },
+          {
+            "name": "label",
+            "type": ["null", {
+              "type": "enum",
+              "name": "SentimentLabel",
+              "symbols": ["VERY_NEGATIVE", "NEGATIVE", "NEUTRAL", "POSITIVE", "VERY_POSITIVE"]
+            }],
+            "default": null
+          },
+          {
+            "name": "model_version",
+            "type": ["null", "string"],
+            "default": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "classification",
+      "type": {
+        "type": "record",
+        "name": "ContentClassification",
+        "fields": [
+          {
+            "name": "is_roanoke_related",
+            "type": "boolean",
+            "default": true
+          },
+          {
+            "name": "topics",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": [],
+            "doc": "Detected topics (gameplay, lore, bug, suggestion, meme, etc.)"
+          },
+          {
+            "name": "is_meme",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "meme_template",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "Identified meme template if applicable"
+          },
+          {
+            "name": "is_user_generated_content",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "content_quality_score",
+            "type": ["null", "float"],
+            "default": null,
+            "doc": "AI-assessed quality score (0.0 to 1.0)"
+          },
+          {
+            "name": "requires_response",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "priority",
+            "type": {
+              "type": "enum",
+              "name": "ResponsePriority",
+              "symbols": ["LOW", "MEDIUM", "HIGH", "URGENT"]
+            },
+            "default": "LOW"
+          }
+        ]
+      }
+    },
+    {
+      "name": "campaign_attribution",
+      "type": ["null", {
+        "type": "record",
+        "name": "CampaignAttribution",
+        "fields": [
+          {
+            "name": "campaign_id",
+            "type": "string"
+          },
+          {
+            "name": "campaign_name",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "attribution_type",
+            "type": {
+              "type": "enum",
+              "name": "AttributionType",
+              "symbols": ["DIRECT", "HASHTAG", "INFLUENCER", "PAID", "ORGANIC"]
+            }
+          },
+          {
+            "name": "confidence",
+            "type": "float",
+            "doc": "Attribution confidence (0.0 to 1.0)"
+          }
+        ]
+      }],
+      "default": null
+    },
+    {
+      "name": "context",
+      "type": {
+        "type": "record",
+        "name": "EventContext",
+        "fields": [
+          {
+            "name": "parent_event_id",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "ID of parent event (for replies, quotes, etc.)"
+          },
+          {
+            "name": "thread_id",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "channel_id",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "Discord channel, subreddit, etc."
+          },
+          {
+            "name": "channel_name",
+            "type": ["null", "string"],
+            "default": null
+          },
+          {
+            "name": "is_reply",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "is_quote",
+            "type": "boolean",
+            "default": false
+          },
+          {
+            "name": "geo_location",
+            "type": ["null", "string"],
+            "default": null,
+            "doc": "Geographic location if available (country code)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "processing_metadata",
+      "type": {
+        "type": "record",
+        "name": "ProcessingMetadata",
+        "fields": [
+          {
+            "name": "pipeline_version",
+            "type": "string"
+          },
+          {
+            "name": "schema_version",
+            "type": "string",
+            "default": "1.0.0"
+          },
+          {
+            "name": "processing_timestamp",
+            "type": {
+              "type": "long",
+              "logicalType": "timestamp-millis"
+            }
+          },
+          {
+            "name": "data_quality_flags",
+            "type": {
+              "type": "array",
+              "items": "string"
+            },
+            "default": [],
+            "doc": "Any data quality issues detected"
+          }
+        ]
+      }
+    }
+  ]
+}

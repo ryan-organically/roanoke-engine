@@ -1,0 +1,948 @@
+openapi: 3.1.0
+info:
+  title: Roanoke Marketing Data API
+  description: |
+    API for accessing marketing analytics, campaign data, and real-time metrics.
+
+    ## Authentication
+    All endpoints require authentication via Bearer token (JWT) or API key.
+
+    ## Rate Limiting
+    - Standard tier: 100 requests/minute
+    - Premium tier: 1000 requests/minute
+
+    ## Versioning
+    API version is included in the URL path. Current version: v1
+  version: 1.0.0
+  contact:
+    name: Roanoke Data Platform Team
+    email: data-platform@playroanoke.com
+  license:
+    name: Proprietary
+    url: https://playroanoke.com/api-license
+
+servers:
+  - url: https://api.playroanoke.com/marketing/v1
+    description: Production
+  - url: https://api-staging.playroanoke.com/marketing/v1
+    description: Staging
+  - url: http://localhost:8080/marketing/v1
+    description: Development
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+tags:
+  - name: Metrics
+    description: Marketing metrics and KPIs
+  - name: Campaigns
+    description: Campaign management and performance
+  - name: Social
+    description: Social media analytics
+  - name: Alerts
+    description: Alert management
+  - name: Reports
+    description: Report generation
+
+paths:
+  /metrics/daily:
+    get:
+      tags:
+        - Metrics
+      summary: Get daily summary metrics
+      description: Returns aggregated daily marketing metrics
+      operationId: getDailyMetrics
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2025-01-01"
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2025-01-31"
+        - name: metrics
+          in: query
+          description: Comma-separated list of metrics to include
+          schema:
+            type: string
+            default: "all"
+          example: "social_mentions,ad_spend,sentiment_score"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DailyMetrics'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /metrics/realtime:
+    get:
+      tags:
+        - Metrics
+      summary: Get real-time metrics
+      description: Returns current real-time marketing metrics (5-minute windows)
+      operationId: getRealtimeMetrics
+      parameters:
+        - name: platforms
+          in: query
+          description: Filter by platforms
+          schema:
+            type: array
+            items:
+              type: string
+          example: ["TWITTER", "TIKTOK"]
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RealtimeMetrics'
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /metrics/funnel:
+    get:
+      tags:
+        - Metrics
+      summary: Get funnel metrics
+      description: Returns conversion funnel data
+      operationId: getFunnelMetrics
+      parameters:
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+          example: "2025-01-15"
+        - name: compare_to
+          in: query
+          description: Date to compare against
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/FunnelData'
+
+  /campaigns:
+    get:
+      tags:
+        - Campaigns
+      summary: List campaigns
+      description: Returns paginated list of campaigns
+      operationId: listCampaigns
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, SCHEDULED, ACTIVE, PAUSED, COMPLETED, CANCELLED]
+        - name: type
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Campaign'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+    post:
+      tags:
+        - Campaigns
+      summary: Create campaign
+      description: Create a new marketing campaign
+      operationId: createCampaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignCreate'
+      responses:
+        '201':
+          description: Campaign created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /campaigns/{campaign_id}:
+    get:
+      tags:
+        - Campaigns
+      summary: Get campaign
+      description: Get campaign by ID
+      operationId: getCampaign
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - Campaigns
+      summary: Update campaign
+      description: Update campaign properties
+      operationId: updateCampaign
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CampaignUpdate'
+      responses:
+        '200':
+          description: Campaign updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Campaign'
+
+  /campaigns/{campaign_id}/metrics:
+    get:
+      tags:
+        - Campaigns
+      summary: Get campaign metrics
+      description: Get performance metrics for a campaign
+      operationId: getCampaignMetrics
+      parameters:
+        - name: campaign_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hourly, daily, weekly]
+            default: daily
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CampaignMetrics'
+
+  /social/platforms:
+    get:
+      tags:
+        - Social
+      summary: Get platform metrics
+      description: Get social metrics by platform
+      operationId: getSocialPlatformMetrics
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: platforms
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlatformMetrics'
+
+  /social/sentiment:
+    get:
+      tags:
+        - Social
+      summary: Get sentiment data
+      description: Get sentiment analysis data
+      operationId: getSentimentData
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [hourly, daily]
+            default: daily
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SentimentData'
+
+  /social/topics:
+    get:
+      tags:
+        - Social
+      summary: Get trending topics
+      description: Get trending topics and hashtags
+      operationId: getTrendingTopics
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 7
+            maximum: 30
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrendingTopics'
+
+  /alerts:
+    get:
+      tags:
+        - Alerts
+      summary: List alerts
+      description: Get list of sentiment and anomaly alerts
+      operationId: listAlerts
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PageSizeParam'
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL]
+        - name: resolved
+          in: query
+          schema:
+            type: boolean
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Alert'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /alerts/{alert_id}/acknowledge:
+    post:
+      tags:
+        - Alerts
+      summary: Acknowledge alert
+      description: Mark an alert as acknowledged
+      operationId: acknowledgeAlert
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Alert acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+
+  /reports:
+    post:
+      tags:
+        - Reports
+      summary: Generate report
+      description: Generate a marketing report
+      operationId: generateReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportRequest'
+      responses:
+        '202':
+          description: Report generation started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report_id:
+                    type: string
+                  status:
+                    type: string
+                  estimated_completion:
+                    type: string
+                    format: date-time
+
+  /reports/{report_id}:
+    get:
+      tags:
+        - Reports
+      summary: Get report status/download
+      description: Check report status or download completed report
+      operationId: getReport
+      parameters:
+        - name: report_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Report ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /webhooks:
+    post:
+      tags:
+        - Webhooks
+      summary: Register webhook
+      description: Register a webhook for real-time events
+      operationId: registerWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookRegistration'
+      responses:
+        '201':
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    PageSizeParam:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+  schemas:
+    DailyMetrics:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        social_mentions:
+          type: integer
+        social_engagement:
+          type: integer
+        sentiment_score:
+          type: number
+          format: float
+        ad_impressions:
+          type: integer
+        ad_clicks:
+          type: integer
+        ad_conversions:
+          type: integer
+        ad_spend:
+          type: number
+          format: float
+        ctr:
+          type: number
+          format: float
+        cvr:
+          type: number
+          format: float
+        cpa:
+          type: number
+          format: float
+
+    RealtimeMetrics:
+      type: object
+      properties:
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        platforms:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              event_count:
+                type: integer
+              sentiment:
+                type: number
+              engagement:
+                type: integer
+
+    FunnelData:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        stages:
+          type: array
+          items:
+            type: object
+            properties:
+              stage:
+                type: string
+              users:
+                type: integer
+              conversion_rate:
+                type: number
+              dropoff_rate:
+                type: number
+
+    Campaign:
+      type: object
+      properties:
+        campaign_id:
+          type: string
+          format: uuid
+        campaign_name:
+          type: string
+        campaign_type:
+          type: string
+        status:
+          type: string
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        budget_total:
+          type: number
+        budget_currency:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CampaignCreate:
+      type: object
+      required:
+        - campaign_name
+        - campaign_type
+      properties:
+        campaign_name:
+          type: string
+        campaign_type:
+          type: string
+        start_date:
+          type: string
+          format: date-time
+        end_date:
+          type: string
+          format: date-time
+        budget_total:
+          type: number
+        budget_daily:
+          type: number
+        target_audience:
+          type: object
+
+    CampaignUpdate:
+      type: object
+      properties:
+        campaign_name:
+          type: string
+        status:
+          type: string
+        end_date:
+          type: string
+          format: date-time
+        budget_total:
+          type: number
+
+    CampaignMetrics:
+      type: object
+      properties:
+        campaign_id:
+          type: string
+          format: uuid
+        period:
+          type: object
+          properties:
+            start:
+              type: string
+              format: date
+            end:
+              type: string
+              format: date
+        totals:
+          type: object
+          properties:
+            impressions:
+              type: integer
+            clicks:
+              type: integer
+            conversions:
+              type: integer
+            spend:
+              type: number
+        time_series:
+          type: array
+          items:
+            type: object
+
+    PlatformMetrics:
+      type: object
+      properties:
+        platform:
+          type: string
+        total_events:
+          type: integer
+        unique_authors:
+          type: integer
+        engagement:
+          type: integer
+        avg_sentiment:
+          type: number
+
+    SentimentData:
+      type: object
+      properties:
+        overall_sentiment:
+          type: number
+        sentiment_trend:
+          type: string
+          enum: [improving, stable, declining]
+        time_series:
+          type: array
+          items:
+            type: object
+
+    TrendingTopics:
+      type: object
+      properties:
+        topics:
+          type: array
+          items:
+            type: object
+            properties:
+              topic:
+                type: string
+              count:
+                type: integer
+              trend:
+                type: string
+        hashtags:
+          type: array
+          items:
+            type: object
+            properties:
+              hashtag:
+                type: string
+              count:
+                type: integer
+
+    Alert:
+      type: object
+      properties:
+        alert_id:
+          type: string
+        alert_type:
+          type: string
+        severity:
+          type: string
+        platform:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        current_value:
+          type: number
+        threshold:
+          type: number
+        acknowledged:
+          type: boolean
+        resolved:
+          type: boolean
+
+    ReportRequest:
+      type: object
+      required:
+        - report_type
+        - start_date
+        - end_date
+      properties:
+        report_type:
+          type: string
+          enum: [executive_summary, campaign_performance, social_analysis, custom]
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        format:
+          type: string
+          enum: [pdf, xlsx, json]
+          default: pdf
+        include_sections:
+          type: array
+          items:
+            type: string
+
+    Report:
+      type: object
+      properties:
+        report_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        download_url:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+
+    WebhookRegistration:
+      type: object
+      required:
+        - url
+        - events
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        secret:
+          type: string
+
+    Webhook:
+      type: object
+      properties:
+        webhook_id:
+          type: string
+        url:
+          type: string
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ResponseMeta:
+      type: object
+      properties:
+        request_id:
+          type: string
+        processing_time_ms:
+          type: integer
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_items:
+          type: integer
+        total_pages:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

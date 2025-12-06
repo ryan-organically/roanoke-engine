@@ -1,0 +1,379 @@
+# Prometheus Alerting Rules for Marketing Data Platform
+# Version: 1.0.0
+
+groups:
+  # ==========================================================================
+  # PIPELINE HEALTH ALERTS
+  # ==========================================================================
+  - name: pipeline_health
+    rules:
+      # Kafka Consumer Lag
+      - alert: KafkaConsumerLagHigh
+        expr: sum(kafka_consumer_lag) by (topic, consumer_group) > 100000
+        for: 5m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Kafka consumer lag is high"
+          description: "Consumer group {{ $labels.consumer_group }} on topic {{ $labels.topic }} has lag of {{ $value }} messages"
+          runbook_url: "https://wiki.roanoke.internal/runbooks/kafka-lag"
+
+      - alert: KafkaConsumerLagCritical
+        expr: sum(kafka_consumer_lag) by (topic, consumer_group) > 500000
+        for: 5m
+        labels:
+          severity: critical
+          team: data-platform
+        annotations:
+          summary: "Kafka consumer lag is critical"
+          description: "Consumer group {{ $labels.consumer_group }} on topic {{ $labels.topic }} has lag of {{ $value }} messages. Pipeline may be failing."
+
+      # Processing Job Failures
+      - alert: SparkJobFailed
+        expr: spark_job_status == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: data-platform
+        annotations:
+          summary: "Spark job failed"
+          description: "Spark job {{ $labels.job }} has failed"
+          runbook_url: "https://wiki.roanoke.internal/runbooks/spark-job-failure"
+
+      - alert: FlinkJobUnhealthy
+        expr: flink_job_status != 1
+        for: 5m
+        labels:
+          severity: critical
+          team: data-platform
+        annotations:
+          summary: "Flink streaming job is unhealthy"
+          description: "Flink job {{ $labels.job }} is not running properly"
+
+      # Data Freshness
+      - alert: DataFreshnessStale
+        expr: (time() - max(last_processed_timestamp) by (pipeline)) > 900
+        for: 5m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Data is stale"
+          description: "Pipeline {{ $labels.pipeline }} has not processed data for {{ $value | humanizeDuration }}"
+
+      - alert: DataFreshnessCritical
+        expr: (time() - max(last_processed_timestamp) by (pipeline)) > 3600
+        for: 5m
+        labels:
+          severity: critical
+          team: data-platform
+        annotations:
+          summary: "Data freshness critical"
+          description: "Pipeline {{ $labels.pipeline }} has not processed data for over 1 hour"
+
+  # ==========================================================================
+  # API & SERVICE HEALTH
+  # ==========================================================================
+  - name: api_health
+    rules:
+      # API Availability
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{service="marketing-api", status=~"5.."}[5m])) /
+          sum(rate(http_requests_total{service="marketing-api"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Marketing API error rate elevated"
+          description: "API error rate is {{ $value | humanizePercentage }}"
+
+      - alert: APICriticalErrorRate
+        expr: |
+          sum(rate(http_requests_total{service="marketing-api", status=~"5.."}[5m])) /
+          sum(rate(http_requests_total{service="marketing-api"}[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: data-platform
+        annotations:
+          summary: "Marketing API error rate critical"
+          description: "API error rate is {{ $value | humanizePercentage }}, exceeds 5% threshold"
+
+      # API Latency
+      - alert: APIHighLatency
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service="marketing-api"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Marketing API latency is high"
+          description: "p99 latency is {{ $value | humanizeDuration }}"
+
+      # Rate Limiting
+      - alert: APIRateLimitingActive
+        expr: rate(http_requests_total{service="marketing-api", status="429"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: info
+          team: data-platform
+        annotations:
+          summary: "API rate limiting is active"
+          description: "{{ $value }} requests/sec are being rate limited"
+
+  # ==========================================================================
+  # DATABASE HEALTH
+  # ==========================================================================
+  - name: database_health
+    rules:
+      # Connection Pool
+      - alert: DatabaseConnectionPoolExhausted
+        expr: pg_stat_activity_count / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "{{ $value | humanizePercentage }} of connections in use"
+
+      # Replication Lag
+      - alert: DatabaseReplicationLag
+        expr: pg_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Database replication lag detected"
+          description: "Replication lag is {{ $value | humanizeDuration }}"
+
+      # Query Performance
+      - alert: SlowQueriesIncreasing
+        expr: rate(pg_stat_statements_total_time_seconds{queryid!=""}[5m]) > 1
+        for: 10m
+        labels:
+          severity: info
+          team: data-platform
+        annotations:
+          summary: "Slow queries detected"
+          description: "Query {{ $labels.query }} is taking {{ $value }}s on average"
+
+      # Storage
+      - alert: DatabaseStorageRunningLow
+        expr: pg_database_size_bytes / pg_settings_data_directory_size_bytes > 0.8
+        for: 30m
+        labels:
+          severity: warning
+          team: data-platform
+        annotations:
+          summary: "Database storage running low"
+          description: "Database {{ $labels.datname }} is using {{ $value | humanizePercentage }} of available storage"
+
+  # ==========================================================================
+  # SENTIMENT & MARKETING ALERTS
+  # ==========================================================================
+  - name: marketing_metrics
+    rules:
+      # Sentiment Drop
+      - alert: SentimentDrop
+        expr: |
+          (avg_over_time(sentiment_score_avg[1h]) - avg_over_time(sentiment_score_avg[24h] offset 1h)) < -0.2
+        for: 15m
+        labels:
+          severity: warning
+          team: marketing
+        annotations:
+          summary: "Significant sentiment drop detected"
+          description: "Sentiment on {{ $labels.platform }} has dropped by {{ $value }} compared to 24h average"
+
+      - alert: SentimentCriticalDrop
+        expr: avg(sentiment_score_avg) < -0.3
+        for: 30m
+        labels:
+          severity: critical
+          team: marketing
+        annotations:
+          summary: "Critical negative sentiment detected"
+          description: "Overall sentiment score is {{ $value }}, indicating significant negative sentiment"
+
+      # Volume Anomalies
+      - alert: SocialVolumeSpike
+        expr: |
+          sum(rate(social_events_total[5m])) /
+          avg_over_time(sum(rate(social_events_total[5m]))[24h:5m]) > 3
+        for: 10m
+        labels:
+          severity: info
+          team: marketing
+        annotations:
+          summary: "Social media volume spike detected"
+          description: "Social volume is {{ $value }}x normal - possible viral moment or crisis"
+
+      - alert: SocialVolumeDrop
+        expr: |
+          sum(rate(social_events_total[5m])) /
+          avg_over_time(sum(rate(social_events_total[5m]))[24h:5m]) < 0.3
+        for: 30m
+        labels:
+          severity: warning
+          team: marketing
+        annotations:
+          summary: "Social media volume significantly lower than normal"
+          description: "Social volume is {{ $value }}x normal - may indicate data collection issue"
+
+      # Response Queue
+      - alert: ResponseQueueBacklog
+        expr: sum(response_queue_pending_count) > 100
+        for: 30m
+        labels:
+          severity: warning
+          team: community
+        annotations:
+          summary: "Response queue backlog growing"
+          description: "{{ $value }} posts in queue requiring response"
+
+      - alert: UrgentResponsesPending
+        expr: sum(response_queue_pending_count{priority="URGENT"}) > 5
+        for: 15m
+        labels:
+          severity: high
+          team: community
+        annotations:
+          summary: "Urgent responses pending"
+          description: "{{ $value }} urgent posts require immediate response"
+
+      # Campaign Alerts
+      - alert: CampaignBudgetExhausted
+        expr: campaign_remaining_budget / campaign_total_budget < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: marketing
+        annotations:
+          summary: "Campaign budget nearly exhausted"
+          description: "Campaign {{ $labels.campaign_name }} has only {{ $value | humanizePercentage }} budget remaining"
+
+      - alert: CampaignPerformanceDegraded
+        expr: |
+          (campaign_ctr < avg_over_time(campaign_ctr[7d]) * 0.5) and (campaign_impressions > 10000)
+        for: 1h
+        labels:
+          severity: warning
+          team: marketing
+        annotations:
+          summary: "Campaign performance degraded"
+          description: "Campaign {{ $labels.campaign_name }} CTR has dropped below 50% of average"
+
+  # ==========================================================================
+  # SECURITY ALERTS
+  # ==========================================================================
+  - name: security
+    rules:
+      # Authentication Failures
+      - alert: HighAuthFailureRate
+        expr: rate(auth_failures_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High authentication failure rate"
+          description: "{{ $value }} auth failures per second detected"
+
+      - alert: BruteForceAttempt
+        expr: |
+          sum(rate(auth_failures_total[5m])) by (source_ip) > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+        annotations:
+          summary: "Possible brute force attack detected"
+          description: "IP {{ $labels.source_ip }} has {{ $value }} failed auth attempts per second"
+
+      # Unusual Data Access
+      - alert: BulkDataExport
+        expr: sum(data_export_rows_total) by (user) > 100000
+        for: 1m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Large data export detected"
+          description: "User {{ $labels.user }} exported {{ $value }} rows"
+
+      - alert: AfterHoursDataAccess
+        expr: |
+          rate(data_access_total[5m]) > 0 and (hour() < 6 or hour() > 22)
+        for: 5m
+        labels:
+          severity: info
+          team: security
+        annotations:
+          summary: "After-hours data access detected"
+          description: "Data access at {{ $value }} requests/sec outside business hours"
+
+# ==========================================================================
+# ALERT ROUTING
+# ==========================================================================
+# This section defines how alerts are routed (for AlertManager config)
+
+route:
+  group_by: ['alertname', 'team']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default-receiver'
+
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      continue: true
+
+    - match:
+        team: security
+      receiver: 'security-team'
+
+    - match:
+        team: marketing
+      receiver: 'marketing-team'
+
+    - match:
+        team: data-platform
+      receiver: 'data-platform-team'
+
+receivers:
+  - name: 'default-receiver'
+    slack_configs:
+      - channel: '#alerts-general'
+        send_resolved: true
+
+  - name: 'critical-alerts'
+    pagerduty_configs:
+      - service_key: '<pagerduty-key>'
+        severity: critical
+    slack_configs:
+      - channel: '#alerts-critical'
+        send_resolved: true
+
+  - name: 'security-team'
+    slack_configs:
+      - channel: '#security-alerts'
+        send_resolved: true
+    email_configs:
+      - to: 'security@playroanoke.com'
+
+  - name: 'marketing-team'
+    slack_configs:
+      - channel: '#marketing-alerts'
+        send_resolved: true
+
+  - name: 'data-platform-team'
+    slack_configs:
+      - channel: '#data-platform-alerts'
+        send_resolved: true

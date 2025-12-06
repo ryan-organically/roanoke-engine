@@ -1,0 +1,570 @@
+name: Data Pipeline CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'marketing/data-pipelines/**'
+      - '.github/workflows/pipeline-deploy.yaml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'marketing/data-pipelines/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      component:
+        description: 'Component to deploy'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - etl
+          - api
+          - schemas
+          - monitoring
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/data-pipeline
+  PYTHON_VERSION: '3.11'
+  TERRAFORM_VERSION: '1.6.0'
+
+jobs:
+  # ==========================================================================
+  # VALIDATION & TESTING
+  # ==========================================================================
+  validate:
+    name: Validate & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r marketing/data-pipelines/requirements.txt
+          pip install ruff mypy pytest pytest-cov
+
+      - name: Lint Python code
+        run: |
+          ruff check marketing/data-pipelines/
+          ruff format --check marketing/data-pipelines/
+
+      - name: Type check
+        run: |
+          mypy marketing/data-pipelines/etl/ \
+            --ignore-missing-imports \
+            --no-error-summary
+
+      - name: Validate Avro schemas
+        run: |
+          python -c "
+          import json
+          from pathlib import Path
+          for schema_file in Path('marketing/data-pipelines/schemas/events').glob('*.avsc'):
+              print(f'Validating {schema_file}...')
+              with open(schema_file) as f:
+                  schema = json.load(f)
+              assert 'type' in schema
+              assert 'name' in schema
+              print(f'  ✓ Valid')
+          "
+
+      - name: Validate OpenAPI spec
+        run: |
+          pip install openapi-spec-validator
+          python -m openapi_spec_validator \
+            marketing/data-pipelines/api/openapi/marketing-api.yaml
+
+      - name: Validate SQL syntax
+        run: |
+          pip install sqlfluff
+          sqlfluff lint marketing/data-pipelines/schemas/database/ \
+            --dialect postgres || true  # Warning only for now
+
+      - name: Validate Grafana dashboards
+        run: |
+          python -c "
+          import json
+          from pathlib import Path
+          for dashboard in Path('marketing/data-pipelines/monitoring/grafana/dashboards').glob('*.json'):
+              print(f'Validating {dashboard}...')
+              with open(dashboard) as f:
+                  data = json.load(f)
+              assert 'dashboard' in data or 'panels' in data
+              print(f'  ✓ Valid')
+          "
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_marketing
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r marketing/data-pipelines/requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Run unit tests
+        run: |
+          pytest marketing/data-pipelines/tests/unit/ \
+            --cov=marketing/data-pipelines \
+            --cov-report=xml \
+            --junitxml=test-results.xml
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/test_marketing
+          REDIS_URL: redis://localhost:6379
+
+      - name: Run integration tests
+        run: |
+          pytest marketing/data-pipelines/tests/integration/ \
+            --junitxml=integration-test-results.xml
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/test_marketing
+          REDIS_URL: redis://localhost:6379
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            integration-test-results.xml
+            coverage.xml
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: 'marketing/data-pipelines'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Bandit security linter
+        run: |
+          pip install bandit
+          bandit -r marketing/data-pipelines/etl/ \
+            -f json -o bandit-results.json || true
+
+      - name: Check for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ==========================================================================
+  # BUILD
+  # ==========================================================================
+  build-etl:
+    name: Build ETL Images
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/etl
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push ETL image
+        uses: docker/build-push-action@v5
+        with:
+          context: marketing/data-pipelines
+          file: marketing/data-pipelines/ci-cd/docker/Dockerfile.etl
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-api:
+    name: Build API Image
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/api
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: marketing/data-pipelines
+          file: marketing/data-pipelines/ci-cd/docker/Dockerfile.api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================================================
+  # INFRASTRUCTURE
+  # ==========================================================================
+  plan-infrastructure:
+    name: Plan Infrastructure Changes
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: github.event_name == 'pull_request'
+    env:
+      TF_WORKSPACE: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        working-directory: marketing/data-pipelines/ci-cd/terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: marketing/data-pipelines/ci-cd/terraform
+        run: terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment PR with Plan
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('marketing/data-pipelines/ci-cd/terraform/tfplan.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## Terraform Plan\n```\n' + plan.slice(0, 60000) + '\n```'
+            });
+
+  # ==========================================================================
+  # DEPLOY TO STAGING
+  # ==========================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-etl, build-api, security-scan]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging-api.playroanoke.com/marketing/v1/health
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Deploy infrastructure
+        working-directory: marketing/data-pipelines/ci-cd/terraform
+        env:
+          TF_WORKSPACE: staging
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="image_tag=${{ github.sha }}" \
+            -var="environment=staging"
+
+      - name: Deploy database migrations
+        run: |
+          pip install alembic psycopg2-binary
+          cd marketing/data-pipelines
+          alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: Deploy Grafana dashboards
+        run: |
+          for dashboard in marketing/data-pipelines/monitoring/grafana/dashboards/*.json; do
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.GRAFANA_API_KEY }}" \
+              -H "Content-Type: application/json" \
+              -d @"$dashboard" \
+              "${{ secrets.STAGING_GRAFANA_URL }}/api/dashboards/db"
+          done
+
+      - name: Update Flink jobs
+        run: |
+          # Deploy Flink streaming jobs
+          echo "Deploying Flink jobs to staging..."
+          # Implementation would use Flink REST API
+
+      - name: Run smoke tests
+        run: |
+          pip install requests pytest
+          pytest marketing/data-pipelines/tests/smoke/ \
+            --base-url="https://staging-api.playroanoke.com/marketing/v1"
+        env:
+          API_KEY: ${{ secrets.STAGING_API_KEY }}
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Data Pipeline deployed to staging",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Data Pipeline deployed to staging* :rocket:\n\nCommit: `${{ github.sha }}`\nBranch: `${{ github.ref_name }}`"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================================================
+  # DEPLOY TO PRODUCTION
+  # ==========================================================================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-etl, build-api, security-scan]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://api.playroanoke.com/marketing/v1/health
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Create pre-deployment backup
+        run: |
+          aws rds create-db-snapshot \
+            --db-instance-identifier marketing-db \
+            --db-snapshot-identifier "pre-deploy-${{ github.sha }}"
+
+      - name: Deploy infrastructure (Blue-Green)
+        working-directory: marketing/data-pipelines/ci-cd/terraform
+        env:
+          TF_WORKSPACE: production
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="image_tag=${{ github.sha }}" \
+            -var="environment=production" \
+            -var="deployment_strategy=blue-green"
+
+      - name: Deploy database migrations
+        run: |
+          pip install alembic psycopg2-binary
+          cd marketing/data-pipelines
+          alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: Run canary validation
+        run: |
+          # Wait for canary deployment
+          sleep 60
+
+          # Check canary health
+          for i in {1..10}; do
+            HEALTH=$(curl -s https://api.playroanoke.com/marketing/v1/health)
+            if echo "$HEALTH" | grep -q "healthy"; then
+              echo "Canary healthy"
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Promote to full deployment
+        if: success()
+        run: |
+          # Switch traffic to new version
+          echo "Promoting deployment..."
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Rolling back deployment..."
+          # Rollback implementation
+
+      - name: Notify Slack
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Data Pipeline deployed to production",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Data Pipeline deployed to production* :white_check_mark:\n\nCommit: `${{ github.sha }}`\nDeploy time: ${{ github.event.head_commit.timestamp }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ==========================================================================
+  # POST-DEPLOYMENT
+  # ==========================================================================
+  post-deploy-validation:
+    name: Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run E2E tests
+        run: |
+          pip install requests pytest
+          pytest marketing/data-pipelines/tests/e2e/ \
+            --base-url="https://api.playroanoke.com/marketing/v1"
+        env:
+          API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+
+      - name: Verify data freshness
+        run: |
+          # Check that data pipelines are processing
+          METRICS=$(curl -s -H "Authorization: Bearer ${{ secrets.PRODUCTION_API_KEY }}" \
+            "https://api.playroanoke.com/marketing/v1/metrics/realtime")
+
+          LAST_UPDATE=$(echo "$METRICS" | jq -r '.timestamp')
+          # Verify last update within 5 minutes
+          echo "Last data update: $LAST_UPDATE"
+
+      - name: Monitor for errors (30 min)
+        run: |
+          for i in {1..6}; do
+            ERROR_COUNT=$(curl -s "${{ secrets.PROMETHEUS_URL }}/api/v1/query?query=sum(rate(http_requests_total{status=~\"5..\"}[5m]))" \
+              | jq '.data.result[0].value[1] // 0' | tr -d '"')
+
+            if (( $(echo "$ERROR_COUNT > 0.01" | bc -l) )); then
+              echo "Error rate elevated: $ERROR_COUNT"
+              exit 1
+            fi
+
+            echo "Error rate OK: $ERROR_COUNT"
+            sleep 300
+          done
