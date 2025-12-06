@@ -16,9 +16,10 @@ pub fn generate_vegetation_for_chunk(
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
-    // Keep density low to avoid GPU buffer limits (256MB max)
-    // 8.0 * 256 * 256 = ~524K potential blades, but density filtering reduces to ~50K actual
-    let max_density = 8.0;
+    // DRASTICALLY REDUCED for FPS: was 8.0, now 0.3
+    // 0.3 * 256 * 256 = ~20K potential blades, filtering reduces to ~2-5K actual
+    // This is 26x fewer grass blades than before
+    let max_density = 0.3;
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();
@@ -79,7 +80,7 @@ pub fn generate_vegetation_for_chunk(
 
         let recipe = GrassBladeRecipe {
             height_range: (min_height, max_height),
-            blade_segments: 5,
+            blade_segments: 3, // Reduced from 5 for FPS (40% fewer verts per blade)
             curve_factor: 0.4 + biome_factor * 0.3, // More curve in forest
             width_base: 0.06 + biome_factor * 0.04,
             width_tip: 0.01,
@@ -133,8 +134,9 @@ pub fn generate_detritus_for_chunk(
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
     let noise = Perlin::new(seed + 555);
 
-    // Detritus density - 10x increase for dense ground clutter
-    let detritus_density = 0.08; // 10x increase (was 0.008)
+    // Detritus DISABLED for FPS - was generating thousands of extra vertices per chunk
+    // Re-enable once we have instanced rendering
+    let detritus_density = 0.0; // DISABLED
     let potential_items = (chunk_size * chunk_size * detritus_density) as u32;
 
     let mut all_positions = Vec::new();

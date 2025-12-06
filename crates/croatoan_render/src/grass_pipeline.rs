@@ -18,7 +18,11 @@ struct CameraUniform {
     time: f32,                      // 4 bytes (128-132)
     _padding1: [f32; 3],            // 12 bytes (132-144)
     sun_dir: [f32; 3],              // 12 bytes (144-156)
-    _padding2: [f32; 5],            // 20 bytes (156-176) -> Total 176 bytes (aligned to 16)
+    fog_density: f32,               // 4 bytes (156-160)
+    view_pos: [f32; 3],             // 12 bytes (160-172)
+    fog_start: f32,                 // 4 bytes (172-176)
+    fog_color: [f32; 3],            // 12 bytes (176-188)
+    fog_end: f32,                   // 4 bytes (188-192) -> Total 192 bytes (aligned to 16)
 }
 
 pub struct GrassPipeline {
@@ -213,15 +217,31 @@ impl GrassPipeline {
         log::info!("Uploaded grass mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
     }
 
-    /// Update camera uniform with time for wind animation and shadow data
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, light_view_proj: &Mat4, sun_dir: [f32; 3], time: f32) {
+    /// Update camera uniform with time for wind animation, shadow data, and fog
+    pub fn update_camera(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
             time,
             _padding1: [0.0; 3],
             sun_dir,
-            _padding2: [0.0; 5],
+            fog_density,
+            view_pos,
+            fog_start,
+            fog_color,
+            fog_end,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

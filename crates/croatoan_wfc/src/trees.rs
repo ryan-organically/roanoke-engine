@@ -226,7 +226,7 @@ pub fn generate_trees_for_chunk(
     // Bunches are placed on a jittered grid for even distribution
     // Density: ~1 bunch per 400 sq meters (20m grid with filtering)
 
-    let bunch_grid_size = 18.0; // Base grid spacing for bunch centers
+    let bunch_grid_size = 32.0; // Increased from 18 for FPS (fewer bunches)
     let bunches_per_row = (chunk_size / bunch_grid_size).ceil() as i32;
 
     for bz in 0..bunches_per_row {
@@ -309,7 +309,7 @@ pub fn generate_trees_for_chunk(
     // Dense forest gets extra trees beyond what bunches provide
     // These fill in gaps and create denser canopy
 
-    let scattered_tree_density = 0.0008; // Trees per sq meter in dense forest
+    let scattered_tree_density = 0.0002; // Reduced from 0.0008 for FPS
     let potential_scattered = (chunk_size * chunk_size * scattered_tree_density) as u32;
 
     for i in 0..potential_scattered {

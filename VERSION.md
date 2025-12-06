@@ -16,14 +16,46 @@
 
 <!-- AGENT: Add completed features here before release -->
 
-### Added
-- (pending features go here)
+### Critical Issues Identified (2024-12-05 Audit)
 
-### Fixed
-- (pending fixes go here)
+**FPS BLOCKERS:**
+- [ ] O(n²) animal spatial queries in `manager.rs:187-232`
+- [ ] Per-frame NPC instance buffer allocation in `village_manager.rs:205-225`
+- [ ] SystemTime RNG calls in `behavior.rs:409-417`
+- [ ] Per-frame pack morale recalculation
+
+**VISUAL BLOCKERS:**
+- [x] Trees re-enabled with simple low-poly mesh (~36 tris vs 247K)
+- [ ] Fog only tints ground, no atmospheric effect
+- [ ] 78K+ rock instances per chunk overwhelming GPU
+
+### Added
+- `FPS_OPTIMIZATION_ROADMAP.md` - Master performance recovery plan
+- `MATERIAL_SHADER_AUDIT.md` - Shader/material system analysis
+- Comprehensive audit of all rendering systems
+
+### Fixed (2024-12-05 - FPS Fluidization System)
+- [x] O(n²) → O(n) animal spatial queries via Quantum Spatial Cache (`manager.rs`)
+- [x] Per-frame NPC instance allocation → cached with dirty flags (`village_manager.rs`)
+- [x] SystemTime RNG → PCG-inspired hash-based PRNG (`behavior.rs`)
+- [x] Per-frame pack morale recalc → lazy evaluation with dirty flags (`manager.rs`)
+- [x] Query radius reduced 50 → 25 units (4x fewer cell checks)
+
+### Fixed (2024-12-05 - Tree System Restoration)
+- [x] Trees re-enabled - was disabled due to 247K face OBJ mesh
+- [x] Created simple low-poly tree generator (cylinder trunk + icosphere canopy)
+- [x] 2,600x triangle reduction: 94K → 36 triangles per tree
+- [x] Updated tree shader to render green canopy + brown trunk
+
+**Build Status**: ✅ Release build successful, game launches correctly
 
 ### Changed
-- (pending changes go here)
+- Updated `ROADMAP.md` with Phase 0 (FPS Emergency), Phase 6-8 (Trees, Fog, Rocks)
+- Updated `TREE_SYSTEM_AUDIT.md` with performance impact data
+
+### Known Issues
+- Pebble density 1.2/m² = 78K instances per 256x256 chunk (Phase 1 planned)
+- Fog only tints ground, no atmospheric effect (Phase 3 planned)
 
 ---
 

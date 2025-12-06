@@ -18,6 +18,12 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     sun_dir: [f32; 3],
     time: f32, // For wind animation
+    view_pos: [f32; 3],      // Camera position for fog distance
+    fog_density: f32,        // Fog intensity
+    fog_color: [f32; 3],     // Fog color
+    fog_start: f32,          // Fog start distance
+    fog_end: f32,            // Fog end distance
+    _padding: [f32; 3],      // Padding to 16-byte alignment
 }
 
 #[repr(C)]
@@ -356,12 +362,29 @@ impl TreePipeline {
         }));
     }
 
-    /// Update camera uniform
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, sun_dir: [f32; 3], time: f32) {
+    /// Update camera uniform with fog parameters
+    pub fn update_camera(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             sun_dir,
             time,
+            view_pos,
+            fog_density,
+            fog_color,
+            fog_start,
+            fog_end,
+            _padding: [0.0; 3],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

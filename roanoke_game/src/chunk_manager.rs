@@ -157,15 +157,15 @@ impl ChunkManager {
         // Validate input - clamp to sane range
         let render_distance = render_distance.clamp(100.0, 1000.0);
 
-        // Buildings visible at 1.5x render distance, add 10% buffer
-        let max_visible_distance = render_distance * 1.5 * 1.1;
+        // Buildings visible at 1.0x render distance now (reduced from 1.5x)
+        let max_visible_distance = render_distance * 1.0;
         // Convert to chunk units and round up, ensure chunk_size is valid
         let chunk_size = self.chunk_size.max(1.0);
         let needed_radius = (max_visible_distance / chunk_size).ceil() as i32;
-        // Clamp to reasonable range (2-5) to avoid loading too many chunks
-        self.load_radius = needed_radius.clamp(2, 5);
-        // Unload radius should be 2 chunks beyond load radius for hysteresis
-        self.unload_radius = self.load_radius + 2;
+        // Clamp to small range (1-2) for FPS - fewer chunks = much faster
+        self.load_radius = needed_radius.clamp(1, 2);
+        // Unload radius should be 1 chunk beyond load radius for hysteresis
+        self.unload_radius = self.load_radius + 1;
 
         println!("[CHUNK] Updated radii for render_distance={:.0}: load={}, unload={}",
                  render_distance, self.load_radius, self.unload_radius);

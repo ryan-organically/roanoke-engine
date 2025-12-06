@@ -3,6 +3,11 @@
 //! Manages village placement and structure streaming for the game world.
 //! Villages are discovered once at world initialization and then structures
 //! are streamed per-chunk as the player explores.
+//!
+//! # FPS Optimization: Cached NPC Instances
+//!
+//! NPC orb instances are cached and only recomputed when positions change.
+//! This eliminates per-frame matrix generation for 80+ NPCs.
 
 use glam::{Vec3, Mat4};
 use croatoan_wfc::{
@@ -10,6 +15,9 @@ use croatoan_wfc::{
     WorldVillage, VillageStructure, VillageStructureType, get_height_at,
 };
 use croatoan_procgen::{VillageRecipe, VillageId, generate_village, LonghouseStyle};
+
+/// NPC orb instance data type for GPU upload
+pub type NpcOrbInstance = ([f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 3], f32);
 
 /// NPC orb data for rendering
 #[derive(Debug, Clone)]
@@ -30,6 +38,15 @@ pub struct VillageManager {
     initialized: bool,
     /// NPC orbs for visualization
     pub npc_orbs: Vec<NpcOrb>,
+
+    // ========================================================================
+    // FPS OPTIMIZATION: Instance Cache System
+    // ========================================================================
+    /// Cached NPC orb instances for GPU upload
+    /// Only regenerated when dirty flag is set
+    cached_instances: Vec<NpcOrbInstance>,
+    /// Dirty flag - set when NPC positions change
+    instances_dirty: bool,
 }
 
 impl VillageManager {
@@ -39,7 +56,16 @@ impl VillageManager {
             seed,
             initialized: false,
             npc_orbs: Vec::new(),
+            cached_instances: Vec::new(),
+            instances_dirty: true,
         }
+    }
+
+    /// Mark instances as needing regeneration
+    /// Call when NPC positions change
+    #[inline]
+    pub fn mark_instances_dirty(&mut self) {
+        self.instances_dirty = true;
     }
 
     /// Discover villages in a region around the player spawn
@@ -176,6 +202,9 @@ impl VillageManager {
                 role: format!("{:?}", npc.role),
             });
         }
+
+        // Mark instance cache as dirty since we added NPCs
+        self.instances_dirty = true;
     }
 
     /// Get all village structures that fall within a chunk
@@ -202,8 +231,30 @@ impl VillageManager {
     }
 
     /// Get NPC orb instances for rendering with AnimalOrbPipeline
-    pub fn get_npc_orb_instances(&self) -> Vec<([f32; 4], [f32; 4], [f32; 4], [f32; 4], [f32; 3], f32)> {
-        self.npc_orbs.iter().map(|orb| {
+    ///
+    /// # FPS OPTIMIZATION: Cached Instance Generation
+    ///
+    /// Previous: Generated 80+ matrices every frame
+    /// New: Cached, only regenerates when dirty flag is set
+    ///
+    /// Performance gain: Eliminates per-frame allocation and matrix math
+    pub fn get_npc_orb_instances(&mut self) -> &[NpcOrbInstance] {
+        // Only regenerate if dirty
+        if self.instances_dirty {
+            self.regenerate_instance_cache();
+            self.instances_dirty = false;
+        }
+
+        &self.cached_instances
+    }
+
+    /// Internal: Regenerate the instance cache
+    /// Called only when dirty flag is set
+    fn regenerate_instance_cache(&mut self) {
+        self.cached_instances.clear();
+        self.cached_instances.reserve(self.npc_orbs.len());
+
+        for orb in &self.npc_orbs {
             // Create model matrix (translation + scale)
             let scale = 0.8; // NPC orb size
             let model = Mat4::from_scale_rotation_translation(
@@ -213,15 +264,15 @@ impl VillageManager {
             );
             let cols = model.to_cols_array_2d();
 
-            (
+            self.cached_instances.push((
                 cols[0],
                 cols[1],
                 cols[2],
                 cols[3],
                 orb.color,
                 0.5, // Emissive intensity
-            )
-        }).collect()
+            ));
+        }
     }
 
     /// Check if any village overlaps with the given chunk bounds

@@ -1,7 +1,11 @@
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     sun_dir: vec3<f32>,
-    _padding: f32,
+    fog_density: f32,
+    view_pos: vec3<f32>,
+    fog_start: f32,
+    fog_color: vec3<f32>,
+    fog_end: f32,
 }
 
 @group(0) @binding(0)
@@ -76,7 +80,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let final_color = mix(base_color + variation, moss_color, moss_factor);
 
     // Apply lighting
-    let lit_color = final_color * (ambient + diffuse * diffuse_strength);
+    var lit_color = final_color * (ambient + diffuse * diffuse_strength);
+
+    // Apply distance fog
+    let dist_to_camera = distance(input.world_position, camera.view_pos);
+    let fog_factor = saturate((dist_to_camera - camera.fog_start) / (camera.fog_end - camera.fog_start));
+    let fog_amount = fog_factor * fog_factor * camera.fog_density;
+    lit_color = mix(lit_color, camera.fog_color, fog_amount);
 
     return vec4<f32>(lit_color, 1.0);
 }

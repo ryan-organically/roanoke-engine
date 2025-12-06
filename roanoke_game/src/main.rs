@@ -1,7 +1,7 @@
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, TreeTemplate};
 use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
-use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
+use croatoan_procgen::{TreeRecipe, generate_tree, generate_tree_mesh, generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
 use image; // Added image crate
@@ -456,7 +456,7 @@ fn main() {
         // Game Settings (default values)
         mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
         movement_speed: 10.0,
-        render_distance: 250.0, // Reduced from 350 for better initial performance
+        render_distance: 150.0, // Reduced from 250 for better FPS
         master_volume: 80.0, // 0-100 scale, 80 = default
         swing_animation: SwingAnimation {
             is_swinging: false,
@@ -758,175 +758,37 @@ fn main() {
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Oak Tree (from Blender OBJ - bark meshes only, leaves filtered)
+                // 1. Oak Tree - USING SIMPLE LOW-POLY MESH (not OBJ)
+                // The OBJ file has 247K faces which destroys FPS
+                // Simple tree: ~36 triangles (cylinder trunk + icosphere canopy)
                 {
                     println!("[ASSET] ========== TREE LOADING START ==========");
-                    let obj_paths = ["assets/trees/trees9.obj", "trees/trees9.obj"];
-                    let mut template = None;
-                    for path in obj_paths {
-                        println!("[ASSET] Trying OBJ path: {}", path);
-                        if let Some(t) = asset_loader::load_obj(path) {
-                            template = Some(t);
-                            println!("[ASSET] SUCCESS: Loaded tree from {}", path);
-                            break;
-                        } else {
-                            println!("[ASSET] FAILED: Could not load {}", path);
-                        }
-                    }
+                    println!("[ASSET] Using SIMPLE LOW-POLY tree mesh (~36 tris)");
+                    println!("[ASSET] Skipping OBJ (247K faces = unplayable FPS)");
 
-                    if let Some(template) = template {
-                        // Load bark texture
-                        println!("[ASSET] Loading bark texture...");
-                        let texture_paths = ["assets/trees/Texture/Bark___0.jpg", "trees/Texture/Bark___0.jpg"];
-                        let mut texture_bytes = Vec::new();
+                    // Generate simple tree mesh: trunk height, trunk radius, canopy radius, seed
+                    let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
 
-                        for path in texture_paths {
-                            println!("[ASSET] Trying texture path: {}", path);
-                            match std::fs::read(path) {
-                                Ok(bytes) => {
-                                    texture_bytes = bytes;
-                                    println!("[ASSET] SUCCESS: Loaded bark texture ({} bytes) from {}", texture_bytes.len(), path);
-                                    break;
-                                }
-                                Err(e) => {
-                                    println!("[ASSET] FAILED: {} - {}", path, e);
-                                }
-                            }
-                        }
+                    let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                    let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                    let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
 
-                        if texture_bytes.is_empty() {
-                            println!("[WARN] No bark texture found, using white fallback");
-                            texture_bytes = vec![255, 255, 255, 255];
-                        }
+                    let gpu_mesh = TreePipeline::create_mesh(
+                        ctx.device(),
+                        &positions,
+                        &normals,
+                        &uvs,
+                        &mesh.indices,
+                        None, // No texture - shader uses procedural colors
+                    );
 
-                        let texture_image = image::load_from_memory(&texture_bytes).unwrap_or_else(|e| {
-                            println!("[WARN] Failed to decode texture: {}, using 1x1 fallback", e);
-                            image::DynamicImage::new_rgba8(1, 1)
-                        });
-                        let rgba = texture_image.to_rgba8();
-                        let dimensions = rgba.dimensions();
-                        println!("[ASSET] Texture dimensions: {}x{}", dimensions.0, dimensions.1);
+                    println!("[ASSET] Simple tree mesh: {} vertices, {} triangles",
+                        positions.len(), mesh.indices.len() / 3);
+                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
+                    println!("[ASSET] ========== TREE LOADING COMPLETE ==========");
 
-                        let texture_size = wgpu::Extent3d {
-                            width: dimensions.0,
-                            height: dimensions.1,
-                            depth_or_array_layers: 1,
-                        };
-
-                        let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
-                            size: texture_size,
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                            label: Some("Tree Bark Texture"),
-                            view_formats: &[],
-                        });
-
-                        ctx.queue().write_texture(
-                            wgpu::ImageCopyTexture {
-                                texture: &texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &rgba,
-                            wgpu::ImageDataLayout {
-                                offset: 0,
-                                bytes_per_row: Some(4 * dimensions.0),
-                                rows_per_image: Some(dimensions.1),
-                            },
-                            texture_size,
-                        );
-
-                        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let sampler = ctx.device().create_sampler(&wgpu::SamplerDescriptor {
-                            address_mode_u: wgpu::AddressMode::Repeat,
-                            address_mode_v: wgpu::AddressMode::Repeat,
-                            mag_filter: wgpu::FilterMode::Linear,
-                            min_filter: wgpu::FilterMode::Linear,
-                            mipmap_filter: wgpu::FilterMode::Nearest,
-                            ..Default::default()
-                        });
-
-                        let texture_bind_group_layout = ctx.device().create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                            label: Some("Tree Texture Bind Group Layout"),
-                            entries: &[
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 0,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
-                                    ty: wgpu::BindingType::Texture {
-                                        multisampled: false,
-                                        view_dimension: wgpu::TextureViewDimension::D2,
-                                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                    },
-                                    count: None,
-                                },
-                                wgpu::BindGroupLayoutEntry {
-                                    binding: 1,
-                                    visibility: wgpu::ShaderStages::FRAGMENT,
-                                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                                    count: None,
-                                },
-                            ],
-                        });
-
-                        let bind_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
-                            layout: &texture_bind_group_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&texture_view),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&sampler),
-                                },
-                            ],
-                            label: Some("Tree Texture Bind Group"),
-                        });
-
-                        println!("[ASSET] Creating GPU mesh with texture bind group...");
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &template.positions,
-                            &template.normals,
-                            &template.uvs,
-                            &template.indices,
-                            Some(Arc::new(bind_group)),
-                        );
-                        println!("[ASSET] Tree mesh created: {} verts, {} tris",
-                            template.positions.len(), template.indices.len() / 3);
-                        println!("[ASSET] Texture bind group: ATTACHED");
-                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                        println!("[ASSET] ========== TREE LOADING COMPLETE (OBJ) ==========");
-                    } else {
-                        // Fallback to procedural if OBJ fails (bark only, no leaves)
-                        println!("[ASSET] ========== TREE LOADING FALLBACK ==========");
-                        println!("[WARN] OBJ load failed, using procedural tree (bark only)");
-                        let mut recipe = TreeRecipe::oak();
-                        recipe.leaf_probability = 0.0; // No procedural leaves
-                        let tree = generate_tree(&recipe, 12345);
-                        let mesh = generate_tree_mesh(&tree);
-
-                        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                        let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                        let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
-
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &positions,
-                            &normals,
-                            &uvs,
-                            &mesh.indices,
-                            None,
-                        );
-                        println!("[ASSET] Procedural mesh created: {} verts", positions.len());
-                        println!("[ASSET] Texture bind group: NONE (using default white)");
-                        state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                        println!("[ASSET] ========== TREE LOADING COMPLETE (PROCEDURAL) ==========");
-                    }
+                    // OBJ loading code removed - was loading 247K face tree mesh
+                    // Simple low-poly tree (~36 tris) already registered above
                 }
 
                 // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
@@ -1024,8 +886,8 @@ fn main() {
         static CHUNK_MANAGER: OnceLock<Mutex<ChunkManager>> = OnceLock::new();
         let chunk_manager = CHUNK_MANAGER.get_or_init(|| {
             let mut manager = ChunkManager::new(256.0, 2, 4);
-            // Initialize radius based on default render_distance (250)
-            manager.update_radius_for_render_distance(250.0);
+            // Initialize radius based on default render_distance (150)
+            manager.update_radius_for_render_distance(150.0);
             Mutex::new(manager)
         });
 
@@ -2387,19 +2249,66 @@ fn main() {
             let view_proj = state.camera.view_projection_matrix();
             let frustum = Frustum::from_view_proj(&view_proj);
 
+            // Compute fog parameters for tree shader (same as used in render pass)
+            let fog_params = state.atmosphere.fog_params();
+            let fog_color = state.atmosphere.fog_color();
+            let fog_density = fog_params[0];
+            let fog_start = fog_params[1];
+            let fog_end = fog_params[2];
+
             {
                 for (_coord, chunk) in manager.iter_chunks() {
                     if let Some(grass) = &chunk.grass {
-                        grass.update_camera(ctx.queue(), &view_proj, &light_view_proj, light_dir.to_array(), elapsed);
+                        grass.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            &light_view_proj,
+                            light_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     if let Some(trees) = &chunk.trees {
-                        trees.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
+                        trees.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     if let Some(detritus) = &chunk.detritus {
-                        detritus.update_camera(ctx.queue(), &view_proj, sun_dir.to_array());
+                        detritus.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     for rock in &chunk.rocks {
-                        rock.update_camera(ctx.queue(), &view_proj, sun_dir.to_array(), elapsed);
+                        rock.update_camera(
+                            ctx.queue(),
+                            &view_proj,
+                            sun_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                        );
                     }
                     // for building in &chunk.buildings {
                     //     building.update_camera(ctx.queue(), &view_proj);
@@ -2595,10 +2504,11 @@ fn main() {
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
-                let grass_max_distance = state.render_distance * 0.75;  // Grass at 75% of max
-                let tree_max_distance = state.render_distance;
-                let detritus_max_distance = state.render_distance * 0.75;
-                let building_max_distance = state.render_distance * 1.5; // Buildings visible further
+                // AGGRESSIVELY REDUCED for FPS optimization
+                let grass_max_distance = state.render_distance * 0.25;  // Grass only nearby (was 0.75)
+                let tree_max_distance = state.render_distance * 0.35; // Trees medium distance (was 0.5)
+                let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
+                let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
@@ -2634,14 +2544,15 @@ fn main() {
                         }
                     }
 
-                    // Trees - TEMPORARILY DISABLED (94K tris per instance kills FPS)
-                    // TODO: Need LOD system or simpler tree mesh
-                    // if let Some(trees) = &chunk.trees {
-                    //     if dist <= tree_max_distance {
-                    //         trees_rendered += 1;
-                    //         trees.render(&mut render_pass);
-                    //     }
-                    // }
+                    // Trees - RE-ENABLED with simple low-poly mesh (~36 tris per tree)
+                    // Previously: 94K tris per instance (247K face OBJ)
+                    // Now: ~36 tris per instance (cylinder trunk + icosphere canopy)
+                    if let Some(trees) = &chunk.trees {
+                        if dist <= tree_max_distance {
+                            trees_rendered += 1;
+                            trees.render(&mut render_pass);
+                        }
+                    }
 
                     // Detritus
                     if let Some(detritus) = &chunk.detritus {

@@ -13,9 +13,13 @@ struct DetritusVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-    sun_dir: [f32; 3],
-    _padding: f32,
+    view_proj: [[f32; 4]; 4],       // 64 bytes (0-64)
+    sun_dir: [f32; 3],              // 12 bytes (64-76)
+    fog_density: f32,               // 4 bytes (76-80)
+    view_pos: [f32; 3],             // 12 bytes (80-92)
+    fog_start: f32,                 // 4 bytes (92-96)
+    fog_color: [f32; 3],            // 12 bytes (96-108)
+    fog_end: f32,                   // 4 bytes (108-112) -> Total 112 bytes (aligned to 16)
 }
 
 pub struct DetritusPipeline {
@@ -203,12 +207,26 @@ impl DetritusPipeline {
         log::info!("Uploaded detritus mesh: {} vertices, {} triangles", vertices.len(), indices.len() / 3);
     }
 
-    /// Update camera uniform
-    pub fn update_camera(&self, queue: &Queue, view_proj: &Mat4, sun_dir: [f32; 3]) {
+    /// Update camera uniform with fog parameters
+    pub fn update_camera(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             sun_dir,
-            _padding: 0.0,
+            fog_density,
+            view_pos,
+            fog_start,
+            fog_color,
+            fog_end,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

@@ -2,12 +2,15 @@
 
 Prioritized implementation guide. Each section includes the problem, approach, and specific files to modify.
 
+**See also**: `FPS_OPTIMIZATION_ROADMAP.md` for detailed FPS recovery plan.
+
 ---
 
 ## Completion Status
 
 | Phase | Status | Notes |
 |-------|--------|-------|
+| 0.1-0.5 FPS Emergency | ✅ DONE | Quantum Spatial Cache + lazy eval |
 | 1.1-1.2 Directional Lighting | ✅ DONE | Dynamic sun color based on elevation |
 | 1.3 Sun Billboard | ✅ DONE | Visual sun disk implemented |
 | 1.4 Time of Day | ✅ DONE | T/Y keys, dynamic sky/fog colors |
@@ -15,6 +18,139 @@ Prioritized implementation guide. Each section includes the problem, approach, a
 | 3.1-3.3 Frustum Culling | ✅ DONE | ~50% fewer draw calls |
 | 4.1-4.3 LOD System | ✅ DONE | Distance culling for grass/trees |
 | 5.1-5.3 Chunk Streaming | 🔧 READY | Infrastructure in chunk_manager.rs |
+| 6.1-6.3 Tree Restoration | 🔴 BLOCKED | Trees disabled, need LOD system |
+| 7.1-7.4 Fog Fix | 🟡 PENDING | Only tints ground, not atmospheric |
+| 8.1-8.2 Rock Optimization | 🟡 PENDING | 78K instances/chunk too many |
+
+---
+
+## Phase 0: FPS Emergency Recovery ✅ COMPLETE
+
+**Status:** Implemented 2024-12-05 - Quantum Spatial Cache System
+
+### 0.1 Fix O(n²) Animal Spatial Queries ✅
+
+**Solution:** Quantum Spatial Cache - batched spatial queries computed ONCE per frame.
+
+**Implementation:**
+- Added `FrameCache` struct with `nearby_map: HashMap<AnimalId, Vec<AnimalId>>`
+- Single-pass position collection, then batch query
+- O(n × k) where k = average neighbors, not O(n²)
+
+**File:** `roanoke_game/src/animals/manager.rs:24-47, 274-294`
+
+### 0.2 Cache NPC Orb Instance Buffer ✅
+
+**Solution:** Cached instances with dirty flag pattern.
+
+**Implementation:**
+- Added `cached_instances: Vec<NpcOrbInstance>` + `instances_dirty: bool`
+- Only regenerates matrices when NPCs change
+- Eliminates 80+ matrix calculations per frame
+
+**File:** `roanoke_game/src/village_manager.rs:45-49, 238-276`
+
+### 0.3 Fix SystemTime RNG ✅
+
+**Solution:** PCG-inspired hash-based PRNG - zero syscalls.
+
+**Implementation:**
+- Replaced `SystemTime::now()` with atomic frame counter + fast hash
+- Added `rand_chance_seeded()` for deterministic per-animal randomness
+- Uses golden ratio constants for excellent distribution
+
+**File:** `roanoke_game/src/animals/behavior.rs:408-437`
+
+### 0.4 Lazy Pack Morale Calculation ✅
+
+**Solution:** Dirty flag pattern - only recalculate when members change.
+
+**Implementation:**
+- Added `dirty: bool` + `last_member_count: usize` to Pack struct
+- Skip expensive morale/alpha calculation if not dirty
+- Mark dirty on member add/remove/death
+
+**File:** `roanoke_game/src/animals/manager.rs:74-163`
+
+### 0.5 Reduce Spatial Query Radius ✅
+
+**Solution:** Reduced from 50.0 to 25.0 units.
+
+**Implementation:**
+- Added `const NEARBY_QUERY_RADIUS: f32 = 25.0`
+- 4x fewer cell checks (9 cells vs 36 cells)
+
+**File:** `roanoke_game/src/animals/manager.rs:20-22`
+
+---
+
+## Phase 6: Tree System Restoration (NEW)
+
+**Why:** Trees are completely disabled. Can't see treeline.
+
+### 6.1 Create Lightweight Tree Mesh
+
+**Problem:** Current OBJ is 247K faces per tree.
+
+**Solution:** Procedural tree: 8-sided cylinder trunk + icosphere canopy = ~130 triangles.
+
+### 6.2 Implement Tree LOD
+
+- LOD0 (0-100m): Full mesh ~130 tris
+- LOD1 (100-300m): Every 2nd tree, simpler mesh
+- LOD2 (300m+): Billboard quads
+
+### 6.3 Re-enable Tree Rendering
+
+**File:** `roanoke_game/src/main.rs:2637-2644`
+
+Uncomment tree render code with distance-based LOD selection.
+
+---
+
+## Phase 7: Fog System Fix (NEW)
+
+**Why:** Fog slider only changes ground shade, no visible atmospheric fog.
+
+### 7.1 Reduce Height Fog
+
+**File:** `assets/shaders/terrain.wgsl:221`
+
+Change max height_fog from 0.5 to 0.15.
+
+### 7.2 Add Fog to All Shaders
+
+- `grass.wgsl` - NO FOG currently
+- `tree.wgsl` - NO FOG currently
+- `detritus.wgsl` - NO FOG currently
+
+### 7.3 Sky Horizon Fog
+
+**File:** `assets/shaders/sky.wgsl`
+
+Add fog color blend at horizon.
+
+### 7.4 Remove Minimum Fog Clamp
+
+**File:** `roanoke_game/src/atmosphere.rs:245-247`
+
+Remove `fog_density.max(0.4)` to allow clear days.
+
+---
+
+## Phase 8: Rock/Pebble Optimization (NEW)
+
+**Why:** 78K+ rock instances per chunk at 1.2 pebbles/m².
+
+### 8.1 Distance Culling
+
+Don't render pebbles beyond 150m. Skip 75% of pebbles 50-150m.
+
+### 8.2 Reduce Pebble Polygon Count
+
+**File:** `crates/croatoan_procgen/src/rock.rs:64-73`
+
+Change pebble subdivision_levels from 2 to 1 = 4x fewer triangles.
 
 ---
 

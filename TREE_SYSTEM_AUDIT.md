@@ -1,8 +1,28 @@
 # Tree System Audit & Asset Pipeline Specification
 
 **Date**: 2024-12-05 (Updated)
-**Status**: Treeline & Bunch System Implemented
-**Priority**: HIGH - Visual quality blocker (assets still needed)
+**Status**: 🔴 TREES DISABLED - FPS blocker identified
+**Priority**: CRITICAL - Trees not rendering, FPS issues traced to animal/village systems
+
+---
+
+## CRITICAL: Trees Currently Disabled
+
+**Location**: `roanoke_game/src/main.rs:2637-2644`
+
+```rust
+// Trees - TEMPORARILY DISABLED (94K tris per instance kills FPS)
+// TODO: Need LOD system or simpler tree mesh
+// if let Some(trees) = &chunk.trees {
+//     trees.render(&mut render_pass);
+// }
+```
+
+**Impact**: Player cannot see treeline at any distance. Forest is invisible.
+
+**Root Cause**: `trees/trees9.obj` contains 247K faces. With 100+ tree instances per chunk, this creates billions of triangles - instant GPU death.
+
+**FPS Note**: The current FPS issues are NOT caused by trees (they're disabled). The FPS bottlenecks are in the animal/village systems. See `FPS_OPTIMIZATION_ROADMAP.md` for details.
 
 ---
 
