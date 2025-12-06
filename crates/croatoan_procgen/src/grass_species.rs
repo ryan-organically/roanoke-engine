@@ -168,22 +168,21 @@ pub fn calculate_density(
 
 /// Sea Oats - Beach dune grass
 /// Tall wispy stalks that colonize and stabilize dunes
-/// DEBUG: Currently bright red and extra tall to verify species system works
 fn sea_oats_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (1.5, 2.5),  // DEBUG: Extra tall to be visible
+            height_range: (0.8, 1.4),   // Tall wispy stalks
             blade_segments: 5,
-            curve_factor: 0.6,
-            width_base: 0.08,  // DEBUG: Thicker to be visible
-            width_tip: 0.02,
-            color_base: [0.9, 0.1, 0.1],  // DEBUG: Bright red base
-            color_tip: [1.0, 0.3, 0.1],   // DEBUG: Orange-red tip
+            curve_factor: 0.6,          // Graceful droop
+            width_base: 0.04,
+            width_tip: 0.01,
+            color_base: [0.65, 0.58, 0.40],  // Sandy tan base
+            color_tip: [0.75, 0.68, 0.50],   // Bleached straw tip
         },
-        density_range: (0.15, 0.3),  // DEBUG: Increased density
+        density_range: (0.08, 0.15),  // Sparse dune colonizer
         wind_amplitude: 1.2,
         wind_frequency: 1.3,
-        clumping_factor: 0.4,  // DEBUG: Reduced clumping for more coverage
+        clumping_factor: 0.6,         // Grows in tufts
         tolerates_water: false,
     }
 }
@@ -211,22 +210,21 @@ fn cordgrass_config() -> GrassSpeciesConfig {
 
 /// Sawgrass - Meadow and grassland
 /// The quintessential flowing meadow grass
-/// DEBUG: Currently bright blue to verify species system works
 fn sawgrass_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.6, 1.2),  // DEBUG: Taller
+            height_range: (0.4, 0.8),   // Medium height meadow grass
             blade_segments: 4,
-            curve_factor: 0.35,
-            width_base: 0.06,  // DEBUG: Thicker
-            width_tip: 0.015,
-            color_base: [0.1, 0.2, 0.8],  // DEBUG: Bright blue base
-            color_tip: [0.2, 0.4, 1.0],   // DEBUG: Light blue tip
+            curve_factor: 0.35,         // Gentle flowing curve
+            width_base: 0.04,
+            width_tip: 0.01,
+            color_base: [0.25, 0.45, 0.18],  // Rich meadow green
+            color_tip: [0.40, 0.58, 0.28],   // Lighter green tip
         },
-        density_range: (0.3, 0.5),  // DEBUG: Increased density
+        density_range: (0.2, 0.35),   // Moderate density
         wind_amplitude: 0.8,
         wind_frequency: 1.0,
-        clumping_factor: 0.3,  // DEBUG: Reduced clumping
+        clumping_factor: 0.4,
         tolerates_water: false,
     }
 }

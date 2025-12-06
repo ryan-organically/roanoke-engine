@@ -840,20 +840,20 @@ fn main() {
                                     println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
                                 }
                                 // F5 = Spawn debug animals in a circle around player
+                                // Only spawns species that have 3D models
                                 KeyCode::F5 => {
                                     use animals::AnimalSpecies;
                                     let player_pos = state.player.position;
                                     let species_list = [
-                                        AnimalSpecies::BlackBear,
-                                        AnimalSpecies::EasternCougar,
                                         AnimalSpecies::GrayWolf,
-                                        AnimalSpecies::TimberRattlesnake,
-                                        AnimalSpecies::AmericanAlligator,
-                                        AnimalSpecies::WildBoar,
-                                        AnimalSpecies::Copperhead,
                                         AnimalSpecies::RedWolf,
-                                        AnimalSpecies::Bobcat,
-                                        AnimalSpecies::Cottonmouth,
+                                        AnimalSpecies::WhitetailDeer,
+                                        AnimalSpecies::Stag,
+                                        AnimalSpecies::Horse,
+                                        AnimalSpecies::Donkey,
+                                        AnimalSpecies::Fox,
+                                        AnimalSpecies::Husky,
+                                        AnimalSpecies::Bobcat, // Uses Fox model
                                     ];
                                     let num_species = species_list.len();
                                     for (i, species) in species_list.iter().enumerate() {
@@ -1039,37 +1039,83 @@ fn main() {
                 println!("[GPU] Initializing Mesh Registry...");
 
                 // 1. Foliage - Load GLTF plant models with textures
-                // Falls back to simple procedural tree if GLTF loading fails
+                // The scene.gltf has plants in world-space, so we center each mesh
                 {
                     println!("[ASSET] ========== FOLIAGE LOADING START ==========");
 
                     let foliage_path = "assets/models/foliage/scene.gltf";
 
-                    // Try loading GLTF foliage with scale normalization
-                    // The models are ~300-800 units, we scale to ~5 units and center
-                    match gltf_loader::load_gltf_with_options(
-                        foliage_path,
-                        0.01,  // Scale down 100x
-                        [200.0, -550.0, 0.0],  // Offset to center (model Y is 500-800)
-                    ) {
+                    match gltf_loader::load_gltf(foliage_path) {
                         Ok(model) => {
                             println!("[ASSET] Loaded GLTF foliage: {} meshes", model.meshes.len());
 
-                            // Load the first mesh with a texture as our tree
-                            // Find a mesh that has leaves (typically larger meshes)
-                            let mut loaded_foliage = false;
+                            let mut loaded_tree = false;
 
+                            // Find a good plant mesh:
+                            // - Skip Object_0 (61K verts, ground cover)
+                            // - Skip tiny meshes (<100 verts)
+                            // - Prefer meshes with 500-10000 verts (actual plants)
                             for (i, mesh) in model.meshes.iter().enumerate() {
-                                // Skip tiny meshes (decorative)
-                                if mesh.positions.len() < 100 {
+                                let vert_count = mesh.positions.len();
+
+                                // Skip ground cover (too heavy) and tiny decorations
+                                if vert_count > 15000 || vert_count < 200 {
+                                    println!("[ASSET] Skipping mesh {}: '{}' ({} verts - {})",
+                                        i, mesh.name, vert_count,
+                                        if vert_count > 15000 { "too heavy" } else { "too small" });
                                     continue;
                                 }
 
-                                println!("[ASSET] Processing mesh {}: '{}' ({} verts, texture: {:?})",
-                                    i, mesh.name, mesh.positions.len(),
+                                // Skip trunk-only meshes (no alpha = no leaves)
+                                // We want meshes with MASK alpha mode (leaves with transparency)
+                                if mesh.material.alpha_mode != "MASK" {
+                                    println!("[ASSET] Skipping mesh {}: '{}' (no alpha mask - likely trunk only)",
+                                        i, mesh.name);
+                                    continue;
+                                }
+
+                                println!("[ASSET] Processing mesh {}: '{}' ({} verts, tex: {:?})",
+                                    i, mesh.name, vert_count,
                                     mesh.material.base_color_texture.as_ref().map(|s| s.split('/').last().unwrap_or(s)));
 
-                                // Try to load the texture
+                                // GLTF from Sketchfab uses Y-up, we need Z-up
+                                // Apply rotation: Y becomes Z, Z becomes -Y
+                                let rotated_positions: Vec<[f32; 3]> = mesh.positions.iter()
+                                    .map(|p| [p[0], p[2], p[1]]) // Y-up to Z-up
+                                    .collect();
+
+                                // Calculate bounds after rotation
+                                let mut min = [f32::MAX; 3];
+                                let mut max = [f32::MIN; 3];
+                                for pos in &rotated_positions {
+                                    for j in 0..3 {
+                                        min[j] = min[j].min(pos[j]);
+                                        max[j] = max[j].max(pos[j]);
+                                    }
+                                }
+                                let center = [
+                                    (min[0] + max[0]) * 0.5,
+                                    (min[1] + max[1]) * 0.5,
+                                    min[2], // Keep base at ground level (Z is now up)
+                                ];
+                                let height = max[2] - min[2];
+                                let scale = 1.5 / height.max(1.0); // Normalize to ~1.5 units tall (small plants/grass)
+
+                                // Transform positions: center and scale
+                                let centered_positions: Vec<[f32; 3]> = rotated_positions.iter()
+                                    .map(|p| [
+                                        (p[0] - center[0]) * scale,
+                                        (p[1] - center[1]) * scale,
+                                        (p[2] - center[2]) * scale,
+                                    ])
+                                    .collect();
+
+                                // Also rotate normals to match
+                                let rotated_normals: Vec<[f32; 3]> = mesh.normals.iter()
+                                    .map(|n| [n[0], n[2], n[1]])
+                                    .collect();
+
+                                // Load texture if available
                                 let texture_bind_group = if let Some(tex_path) = &mesh.material.base_color_texture {
                                     match gltf_loader::load_texture(tex_path) {
                                         Ok(tex_data) => {
@@ -1079,7 +1125,6 @@ fn main() {
                                                 &tex_data,
                                                 Some(&format!("Foliage Texture {}", i)),
                                             );
-                                            // Create a temporary pipeline just to get the bind group layout
                                             let temp_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                             let bind_group = temp_pipeline.create_texture_bind_group(
                                                 ctx.device(),
@@ -1090,7 +1135,7 @@ fn main() {
                                             Some(Arc::new(bind_group))
                                         }
                                         Err(e) => {
-                                            println!("[ASSET] Failed to load texture: {}", e);
+                                            println!("[ASSET] Texture load failed: {}", e);
                                             None
                                         }
                                     }
@@ -1098,38 +1143,38 @@ fn main() {
                                     None
                                 };
 
-                                // Create GPU mesh
                                 let gpu_mesh = TreePipeline::create_mesh(
                                     ctx.device(),
-                                    &mesh.positions,
-                                    &mesh.normals,
+                                    &centered_positions,
+                                    &rotated_normals,
                                     &mesh.uvs,
                                     &mesh.indices,
                                     texture_bind_group,
                                 );
 
-                                // Register first valid foliage mesh as tree_oak (main tree)
-                                if !loaded_foliage {
+                                // First valid plant becomes tree_oak
+                                if !loaded_tree {
                                     state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh.clone());
-                                    println!("[ASSET] Registered '{}' as tree_oak", mesh.name);
-                                    loaded_foliage = true;
+                                    println!("[ASSET] Registered '{}' as tree_oak ({} verts, height {:.1} -> scaled to ~5)",
+                                        mesh.name, vert_count, height);
+                                    loaded_tree = true;
                                 }
 
-                                // Also register with original name for variety
+                                // Register additional foliage types
                                 let safe_name = format!("foliage_{}", i);
                                 state.mesh_registry.insert(safe_name.clone(), gpu_mesh);
-                                println!("[ASSET] Registered foliage mesh: {}", safe_name);
+                                println!("[ASSET] Registered foliage: {}", safe_name);
 
-                                // Only load first few meshes to avoid memory issues
-                                if i >= 3 {
-                                    println!("[ASSET] Limiting to 4 foliage meshes for performance");
+                                // Limit foliage types for memory (after rocks are added)
+                                if i >= 8 {
+                                    println!("[ASSET] Loaded enough foliage meshes");
                                     break;
                                 }
                             }
 
-                            if !loaded_foliage {
-                                println!("[ASSET] No suitable foliage meshes found, using procedural fallback");
-                                let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                            if !loaded_tree {
+                                println!("[ASSET] No suitable foliage found, using procedural tree");
+                                let mesh = generate_simple_tree_mesh(4.0, 0.3, 2.5, 12345);
                                 let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
                                 let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
                                 let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
@@ -1138,11 +1183,8 @@ fn main() {
                             }
                         }
                         Err(e) => {
-                            println!("[ASSET] Failed to load GLTF foliage: {}", e);
-                            println!("[ASSET] Falling back to procedural tree");
-
-                            // Fallback: Generate simple procedural tree
-                            let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                            println!("[ASSET] GLTF load failed: {}, using procedural tree", e);
+                            let mesh = generate_simple_tree_mesh(4.0, 0.3, 2.5, 12345);
                             let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
                             let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
                             let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
@@ -3222,8 +3264,7 @@ fn main() {
                         );
                     }
                     if let Some(trees) = &chunk.trees {
-                        // Use full camera update with texture + alpha settings
-                        // Alpha cutoff ~0.23 matches the foliage GLTF materials
+                        // Textured foliage from GLTF - enable texture sampling + alpha discard
                         trees.update_camera_full(
                             ctx.queue(),
                             &view_proj,
@@ -3234,8 +3275,8 @@ fn main() {
                             fog_start,
                             fog_end,
                             fog_density,
-                            0.23,  // alpha_cutoff for masked foliage
-                            1.0,   // use_texture = true (sample texture colors)
+                            0.1,   // alpha_cutoff - low to show more leaves
+                            1.0,   // use_texture = sample from texture
                         );
                     }
                     if let Some(detritus) = &chunk.detritus {
@@ -3461,9 +3502,8 @@ fn main() {
                 // Use render distance setting from pause menu
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
-                // Need at least 200+ to reliably see grass in current and adjacent chunks
-                let grass_max_distance = (state.render_distance * 0.8).max(200.0);  // Minimum 200 for visibility
-                let tree_max_distance = (state.render_distance * 0.7).max(180.0);   // Trees slightly farther
+                let grass_max_distance = 0.0;  // DISABLED - using GLTF foliage instead
+                let tree_max_distance = (state.render_distance * 1.5).max(300.0);   // Foliage visible far
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
@@ -3518,12 +3558,12 @@ fn main() {
                         }
                     }
 
-                    // Rocks - TEMPORARILY DISABLED (unknown rock types in log)
-                    // for rock in &chunk.rocks {
-                    //     if dist <= tree_max_distance {
-                    //         rock.render(&mut render_pass);
-                    //     }
-                    // }
+                    // Rocks
+                    for rock in &chunk.rocks {
+                        if dist <= tree_max_distance {
+                            rock.render(&mut render_pass);
+                        }
+                    }
 
                     // Buildings
                     for building in &chunk.buildings {
