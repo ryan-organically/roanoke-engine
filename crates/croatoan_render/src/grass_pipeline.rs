@@ -5,7 +5,7 @@ use glam::Mat4;
 
 use crate::pipeline_validation::{
     MeshValidator, PipelineResult,
-    log_pipeline_error, sanitize_vec3,
+    log_pipeline_error, sanitize_vec3, sanitize_float,
 };
 
 /// Maximum vertices per grass mesh (safety limit - grass is highest vertex count)
@@ -18,6 +18,8 @@ const MAX_GRASS_INDICES: usize = 1_500_000;
 struct GrassVertex {
     position: [f32; 3],
     color: [f32; 3],
+    local_height: f32,  // 0.0 at base, 1.0 at tip - for wind animation
+    _padding: f32,      // Align to 32 bytes for GPU efficiency
 }
 
 #[repr(C)]
@@ -117,6 +119,12 @@ impl GrassPipeline {
                             shader_location: 1,
                             format: wgpu::VertexFormat::Float32x3,
                         },
+                        // Local Height (0.0 at base, 1.0 at tip)
+                        wgpu::VertexAttribute {
+                            offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32,
+                        },
                     ],
                 }],
             },
@@ -200,13 +208,14 @@ impl GrassPipeline {
         device: &Device,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
+        local_heights: &[f32],
         indices: &[u32],
     ) -> PipelineResult<()> {
         // Validate mesh data before GPU allocation
         let validator = MeshValidator::new(MAX_GRASS_VERTICES, MAX_GRASS_INDICES);
         validator.validate_grass(positions, colors, indices)?;
 
-        self.upload_mesh_unchecked(device, positions, colors, indices);
+        self.upload_mesh_unchecked(device, positions, colors, local_heights, indices);
         Ok(())
     }
 
@@ -217,9 +226,10 @@ impl GrassPipeline {
         _queue: &Queue,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
+        local_heights: &[f32],
         indices: &[u32],
     ) {
-        match self.try_upload_mesh(device, positions, colors, indices) {
+        match self.try_upload_mesh(device, positions, colors, local_heights, indices) {
             Ok(()) => {}
             Err(e) => {
                 log_pipeline_error("GrassPipeline", &e);
@@ -238,18 +248,19 @@ impl GrassPipeline {
         device: &Device,
         positions: &[[f32; 3]],
         colors: &[[f32; 3]],
+        local_heights: &[f32],
         indices: &[u32],
     ) {
         let vertex_count = positions.len().min(MAX_GRASS_VERTICES);
         let index_count = indices.len().min(MAX_GRASS_INDICES);
 
-        // Interleave positions and colors with NaN/Inf sanitization
-        let vertices: Vec<GrassVertex> = positions[..vertex_count]
-            .iter()
-            .zip(colors[..vertex_count].iter())
-            .map(|(pos, col)| GrassVertex {
-                position: sanitize_vec3(*pos),
-                color: sanitize_vec3(*col),
+        // Interleave positions, colors, and local heights with NaN/Inf sanitization
+        let vertices: Vec<GrassVertex> = (0..vertex_count)
+            .map(|i| GrassVertex {
+                position: sanitize_vec3(positions[i]),
+                color: sanitize_vec3(colors[i]),
+                local_height: sanitize_float(local_heights[i]),
+                _padding: 0.0,
             })
             .collect();
 

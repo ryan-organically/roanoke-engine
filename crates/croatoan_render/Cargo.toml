@@ -11,3 +11,4 @@ glam = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 pollster = "0.3"
 lazy_static = "1.4"
+image = "0.25"

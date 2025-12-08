@@ -114,16 +114,18 @@ impl AtmosphereEngine {
         let min_fog_end = render_distance * 1.1;
 
         // Calculate sun position
+        // Calculate sun position - Allow negative height for night detection
         let sun_angle = (time_of_day - 6.0) / 12.0 * std::f32::consts::PI;
-        let sun_height = sun_angle.sin().max(0.0);
+        let sun_height = sun_angle.sin(); // Removed .max(0.0)
         let sun_horizontal = sun_angle.cos();
         self.state.sun_direction = Vec3::new(sun_horizontal * 0.5, sun_height, 0.3).normalize();
 
         // Time-based atmosphere
         match period {
             TimePeriod::Night => {
+                // ... (Night settings remain same)
                 self.state.fog_density = 0.1 + weather_fog * 0.3;
-                self.state.fog_color = Vec3::new(0.15, 0.18, 0.25);
+                self.state.fog_color = Vec3::new(0.005, 0.005, 0.01);
                 self.state.fog_start = 30.0;
                 self.state.fog_end = 200.0;
                 self.state.light_shaft_intensity = 0.0;
@@ -133,12 +135,12 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(0.3, 0.35, 0.5);
             }
             TimePeriod::Dawn => {
-                // Foggy mornings with light shafts
+                // ... (Dawn settings)
                 self.state.fog_density = 0.4 + weather_fog * 0.4;
-                self.state.fog_color = Vec3::new(0.85, 0.75, 0.65);
+                self.state.fog_color = Vec3::new(0.6, 0.5, 0.45);
                 self.state.fog_start = 10.0;
                 self.state.fog_end = 150.0;
-                self.state.fog_height_falloff = 0.05; // Low-lying fog
+                self.state.fog_height_falloff = 0.05; 
                 self.state.light_shaft_intensity = 0.7 * (1.0 - cloud_coverage * 0.8);
                 self.state.light_shaft_decay = 0.94;
                 self.state.ambient_intensity = 0.25;
@@ -147,7 +149,7 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(1.0, 0.7, 0.4);
             }
             TimePeriod::Morning => {
-                // Fog clearing, warm light
+                // ... (Morning settings)
                 let clear_progress = (time_of_day - 7.0) / 3.0;
                 self.state.fog_density = (0.25 - clear_progress * 0.2).max(0.0) + weather_fog * 0.3;
                 self.state.fog_color = Vec3::new(0.8, 0.82, 0.85);
@@ -161,6 +163,7 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(1.0, 0.9, 0.8);
             }
             TimePeriod::Midday => {
+                // ... (Midday settings)
                 self.state.fog_density = 0.02 + weather_fog * 0.2;
                 self.state.fog_color = Vec3::new(0.75, 0.8, 0.88);
                 self.state.fog_start = 100.0;
@@ -173,7 +176,7 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(1.0, 0.98, 0.95);
             }
             TimePeriod::Afternoon => {
-                // Golden hour approaching
+                // ... (Afternoon settings)
                 let golden_progress = (time_of_day - 16.0) / 2.0;
                 self.state.fog_density = 0.05 + golden_progress * 0.1 + weather_fog * 0.25;
                 self.state.fog_color = Vec3::new(0.9, 0.8, 0.6).lerp(Vec3::new(0.95, 0.7, 0.5), golden_progress);
@@ -187,25 +190,25 @@ impl AtmosphereEngine {
             }
             TimePeriod::Dusk => {
                 self.state.fog_density = 0.15 + weather_fog * 0.3;
-                self.state.fog_color = Vec3::new(0.9, 0.6, 0.5);
+                self.state.fog_color = Vec3::new(0.6, 0.4, 0.35);
                 self.state.fog_start = 50.0;
                 self.state.fog_end = 300.0;
                 self.state.light_shaft_intensity = 0.6 * (1.0 - cloud_coverage * 0.5);
                 self.state.light_shaft_decay = 0.92;
-                self.state.ambient_intensity = 0.25;
-                self.state.ambient_color = Vec3::new(0.8, 0.55, 0.5);
+                self.state.ambient_intensity = 0.15; // Reduced from 0.25 for darker dusk
+                self.state.ambient_color = Vec3::new(0.6, 0.4, 0.4); // Darker reddish
                 self.state.sun_intensity = 0.5;
                 self.state.sun_color = Vec3::new(1.0, 0.5, 0.3);
             }
             TimePeriod::Evening => {
                 let night_progress = (time_of_day - 20.0) / 2.0;
                 self.state.fog_density = 0.1 + night_progress * 0.05 + weather_fog * 0.25;
-                self.state.fog_color = Vec3::new(0.4, 0.45, 0.6);
+                self.state.fog_color = Vec3::new(0.2, 0.2, 0.3).lerp(Vec3::new(0.005, 0.005, 0.01), night_progress); // Transition to black
                 self.state.fog_start = 40.0;
                 self.state.fog_end = 250.0;
                 self.state.light_shaft_intensity = 0.0;
-                self.state.ambient_intensity = 0.15 - night_progress * 0.07;
-                self.state.ambient_color = Vec3::new(0.4, 0.45, 0.6);
+                self.state.ambient_intensity = (0.10 - night_progress * 0.05).max(0.05); // Rapidly drop to near-black
+                self.state.ambient_color = Vec3::new(0.2, 0.2, 0.3);
                 self.state.sun_intensity = 0.1 * (1.0 - night_progress);
                 self.state.sun_color = Vec3::new(0.6, 0.4, 0.5);
             }
@@ -219,7 +222,7 @@ impl AtmosphereEngine {
         self.state.fog_start = (target_fog_end * 0.05).max(5.0);
 
         // Strong minimum fog density - always visible haze
-        self.state.fog_density = self.state.fog_density.max(0.4);
+        self.state.fog_density = 0.0; // self.state.fog_density.max(0.05);
     }
 
     /// Get fog uniforms for shaders [density, start, end, height_falloff]

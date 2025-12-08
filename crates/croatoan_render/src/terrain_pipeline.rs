@@ -6,6 +6,85 @@ use crate::pipeline_validation::{
     log_pipeline_error, sanitize_vec3,
 };
 
+/// Loaded texture data for terrain materials
+pub struct TerrainTextures {
+    pub grass_diffuse: wgpu::Texture,
+    pub grass_diffuse_view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
+}
+
+impl TerrainTextures {
+    /// Load terrain textures from disk
+    pub fn load(device: &wgpu::Device, queue: &wgpu::Queue, assets_path: &str) -> Result<Self, String> {
+        use image::GenericImageView;
+
+        // Load grass tile texture for terrain ground
+        let grass_path = format!("{}/grass/grass-tile1.jpg", assets_path);
+
+        let img = image::open(&grass_path)
+            .map_err(|e| format!("Failed to load grass texture '{}': {}", grass_path, e))?;
+
+        let (width, height) = img.dimensions();
+        let rgba = img.to_rgba8();
+        let data = rgba.into_raw();
+
+        log::info!("[TerrainTextures] Loaded grass tile: {}x{}", width, height);
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let grass_diffuse = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Grass Tile Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &grass_diffuse,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+
+        let grass_diffuse_view = grass_diffuse.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create sampler with trilinear filtering and repeat wrapping
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Terrain Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Ok(Self {
+            grass_diffuse,
+            grass_diffuse_view,
+            sampler,
+        })
+    }
+}
+
 /// Maximum vertices per terrain chunk (safety limit)
 const MAX_TERRAIN_VERTICES: usize = 100_000;
 /// Maximum indices per terrain chunk (safety limit)
@@ -39,6 +118,7 @@ pub struct TerrainPipeline {
     render_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    texture_bind_group: wgpu::BindGroup,
     pub index_count: u32,
     pub vertex_buffer: wgpu::Buffer, // Made public for shadow pass
     pub index_buffer: wgpu::Buffer,  // Made public for shadow pass
@@ -57,12 +137,13 @@ impl TerrainPipeline {
         normals: &[[f32; 3]],
         indices: &[u32],
         shadow_map: &crate::shadows::ShadowMap,
+        terrain_textures: &TerrainTextures,
     ) -> PipelineResult<Self> {
         // Validate mesh data before GPU allocation
         let validator = MeshValidator::new(MAX_TERRAIN_VERTICES, MAX_TERRAIN_INDICES);
         validator.validate_terrain(positions, colors, normals, indices)?;
 
-        Ok(Self::new_unchecked(device, surface_format, positions, colors, normals, indices, shadow_map))
+        Ok(Self::new_unchecked(device, surface_format, positions, colors, normals, indices, shadow_map, terrain_textures))
     }
 
     /// Create a new terrain pipeline (panics on invalid data)
@@ -76,8 +157,9 @@ impl TerrainPipeline {
         normals: &[[f32; 3]],
         indices: &[u32],
         shadow_map: &crate::shadows::ShadowMap,
+        terrain_textures: &TerrainTextures,
     ) -> Self {
-        match Self::try_new(device, surface_format, positions, colors, normals, indices, shadow_map) {
+        match Self::try_new(device, surface_format, positions, colors, normals, indices, shadow_map, terrain_textures) {
             Ok(pipeline) => pipeline,
             Err(e) => {
                 log_pipeline_error("TerrainPipeline", &e);
@@ -95,6 +177,7 @@ impl TerrainPipeline {
         normals: &[[f32; 3]],
         indices: &[u32],
         shadow_map: &crate::shadows::ShadowMap,
+        terrain_textures: &TerrainTextures,
     ) -> Self {
         // Load shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -166,14 +249,55 @@ impl TerrainPipeline {
             ],
         });
 
+        // Create texture bind group layout (Group 1)
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Terrain Texture Bind Group Layout"),
+            entries: &[
+                // Grass Diffuse Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // Terrain Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Create texture bind group
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Texture Bind Group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&terrain_textures.grass_diffuse_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&terrain_textures.sampler),
+                },
+            ],
+        });
+
         // Create vertex buffers
         let (vertex_buffer, index_buffer) = Self::create_buffers(device, positions, colors, normals, indices);
         let index_count = indices.len() as u32;
 
-        // Create pipeline layout
+        // Create pipeline layout with both bind groups
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -252,6 +376,7 @@ impl TerrainPipeline {
             index_buffer,
             uniform_buffer,
             bind_group,
+            texture_bind_group,
             index_count,
         }
     }
@@ -328,6 +453,7 @@ impl TerrainPipeline {
 
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);

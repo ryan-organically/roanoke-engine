@@ -395,7 +395,7 @@ impl AnimalSpecies {
             // Docile animals
             Self::WhitetailDeer => &[Habitat::Forests, Habitat::Meadows, Habitat::Fields],
             Self::Stag => &[Habitat::Forests, Habitat::Mountains, Habitat::Meadows],
-            Self::Horse => &[Habitat::Plains, Habitat::Meadows, Habitat::Fields],
+            Self::Horse => &[Habitat::Plains, Habitat::Meadows, Habitat::Fields, Habitat::Beach],
             Self::Donkey => &[Habitat::Plains, Habitat::Mountains, Habitat::Fields],
             Self::Fox => &[Habitat::Forests, Habitat::Fields, Habitat::Meadows],
             Self::Husky => &[Habitat::Mountains, Habitat::Forests, Habitat::Plains],
@@ -783,6 +783,17 @@ impl AnimalSpecies {
             _ => 1.0,
         }
     }
+
+    /// Get the Y-axis offset for model positioning
+    /// Used to correct model anchor points (e.g., stag antlers positioned at bottom)
+    pub fn model_y_offset(&self) -> f32 {
+        match self {
+            // Stag model has antlers anchored at bottom, need to lift model
+            Self::Stag => 1.0,
+            Self::WhitetailDeer => 0.3,
+            _ => 0.0,
+        }
+    }
 }
 
 /// Base stats for an animal species
@@ -858,6 +869,7 @@ pub enum Habitat {
     Fields,
     CoastalPlains,
     NearWater,
+    Beach,
 }
 
 /// Attack definition

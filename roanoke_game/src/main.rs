@@ -5,7 +5,7 @@
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -326,6 +326,7 @@ struct SharedState {
     // Asset Registry
     mesh_registry: std::collections::HashMap<String, TreeMesh>, // For Trees/Rocks
     building_registry: std::collections::HashMap<String, Arc<BuildingMesh>>, // For Buildings
+    terrain_textures: Option<Arc<TerrainTextures>>, // Shared terrain textures for all chunks
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_slideshow: LoadingSlideshow, // For Loading Screen
     weather: WeatherSystem,
@@ -420,6 +421,133 @@ impl SharedState {
         // Split borrow: systems_manager and animal_manager are separate fields
         // Within a method on SharedState, Rust can see they're distinct
         self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+}
+
+/// Spawn tame animals (horses, donkeys) in villages
+/// Each village gets 4 tame horses and 1 tame donkey that stay within village bounds
+fn spawn_village_animals(
+    animal_manager: &mut animals::AnimalManager,
+    village_data: &[(Vec3, f32, String)],
+    seed: u32,
+) {
+    use croatoan_wfc::get_height_at;
+
+    for (center, bounds_radius, name) in village_data {
+        // Spawn 4 tame horses spread around the village
+        for i in 0..4 {
+            let angle = (i as f32 / 4.0) * std::f32::consts::TAU + 0.3;
+            let radius = bounds_radius * 0.4 + (i as f32 * 5.0);
+            let x = center.x + angle.cos() * radius;
+            let z = center.z + angle.sin() * radius;
+            let (height, _) = get_height_at(x, z, seed);
+            let pos = Vec3::new(x, height, z);
+
+            // Spawn tame horse with village as home
+            let id = animal_manager.spawn(animals::AnimalSpecies::Horse, pos, (0, 0), None);
+            if let Some(horse) = animal_manager.get_mut(id) {
+                horse.home_position = *center;
+                horse.territory_radius = bounds_radius * 0.8;
+                horse.taming_progress = 1.0; // Fully tamed
+            }
+        }
+
+        // Spawn 1 tame donkey
+        let donkey_angle: f32 = 2.5;
+        let donkey_radius = bounds_radius * 0.3;
+        let x = center.x + donkey_angle.cos() * donkey_radius;
+        let z = center.z + donkey_angle.sin() * donkey_radius;
+        let (height, _) = get_height_at(x, z, seed);
+        let pos = Vec3::new(x, height, z);
+
+        let id = animal_manager.spawn(animals::AnimalSpecies::Donkey, pos, (0, 0), None);
+        if let Some(donkey) = animal_manager.get_mut(id) {
+            donkey.home_position = *center;
+            donkey.territory_radius = bounds_radius * 0.7;
+            donkey.taming_progress = 1.0; // Fully tamed
+        }
+
+        println!("[VILLAGE] Spawned 4 horses and 1 donkey in '{}'", name);
+    }
+}
+
+/// Spawn wild horse herds on beaches throughout the world
+/// Horses spawn in groups of 2-7, flee from player, and roam beach areas
+fn spawn_beach_horses(
+    animal_manager: &mut animals::AnimalManager,
+    seed: u32,
+) {
+    use croatoan_wfc::{get_height_at, get_biome_t};
+    use rand::SeedableRng;
+    use rand::Rng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+
+    // Scan for beach areas and spawn horse herds
+    // We sample points in a large grid and look for beach biome (t between 0.45-0.55)
+    let world_size = 4000.0; // Scan radius from origin
+    let sample_step = 200.0; // Check every 200 units
+    let mut herds_spawned = 0;
+    let max_herds = 20; // Limit total beach horse herds
+
+    let mut x = -world_size;
+    while x < world_size && herds_spawned < max_herds {
+        let mut z = -world_size;
+        while z < world_size && herds_spawned < max_herds {
+            // Check if this is a beach biome
+            let biome_t = get_biome_t(x, z, seed);
+
+            // Beach is biome_t between 0.45 and 0.55
+            if biome_t >= 0.45 && biome_t <= 0.55 {
+                // Use deterministic randomness based on position
+                let pos_hash = ((x as i32).wrapping_mul(73856093)) ^ ((z as i32).wrapping_mul(19349663));
+                let spawn_chance = ((pos_hash as u32) % 100) as f32 / 100.0;
+
+                // 15% chance to spawn a herd at each beach sample point
+                if spawn_chance < 0.15 {
+                    // Determine herd size (2-7 horses)
+                    let herd_size = 2 + (rng.gen::<u32>() % 6) as usize;
+
+                    // Create a pack for this herd
+                    let pack_id = animal_manager.create_pack(animals::AnimalSpecies::Horse);
+
+                    // Spawn horses in a loose group
+                    for i in 0..herd_size {
+                        let angle = (i as f32 / herd_size as f32) * std::f32::consts::TAU + rng.gen::<f32>() * 0.5;
+                        let radius = 5.0 + rng.gen::<f32>() * 10.0; // 5-15m spread
+                        let hx = x + angle.cos() * radius;
+                        let hz = z + angle.sin() * radius;
+                        let (height, _) = get_height_at(hx, hz, seed);
+
+                        // Only spawn if above water
+                        if height > 0.5 {
+                            let pos = glam::Vec3::new(hx, height, hz);
+                            let id = animal_manager.spawn(
+                                animals::AnimalSpecies::Horse,
+                                pos,
+                                (0, 0),
+                                Some(pack_id),
+                            );
+
+                            // Set home position and territory for the herd
+                            if let Some(horse) = animal_manager.get_mut(id) {
+                                horse.home_position = glam::Vec3::new(x, height, z);
+                                horse.territory_radius = 150.0; // Roam within 150m of spawn
+                            }
+                        }
+                    }
+
+                    herds_spawned += 1;
+                }
+            }
+
+            z += sample_step;
+        }
+        x += sample_step;
+    }
+
+    if herds_spawned > 0 {
+        println!("[ANIMALS] Spawned {} wild horse herds on beaches", herds_spawned);
     }
 }
 
@@ -557,6 +685,7 @@ fn main() {
         },
         mesh_registry: std::collections::HashMap::new(),
         building_registry: std::collections::HashMap::new(),
+        terrain_textures: None, // Loaded on first GPU access
         background_texture: None,
         loading_slideshow: LoadingSlideshow::new(),
         weather: WeatherSystem::new(),
@@ -614,7 +743,7 @@ fn main() {
     // Response Data: (Terrain, Grass, Trees, Detritus, Rocks, Coord X, Coord Z)
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
-        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Grass
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>, // Grass (pos, col, local_height, idx)
         Vec<Mat4>, // Trees (Instanced)
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
         Vec<(String, Mat4)>, // Rocks (Named Instances)
@@ -647,7 +776,7 @@ fn main() {
                 generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
 
             // Generate grass
-            let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
+            let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
@@ -690,7 +819,7 @@ fn main() {
             println!("[GEN] Chunk ({}, {}) generated, sending to main thread...", req.coord.x, req.coord.z);
             if chunk_tx.send((
                 terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                grass_pos, grass_col, grass_idx,
+                grass_pos, grass_col, grass_heights, grass_idx,
                 tree_instances,
                 det_pos, det_nrm, det_uv, det_idx,
                 rock_instances,
@@ -1038,163 +1167,27 @@ fn main() {
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Foliage - Load GLTF plant models with textures
-                // The scene.gltf has plants in world-space, so we center each mesh
-                {
-                    println!("[ASSET] ========== FOLIAGE LOADING START ==========");
-
-                    let foliage_path = "assets/models/foliage/scene.gltf";
-
-                    match gltf_loader::load_gltf(foliage_path) {
-                        Ok(model) => {
-                            println!("[ASSET] Loaded GLTF foliage: {} meshes", model.meshes.len());
-
-                            let mut loaded_tree = false;
-
-                            // Find a good plant mesh:
-                            // - Skip Object_0 (61K verts, ground cover)
-                            // - Skip tiny meshes (<100 verts)
-                            // - Prefer meshes with 500-10000 verts (actual plants)
-                            for (i, mesh) in model.meshes.iter().enumerate() {
-                                let vert_count = mesh.positions.len();
-
-                                // Skip ground cover (too heavy) and tiny decorations
-                                if vert_count > 15000 || vert_count < 200 {
-                                    println!("[ASSET] Skipping mesh {}: '{}' ({} verts - {})",
-                                        i, mesh.name, vert_count,
-                                        if vert_count > 15000 { "too heavy" } else { "too small" });
-                                    continue;
-                                }
-
-                                // Skip trunk-only meshes (no alpha = no leaves)
-                                // We want meshes with MASK alpha mode (leaves with transparency)
-                                if mesh.material.alpha_mode != "MASK" {
-                                    println!("[ASSET] Skipping mesh {}: '{}' (no alpha mask - likely trunk only)",
-                                        i, mesh.name);
-                                    continue;
-                                }
-
-                                println!("[ASSET] Processing mesh {}: '{}' ({} verts, tex: {:?})",
-                                    i, mesh.name, vert_count,
-                                    mesh.material.base_color_texture.as_ref().map(|s| s.split('/').last().unwrap_or(s)));
-
-                                // GLTF from Sketchfab uses Y-up, we need Z-up
-                                // Apply rotation: Y becomes Z, Z becomes -Y
-                                let rotated_positions: Vec<[f32; 3]> = mesh.positions.iter()
-                                    .map(|p| [p[0], p[2], p[1]]) // Y-up to Z-up
-                                    .collect();
-
-                                // Calculate bounds after rotation
-                                let mut min = [f32::MAX; 3];
-                                let mut max = [f32::MIN; 3];
-                                for pos in &rotated_positions {
-                                    for j in 0..3 {
-                                        min[j] = min[j].min(pos[j]);
-                                        max[j] = max[j].max(pos[j]);
-                                    }
-                                }
-                                let center = [
-                                    (min[0] + max[0]) * 0.5,
-                                    (min[1] + max[1]) * 0.5,
-                                    min[2], // Keep base at ground level (Z is now up)
-                                ];
-                                let height = max[2] - min[2];
-                                let scale = 1.5 / height.max(1.0); // Normalize to ~1.5 units tall (small plants/grass)
-
-                                // Transform positions: center and scale
-                                let centered_positions: Vec<[f32; 3]> = rotated_positions.iter()
-                                    .map(|p| [
-                                        (p[0] - center[0]) * scale,
-                                        (p[1] - center[1]) * scale,
-                                        (p[2] - center[2]) * scale,
-                                    ])
-                                    .collect();
-
-                                // Also rotate normals to match
-                                let rotated_normals: Vec<[f32; 3]> = mesh.normals.iter()
-                                    .map(|n| [n[0], n[2], n[1]])
-                                    .collect();
-
-                                // Load texture if available
-                                let texture_bind_group = if let Some(tex_path) = &mesh.material.base_color_texture {
-                                    match gltf_loader::load_texture(tex_path) {
-                                        Ok(tex_data) => {
-                                            let (_, tex_view) = gltf_loader::create_gpu_texture(
-                                                ctx.device(),
-                                                ctx.queue(),
-                                                &tex_data,
-                                                Some(&format!("Foliage Texture {}", i)),
-                                            );
-                                            let temp_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
-                                            let bind_group = temp_pipeline.create_texture_bind_group(
-                                                ctx.device(),
-                                                &tex_view,
-                                                Some(&format!("Foliage Bind Group {}", i)),
-                                            );
-                                            println!("[ASSET] Loaded texture: {}x{}", tex_data.width, tex_data.height);
-                                            Some(Arc::new(bind_group))
-                                        }
-                                        Err(e) => {
-                                            println!("[ASSET] Texture load failed: {}", e);
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                let gpu_mesh = TreePipeline::create_mesh(
-                                    ctx.device(),
-                                    &centered_positions,
-                                    &rotated_normals,
-                                    &mesh.uvs,
-                                    &mesh.indices,
-                                    texture_bind_group,
-                                );
-
-                                // First valid plant becomes tree_oak
-                                if !loaded_tree {
-                                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh.clone());
-                                    println!("[ASSET] Registered '{}' as tree_oak ({} verts, height {:.1} -> scaled to ~5)",
-                                        mesh.name, vert_count, height);
-                                    loaded_tree = true;
-                                }
-
-                                // Register additional foliage types
-                                let safe_name = format!("foliage_{}", i);
-                                state.mesh_registry.insert(safe_name.clone(), gpu_mesh);
-                                println!("[ASSET] Registered foliage: {}", safe_name);
-
-                                // Limit foliage types for memory (after rocks are added)
-                                if i >= 8 {
-                                    println!("[ASSET] Loaded enough foliage meshes");
-                                    break;
-                                }
-                            }
-
-                            if !loaded_tree {
-                                println!("[ASSET] No suitable foliage found, using procedural tree");
-                                let mesh = generate_simple_tree_mesh(4.0, 0.3, 2.5, 12345);
-                                let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                                let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                                let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
-                                let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &mesh.indices, None);
-                                state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                            }
-                        }
-                        Err(e) => {
-                            println!("[ASSET] GLTF load failed: {}, using procedural tree", e);
-                            let mesh = generate_simple_tree_mesh(4.0, 0.3, 2.5, 12345);
-                            let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                            let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                            let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
-                            let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &mesh.indices, None);
-                            state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                        }
-                    }
-
-                    println!("[ASSET] ========== FOLIAGE LOADING COMPLETE ==========");
-                }
+                // ========================================================================
+                // TREE SYSTEM - FRAMEWORK ONLY
+                // ========================================================================
+                // Current status: NO TREE MODELS AVAILABLE
+                //
+                // The assets/models/foliage/scene.gltf contains only billboard grass planes,
+                // NOT actual 3D tree models. The tree system requires proper tree GLTFs.
+                //
+                // To add trees:
+                // 1. Acquire tree GLTF models (e.g., from Poly Haven, Sketchfab)
+                // 2. Place in assets/models/trees/
+                // 3. Load here using gltf_loader::load_gltf()
+                // 4. Register as "tree_oak", "tree_pine", etc. in mesh_registry
+                //
+                // The TreePipeline infrastructure is ready:
+                // - TreePipeline::create_mesh() for GPU mesh creation
+                // - TreePipeline::new() for rendering pipeline
+                // - tree_instances from generate_trees_for_chunk() for placement
+                // ========================================================================
+                println!("[TREES] No tree models available - tree rendering disabled");
+                println!("[TREES] Add GLTF tree models to assets/models/trees/ to enable");
 
                 // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
                 let rock_types: Vec<(RockRecipe, &str)> = vec![
@@ -1225,6 +1218,21 @@ fn main() {
                 }
 
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
+            }
+
+            // Load terrain textures if not already loaded
+            if state.terrain_textures.is_none() {
+                println!("[GPU] Loading terrain textures...");
+                match TerrainTextures::load(ctx.device(), ctx.queue(), "assets") {
+                    Ok(textures) => {
+                        state.terrain_textures = Some(Arc::new(textures));
+                        println!("[GPU] Terrain textures loaded successfully");
+                    }
+                    Err(e) => {
+                        println!("[GPU] WARNING: Failed to load terrain textures: {}", e);
+                        println!("[GPU] Terrain will render without textures");
+                    }
+                }
             }
 
             if state.building_registry.is_empty() {
@@ -1815,10 +1823,13 @@ fn main() {
                 if let Some(model_name) = animal.species.model_name() {
                     // Use 3D model pipeline
                     let model_scale = animal.species.model_scale();
+                    // Apply Y offset to correct model anchor points (e.g., stag antlers)
+                    let y_offset = animal.species.model_y_offset();
+                    let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         Vec3::splat(model_scale),
                         animal.rotation,
-                        animal.position,
+                        model_position,
                     );
                     let instance = AnimalInstance::new(model_matrix, color, emissive);
                     model_instances.entry(model_name).or_insert_with(Vec::new).push(instance);
@@ -2205,6 +2216,14 @@ fn main() {
                                                     2000.0, // 2km radius
                                                     10,     // max 10 villages
                                                 );
+                                                // Spawn tame animals (horses, donkeys) in villages
+                                                {
+                                                    let village_data = state.village_manager.get_village_spawn_data();
+                                                    let seed = state.village_manager.get_seed();
+                                                    spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                                }
+                                                // Spawn wild horse herds on beaches
+                                                spawn_beach_horses(&mut state.animal_manager, data.seed);
                                                 // Register village factions
                                                 register_village_factions(&mut *state);
                                             }
@@ -2240,6 +2259,14 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Spawn tame animals (horses, donkeys) in villages
+                                        {
+                                            let village_data = state.village_manager.get_village_spawn_data();
+                                            let seed = state.village_manager.get_seed();
+                                            spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                        }
+                                        // Spawn wild horse herds on beaches
+                                        spawn_beach_horses(&mut state.animal_manager, seed);
                                         // Register village factions
                                         register_village_factions(&mut *state);
                                     }
@@ -2959,7 +2986,7 @@ fn main() {
                 for _ in 0..chunks_per_frame {
                     match rx.try_recv() {
                         Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                            grass_pos, grass_col, grass_idx,
+                            grass_pos, grass_col, grass_heights, grass_idx,
                             tree_instances,
                             det_pos, det_nrm, det_uv, det_idx,
                             rock_instances,
@@ -2989,11 +3016,15 @@ fn main() {
                             // Create Pipelines
                             let terrain_pipeline = {
                                 let shadow_map = shadow_map_mutex.safe_lock();
+                                // Get terrain textures (should be loaded by now)
+                                let terrain_textures = state.terrain_textures.as_ref()
+                                    .expect("Terrain textures should be loaded before chunks");
                                 TerrainPipeline::new(
                                     ctx.device(),
                                     ctx.surface_format(),
                                     &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
-                                    &shadow_map
+                                    &shadow_map,
+                                    terrain_textures.as_ref()
                                 )
                             };
 
@@ -3002,23 +3033,15 @@ fn main() {
                                 let shadow_map = shadow_map_mutex.safe_lock();
                                 let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                                 drop(shadow_map);
-                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
+                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_heights, &grass_idx);
                                 grass_pipeline = Some(gp);
                             }
 
-                            let mut tree_pipeline = None;
-                            println!("[CHUNK] Tree instances: {}", tree_instances.len());
-                            if !tree_instances.is_empty() {
-                                if let Some(mesh) = state.mesh_registry.get("tree_oak") {
-                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
-                                    tp.set_mesh(mesh.clone());
-                                    tp.upload_instances(ctx.device(), &tree_instances);
-                                    tree_pipeline = Some(tp);
-                                    println!("[CHUNK] Created tree pipeline with {} instances", tree_instances.len());
-                                } else {
-                                    println!("[WARN] tree_oak mesh not found in registry!");
-                                }
-                            }
+                            // DISABLED: Tree system using billboard grass meshes instead of real tree models
+                            // TODO: Get proper tree models (GLTF with actual 3D tree geometry)
+                            // The foliage/scene.gltf only contains flat billboard grass, not trees
+                            let tree_pipeline: Option<TreePipeline> = None;
+                            println!("[CHUNK] Trees DISABLED - need proper tree models (had {} instances)", tree_instances.len());
 
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
@@ -3275,7 +3298,7 @@ fn main() {
                             fog_start,
                             fog_end,
                             fog_density,
-                            0.1,   // alpha_cutoff - low to show more leaves
+                            0.5,   // alpha_cutoff - use 0.5 for clean leaf edges
                             1.0,   // use_texture = sample from texture
                         );
                     }

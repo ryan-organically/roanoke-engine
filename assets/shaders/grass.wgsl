@@ -23,6 +23,7 @@ var s_shadow: sampler_comparison;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) local_height: f32,  // 0.0 at base, 1.0 at tip - for wind animation
 };
 
 struct VertexOutput {
@@ -145,8 +146,9 @@ fn apply_wind(world_pos: vec3<f32>, height_factor: f32, time: f32) -> vec3<f32> 
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // Calculate height factor (0 at base, 1 at tip)
-    let height_factor = saturate(vertex.position.y / 1.0);
+    // Use local_height directly (0.0 at base, 1.0 at tip)
+    // This is independent of world Y position, fixing the floating grass bug
+    let height_factor = vertex.local_height;
 
     // Apply wind animation with real time
     let animated_position = apply_wind(vertex.position, height_factor, camera.time);

@@ -308,6 +308,20 @@ impl VillageManager {
         self.instances_dirty = true;
     }
 
+    /// Get village data for spawning tame animals
+    /// Returns a list of (center, bounds_radius, name) for each village
+    pub fn get_village_spawn_data(&self) -> Vec<(Vec3, f32, String)> {
+        self.villages
+            .iter()
+            .map(|v| (v.center, v.layout.bounds_radius, v.layout.name.clone()))
+            .collect()
+    }
+
+    /// Get the seed for terrain height queries
+    pub fn get_seed(&self) -> u32 {
+        self.seed
+    }
+
     /// Collect village faction data for registration
     /// Returns vectors of (village_id, VillageFaction) and (npc_id, NpcFactionData)
     pub fn collect_faction_data(&self) -> (
