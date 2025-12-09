@@ -404,7 +404,9 @@ impl ModelCache {
             return self.models.get(name);
         }
 
-        let path = format!("{}/{}.gltf", self.base_path, name);
+        let glb_path = format!("{}/{}.glb", self.base_path, name);
+        let gltf_path = format!("{}/{}.gltf", self.base_path, name);
+        let path = if std::path::Path::new(&glb_path).exists() { glb_path } else { gltf_path };
 
         match load_gltf(&path) {
             Ok(model) => {

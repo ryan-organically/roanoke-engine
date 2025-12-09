@@ -26,7 +26,7 @@ impl ChunkCoord {
 pub struct LoadedChunk {
     pub terrain: TerrainPipeline,
     pub grass: Option<GrassPipeline>,
-    pub trees: Option<TreePipeline>,
+    pub trees: Vec<TreePipeline>, // Foliage: trees + shrubs
     pub detritus: Option<DetritusPipeline>,
     pub rocks: Vec<TreePipeline>, // List of pipelines for different rock types in this chunk
     pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk

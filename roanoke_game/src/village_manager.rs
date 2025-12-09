@@ -196,9 +196,9 @@ impl VillageManager {
 
     /// Create the main Croatoan village - a large settlement near spawn
     fn create_croatoan_village(&mut self, spawn: Vec3) {
-        // Place village 150 units from spawn in positive X/Z direction
-        let village_x = spawn.x + 150.0;
-        let village_z = spawn.z + 150.0;
+        // Place village close to spawn (40 units in positive X/Z direction)
+        let village_x = spawn.x + 40.0;
+        let village_z = spawn.z + 40.0;
         let (height, _) = get_height_at(village_x, village_z, self.seed);
         let village_center = Vec3::new(village_x, height.max(5.0), village_z);
 

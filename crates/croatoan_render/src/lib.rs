@@ -19,9 +19,11 @@ pub mod viewmodel_pipeline;
 pub mod light_shaft_pipeline;
 pub mod animal_orb_pipeline;
 pub mod animal_model_pipeline;
+pub mod foliage_pipeline;
 
 pub use terrain_pipeline::{TerrainPipeline, TerrainTextures};
 pub use grass_pipeline::GrassPipeline;
+pub use foliage_pipeline::{FoliagePipeline, FoliageVertex, FoliageInstance};
 pub use tree_pipeline::{TreePipeline, TreeMesh};
 pub use detritus_pipeline::DetritusPipeline;
 pub use sky_pipeline::SkyPipeline;

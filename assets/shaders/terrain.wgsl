@@ -199,14 +199,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Base surface color
     var surface_color = input.color;
 
-    if (is_grass) {
-        // Use grass texture directly for grassy areas
-        // The texture provides all the color variation we need
-        surface_color = grass_tex.rgb;
-    } else if (is_beach) {
-        // Beach: use vertex color (sand), no grass texture
-        surface_color = input.color;
-    }
+    // Grass tiling disabled - use vertex colors only
 
     // Apply lighting to surface color
     var final_color = surface_color * lighting;

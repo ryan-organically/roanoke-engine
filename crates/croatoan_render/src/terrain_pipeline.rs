@@ -83,6 +83,67 @@ impl TerrainTextures {
             sampler,
         })
     }
+
+    /// Create fallback textures when loading fails (simple gray placeholder)
+    pub fn create_fallback(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        log::info!("[TerrainTextures] Creating fallback placeholder texture");
+
+        // Create a simple 4x4 gray texture
+        let size = wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+
+        // Gray color: RGBA(128, 128, 128, 255)
+        let data: Vec<u8> = (0..16).flat_map(|_| vec![128u8, 128, 128, 255]).collect();
+
+        let grass_diffuse = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Fallback Terrain Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &grass_diffuse,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 4),
+                rows_per_image: Some(4),
+            },
+            size,
+        );
+
+        let grass_diffuse_view = grass_diffuse.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Fallback Terrain Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        Self {
+            grass_diffuse,
+            grass_diffuse_view,
+            sampler,
+        }
+    }
 }
 
 /// Maximum vertices per terrain chunk (safety limit)

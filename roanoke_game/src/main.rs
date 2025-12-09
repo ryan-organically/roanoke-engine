@@ -4,8 +4,8 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -725,7 +725,7 @@ fn main() {
         combat_kill_time: 0.0,
         // Debug
         debug_timer: 0.0,
-        fog_level: 2, // Start with medium fog
+        fog_level: 0, // Start with fog off
         // Audio state tracking
         was_in_village: false,
         // Data Pipeline
@@ -1186,8 +1186,51 @@ fn main() {
                 // - TreePipeline::new() for rendering pipeline
                 // - tree_instances from generate_trees_for_chunk() for placement
                 // ========================================================================
-                println!("[TREES] No tree models available - tree rendering disabled");
-                println!("[TREES] Add GLTF tree models to assets/models/trees/ to enable");
+                // Load tree models from assets/models/trees/
+                let tree_models = ["tree_0", "tree_1"];
+                let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                for name in &tree_models {
+                    if let Some(model) = tree_cache.load(name) {
+                        for mesh in &model.meshes {
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &mesh.positions,
+                                &mesh.normals,
+                                &mesh.uvs,
+                                &mesh.indices,
+                                None,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[FOLIAGE] Registered tree: {} ({} verts)", name, mesh.positions.len());
+                            break; // Only first mesh per model
+                        }
+                    } else {
+                        println!("[FOLIAGE] WARNING: Tree model '{}' not found", name);
+                    }
+                }
+
+                // Load shrub/bush models from assets/models/shrubs/
+                let shrub_models = ["shrub_0", "bush_0", "grass_0"];
+                let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
+                for name in &shrub_models {
+                    if let Some(model) = shrub_cache.load(name) {
+                        for mesh in &model.meshes {
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &mesh.positions,
+                                &mesh.normals,
+                                &mesh.uvs,
+                                &mesh.indices,
+                                None,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[FOLIAGE] Registered shrub: {} ({} verts)", name, mesh.positions.len());
+                            break; // Only first mesh per model
+                        }
+                    } else {
+                        println!("[FOLIAGE] WARNING: Shrub model '{}' not found", name);
+                    }
+                }
 
                 // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
                 let rock_types: Vec<(RockRecipe, &str)> = vec![
@@ -1230,7 +1273,9 @@ fn main() {
                     }
                     Err(e) => {
                         println!("[GPU] WARNING: Failed to load terrain textures: {}", e);
-                        println!("[GPU] Terrain will render without textures");
+                        println!("[GPU] Using fallback placeholder texture");
+                        let fallback = TerrainTextures::create_fallback(ctx.device(), ctx.queue());
+                        state.terrain_textures = Some(Arc::new(fallback));
                     }
                 }
             }
@@ -3037,11 +3082,52 @@ fn main() {
                                 grass_pipeline = Some(gp);
                             }
 
-                            // DISABLED: Tree system using billboard grass meshes instead of real tree models
-                            // TODO: Get proper tree models (GLTF with actual 3D tree geometry)
-                            // The foliage/scene.gltf only contains flat billboard grass, not trees
-                            let tree_pipeline: Option<TreePipeline> = None;
-                            println!("[CHUNK] Trees DISABLED - need proper tree models (had {} instances)", tree_instances.len());
+                            // FOLIAGE: Create pipelines for trees and shrubs
+                            let mut foliage_pipelines: Vec<TreePipeline> = Vec::new();
+                            let tree_model_names = ["tree_0", "tree_1"];
+                            let shrub_model_names = ["shrub_0", "bush_0"];
+
+                            // Group trees by model
+                            let mut tree_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (i, transform) in tree_instances.iter().enumerate() {
+                                let name = tree_model_names[i % tree_model_names.len()].to_string();
+                                tree_groups.entry(name).or_default().push(*transform);
+                            }
+                            for (name, transforms) in tree_groups {
+                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), &transforms);
+                                    foliage_pipelines.push(tp);
+                                    println!("[FOLIAGE] Tree '{}': {} instances", name, transforms.len());
+                                }
+                            }
+
+                            // Generate shrubs around trees
+                            let mut shrub_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (i, t) in tree_instances.iter().enumerate() {
+                                let name = shrub_model_names[i % shrub_model_names.len()].to_string();
+                                let pos = t.w_axis;
+                                for j in 0..2 {
+                                    let ang = (i + j) as f32 * 2.1;
+                                    let shrub_t = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(1.0),
+                                        glam::Quat::from_rotation_y(ang),
+                                        Vec3::new(pos.x + ang.cos() * 4.0, pos.y + 0.5, pos.z + ang.sin() * 4.0),
+                                    );
+                                    shrub_groups.entry(name.clone()).or_default().push(shrub_t);
+                                }
+                            }
+                            for (name, transforms) in shrub_groups {
+                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                                    let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    sp.set_mesh(mesh.clone());
+                                    sp.upload_instances(ctx.device(), &transforms);
+                                    foliage_pipelines.push(sp);
+                                    println!("[FOLIAGE] Shrub '{}': {} instances", name, transforms.len());
+                                }
+                            }
+                            println!("[CHUNK] Foliage: {} pipelines", foliage_pipelines.len());
 
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
@@ -3154,7 +3240,7 @@ fn main() {
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
                                 grass: grass_pipeline,
-                                trees: tree_pipeline,
+                                trees: foliage_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
                                 buildings: building_pipelines,
@@ -3286,7 +3372,7 @@ fn main() {
                             fog_density,
                         );
                     }
-                    if let Some(trees) = &chunk.trees {
+                    for trees in &chunk.trees {
                         // Textured foliage from GLTF - enable texture sampling + alpha discard
                         trees.update_camera_full(
                             ctx.queue(),
@@ -3567,7 +3653,7 @@ fn main() {
                     // Trees - RE-ENABLED with simple low-poly mesh (~36 tris per tree)
                     // Previously: 94K tris per instance (247K face OBJ)
                     // Now: ~36 tris per instance (cylinder trunk + icosphere canopy)
-                    if let Some(trees) = &chunk.trees {
+                    for trees in &chunk.trees {
                         if dist <= tree_max_distance {
                             trees_rendered += 1;
                             trees.render(&mut render_pass);

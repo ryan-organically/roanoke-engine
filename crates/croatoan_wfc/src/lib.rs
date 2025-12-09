@@ -78,6 +78,7 @@ pub mod biome_spawner;
 // Existing systems
 pub mod vegetation;
 pub mod trees;
+pub mod foliage_gen;
 pub mod rocks;
 pub mod buildings;
 pub mod villages;
@@ -175,6 +176,10 @@ pub use trees::generate_bunches_for_chunk;
 pub use trees::TreeTemplate;
 pub use trees::LowlandBunch;
 pub use trees::BunchInstances;
+// Foliage (multi-model trees + shrubs)
+pub use foliage_gen::generate_foliage_for_chunk;
+pub use foliage_gen::FoliageInstance;
+pub use foliage_gen::FoliageInstances;
 
 // Rocks
 pub use rocks::generate_rocks_for_chunk;
