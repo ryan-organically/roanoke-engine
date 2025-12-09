@@ -49,6 +49,15 @@ impl Camera {
         self.projection_matrix() * self.view_matrix()
     }
 
+    /// Get view-projection matrix for sky rendering (rotation only, no translation)
+    /// This makes the sky appear at infinity and not react to player movement
+    pub fn sky_view_projection_matrix(&self) -> Mat4 {
+        // Create a view matrix centered at origin but with same rotation
+        // This removes translation so the sky doesn't shift with camera position
+        let sky_view = Mat4::look_at_rh(Vec3::ZERO, self.forward(), self.up);
+        self.projection_matrix() * sky_view
+    }
+
     /// Update aspect ratio (for window resize)
     pub fn set_aspect_ratio(&mut self, aspect_ratio: f32) {
         self.aspect_ratio = aspect_ratio;

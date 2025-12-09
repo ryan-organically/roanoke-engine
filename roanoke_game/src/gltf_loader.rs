@@ -8,8 +8,10 @@ use std::path::Path;
 /// Material information extracted from GLTF
 #[derive(Debug, Clone, Default)]
 pub struct LoadedMaterial {
-    /// Path to base color texture (relative to GLTF file)
+    /// Path to base color texture (relative to GLTF file) - for external textures
     pub base_color_texture: Option<String>,
+    /// Embedded base color texture data (for GLB files)
+    pub base_color_texture_data: Option<LoadedTexture>,
     /// Path to normal map texture
     pub normal_texture: Option<String>,
     /// Base color factor (RGBA) if no texture
@@ -20,6 +22,13 @@ pub struct LoadedMaterial {
     pub alpha_cutoff: f32,
     /// Whether material is double-sided
     pub double_sided: bool,
+}
+
+impl LoadedMaterial {
+    /// Check if this material has a texture (either embedded or external path)
+    pub fn has_texture(&self) -> bool {
+        self.base_color_texture_data.is_some() || self.base_color_texture.is_some()
+    }
 }
 
 /// Loaded mesh data ready for GPU upload
@@ -177,11 +186,62 @@ pub fn load_gltf_with_options(
         ));
     }
 
-    // Load GLTF
-    let (document, buffers, _images) = gltf::import(path)
+    // Load GLTF - images contains decoded embedded textures from GLB files
+    let (document, buffers, images) = gltf::import(path)
         .map_err(|e| format!("Failed to load GLTF: {}", e))?;
 
-    // Build image URI lookup
+    // Convert embedded images to LoadedTexture format
+    let embedded_textures: Vec<Option<LoadedTexture>> = images
+        .iter()
+        .map(|img| {
+            let width = img.width;
+            let height = img.height;
+
+            // Security: limit texture size
+            if width > limits::MAX_TEXTURE_SIZE || height > limits::MAX_TEXTURE_SIZE {
+                log::warn!(
+                    "[GLTF] Embedded texture too large: {}x{} (max {}), skipping",
+                    width, height, limits::MAX_TEXTURE_SIZE
+                );
+                return None;
+            }
+
+            // Convert to RGBA8 format
+            let data = match img.format {
+                gltf::image::Format::R8G8B8A8 => img.pixels.clone(),
+                gltf::image::Format::R8G8B8 => {
+                    // Convert RGB to RGBA
+                    img.pixels
+                        .chunks(3)
+                        .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                        .collect()
+                }
+                gltf::image::Format::R8 => {
+                    // Grayscale to RGBA
+                    img.pixels
+                        .iter()
+                        .flat_map(|&g| [g, g, g, 255])
+                        .collect()
+                }
+                gltf::image::Format::R8G8 => {
+                    // RG to RGBA (treat as grayscale + alpha)
+                    img.pixels
+                        .chunks(2)
+                        .flat_map(|rg| [rg[0], rg[0], rg[0], rg[1]])
+                        .collect()
+                }
+                _ => {
+                    log::warn!("[GLTF] Unsupported image format: {:?}", img.format);
+                    return None;
+                }
+            };
+
+            log::debug!("[GLTF] Extracted embedded texture: {}x{}", width, height);
+            Some(LoadedTexture { width, height, data })
+        })
+        .collect();
+
+    // Build image URI lookup for external textures
     let image_uris: Vec<Option<String>> = document
         .images()
         .map(|img| {
@@ -189,7 +249,7 @@ pub fn load_gltf_with_options(
                 gltf::image::Source::Uri { uri, .. } => {
                     Some(base_dir.join(uri).to_string_lossy().to_string())
                 }
-                gltf::image::Source::View { .. } => None, // Embedded image, not external file
+                gltf::image::Source::View { .. } => None, // Embedded - handled above
             }
         })
         .collect();
@@ -225,11 +285,22 @@ pub fn load_gltf_with_options(
                 let gltf_mat = document.materials().nth(mat).unwrap();
                 let pbr = gltf_mat.pbr_metallic_roughness();
 
-                // Get base color texture path
-                let base_color_texture = pbr
+                // Get base color texture - try embedded first, then external path
+                let texture_image_idx = pbr
                     .base_color_texture()
-                    .and_then(|info| texture_to_image.get(info.texture().index()).cloned().flatten())
-                    .and_then(|img_idx| image_uris.get(img_idx).cloned().flatten());
+                    .and_then(|info| texture_to_image.get(info.texture().index()).cloned().flatten());
+
+                // Try to get embedded texture data
+                let base_color_texture_data = texture_image_idx
+                    .and_then(|img_idx| embedded_textures.get(img_idx).cloned().flatten());
+
+                // Fall back to external texture path
+                let base_color_texture = if base_color_texture_data.is_none() {
+                    texture_image_idx
+                        .and_then(|img_idx| image_uris.get(img_idx).cloned().flatten())
+                } else {
+                    None
+                };
 
                 // Get normal texture path
                 let normal_texture = gltf_mat
@@ -241,6 +312,7 @@ pub fn load_gltf_with_options(
 
                 LoadedMaterial {
                     base_color_texture,
+                    base_color_texture_data,
                     normal_texture,
                     base_color_factor,
                     alpha_mode: match gltf_mat.alpha_mode() {

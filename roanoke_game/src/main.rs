@@ -1186,19 +1186,67 @@ fn main() {
                 // - TreePipeline::new() for rendering pipeline
                 // - tree_instances from generate_trees_for_chunk() for placement
                 // ========================================================================
+                // Create a temporary TreePipeline to get access to texture_bind_group_layout
+                let texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+
                 // Load tree models from assets/models/trees/
                 let tree_models = ["tree_0", "tree_1"];
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
                         for mesh in &model.meshes {
+                            // Create texture bind group if mesh has embedded texture
+                            let texture_bind_group = if let Some(ref tex_data) = mesh.material.base_color_texture_data {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                let bind_group = texture_helper.create_texture_bind_group(
+                                    ctx.device(),
+                                    &tex_view,
+                                    Some(&format!("{}_bind_group", name)),
+                                );
+                                println!("[FOLIAGE] Created texture for {}: {}x{}, alpha_mode={}, alpha_cutoff={}",
+                                    name, tex_data.width, tex_data.height,
+                                    mesh.material.alpha_mode, mesh.material.alpha_cutoff);
+                                Some(std::sync::Arc::new(bind_group))
+                            } else if let Some(ref tex_path) = mesh.material.base_color_texture {
+                                // Try loading external texture
+                                match gltf_loader::load_texture(tex_path) {
+                                    Ok(tex_data) => {
+                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                            ctx.device(),
+                                            ctx.queue(),
+                                            &tex_data,
+                                            Some(&format!("{}_texture", name)),
+                                        );
+                                        let bind_group = texture_helper.create_texture_bind_group(
+                                            ctx.device(),
+                                            &tex_view,
+                                            Some(&format!("{}_bind_group", name)),
+                                        );
+                                        println!("[FOLIAGE] Loaded external texture for {}: {}", name, tex_path);
+                                        Some(std::sync::Arc::new(bind_group))
+                                    }
+                                    Err(e) => {
+                                        println!("[FOLIAGE] WARNING: Failed to load texture for {}: {}", name, e);
+                                        None
+                                    }
+                                }
+                            } else {
+                                println!("[FOLIAGE] No texture found for {}, using procedural colors", name);
+                                None
+                            };
+
                             let gpu_mesh = TreePipeline::create_mesh(
                                 ctx.device(),
                                 &mesh.positions,
                                 &mesh.normals,
                                 &mesh.uvs,
                                 &mesh.indices,
-                                None,
+                                texture_bind_group,
                             );
                             state.mesh_registry.insert(name.to_string(), gpu_mesh);
                             println!("[FOLIAGE] Registered tree: {} ({} verts)", name, mesh.positions.len());
@@ -1215,13 +1263,55 @@ fn main() {
                 for name in &shrub_models {
                     if let Some(model) = shrub_cache.load(name) {
                         for mesh in &model.meshes {
+                            // Create texture bind group if mesh has embedded texture
+                            let texture_bind_group = if let Some(ref tex_data) = mesh.material.base_color_texture_data {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                let bind_group = texture_helper.create_texture_bind_group(
+                                    ctx.device(),
+                                    &tex_view,
+                                    Some(&format!("{}_bind_group", name)),
+                                );
+                                println!("[FOLIAGE] Created texture for {}: {}x{}", name, tex_data.width, tex_data.height);
+                                Some(std::sync::Arc::new(bind_group))
+                            } else if let Some(ref tex_path) = mesh.material.base_color_texture {
+                                match gltf_loader::load_texture(tex_path) {
+                                    Ok(tex_data) => {
+                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                            ctx.device(),
+                                            ctx.queue(),
+                                            &tex_data,
+                                            Some(&format!("{}_texture", name)),
+                                        );
+                                        let bind_group = texture_helper.create_texture_bind_group(
+                                            ctx.device(),
+                                            &tex_view,
+                                            Some(&format!("{}_bind_group", name)),
+                                        );
+                                        println!("[FOLIAGE] Loaded external texture for {}: {}", name, tex_path);
+                                        Some(std::sync::Arc::new(bind_group))
+                                    }
+                                    Err(e) => {
+                                        println!("[FOLIAGE] WARNING: Failed to load texture for {}: {}", name, e);
+                                        None
+                                    }
+                                }
+                            } else {
+                                println!("[FOLIAGE] No texture found for {}, using procedural colors", name);
+                                None
+                            };
+
                             let gpu_mesh = TreePipeline::create_mesh(
                                 ctx.device(),
                                 &mesh.positions,
                                 &mesh.normals,
                                 &mesh.uvs,
                                 &mesh.indices,
-                                None,
+                                texture_bind_group,
                             );
                             state.mesh_registry.insert(name.to_string(), gpu_mesh);
                             println!("[FOLIAGE] Registered shrub: {} ({} verts)", name, mesh.positions.len());
@@ -3496,9 +3586,12 @@ fn main() {
             // 0.5 Sky Pass (Draw Skybox/Clouds first)
             {
                 let sky_pipeline = sky_pipeline_mutex.safe_lock();
+                // Use rotation-only view matrix for sky - removes translation so sky
+                // appears at infinity and doesn't shift with player movement
+                let sky_view_proj = state.camera.sky_view_projection_matrix();
                 sky_pipeline.update_uniforms(
                     ctx.queue(),
-                    view_proj,
+                    sky_view_proj,
                     sun_dir,
                     Vec3::new(1.0, 1.0, 1.0), // Sun Color (White for now)
                     elapsed,
