@@ -49,13 +49,13 @@ fn estimate_moisture(height: f32, noise_val: f32) -> f32 {
 /// - Forest: Forest Floor grass (tall, dark, shade-adapted)
 /// - Alpine: Alpine grass (short, hardy tufts)
 ///
-/// Returns (positions, colors, indices) for grass mesh
+/// Returns (positions, colors, local_heights, indices) for grass mesh
 pub fn generate_vegetation_for_chunk(
     seed: u32,
     chunk_size: f32,
     offset_x: f32,
     offset_z: f32,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>) {
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
@@ -67,6 +67,7 @@ pub fn generate_vegetation_for_chunk(
 
     let mut all_positions = Vec::new();
     let mut all_colors = Vec::new();
+    let mut all_local_heights = Vec::new();
     let mut all_indices = Vec::new();
 
     // Create chunk-specific seed from chunk coordinates
@@ -160,10 +161,14 @@ pub fn generate_vegetation_for_chunk(
         let vertex_offset = all_positions.len() as u32;
         all_positions.extend(blade.positions);
         all_colors.extend(blade.colors);
+        all_local_heights.extend(blade.local_heights);
         all_indices.extend(blade.indices.iter().map(|idx| idx + vertex_offset));
     }
 
-    (all_positions, all_colors, all_indices)
+    println!("[GRASS] Chunk ({}, {}): {} verts, {} indices",
+        offset_x, offset_z, all_positions.len(), all_indices.len());
+
+    (all_positions, all_colors, all_local_heights, all_indices)
 }
 
 /// Generate vegetation with explicit biome override

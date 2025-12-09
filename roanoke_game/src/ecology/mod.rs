@@ -520,6 +520,13 @@ impl AnimalSpecies {
             Self::RedWolf => 6,
             Self::Bobcat => 8,
             Self::Cottonmouth => 15,
+            // Docile animals
+            Self::WhitetailDeer => 30,
+            Self::Stag => 15,
+            Self::Horse => 12,
+            Self::Donkey => 10,
+            Self::Fox => 20,
+            Self::Husky => 5,
         };
 
         // Adjust by biome suitability
@@ -544,6 +551,13 @@ impl AnimalSpecies {
             Self::RedWolf => 0.07,
             Self::Bobcat => 0.06,
             Self::Cottonmouth => 0.1,
+            // Docile animals
+            Self::WhitetailDeer => 0.12,
+            Self::Stag => 0.1,
+            Self::Horse => 0.06,
+            Self::Donkey => 0.05,
+            Self::Fox => 0.14,
+            Self::Husky => 0.1,
         }
     }
 
@@ -559,6 +573,13 @@ impl AnimalSpecies {
             Self::RedWolf => 0.12,
             Self::Bobcat => 0.1,
             Self::Cottonmouth => 0.15,
+            // Docile animals
+            Self::WhitetailDeer => 0.15,
+            Self::Stag => 0.12,
+            Self::Horse => 0.08,
+            Self::Donkey => 0.06,
+            Self::Fox => 0.18,
+            Self::Husky => 0.1,
         }
     }
 }

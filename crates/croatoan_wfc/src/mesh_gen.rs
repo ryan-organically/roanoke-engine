@@ -137,7 +137,7 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         4, 2.0, 0.5, seed
     );
 
-    // 4. Biome Definitions (Roanoke Spec)
+    // 4. Biome Definitions (Roanoke Spec) - Adjusted to reduce beige
     let (base_height, height_mult, base_color) = if t < 0.45 {
         // Ocean / Shallow Water
         // Add sandbars using detail noise
@@ -149,32 +149,29 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         let depth_factor = (t / 0.45).clamp(0.0, 1.0);
         let c = lerp_color([0.05, 0.3, 0.4], [0.2, 0.8, 0.8], depth_factor);
         (h, 0.1, c)
-    } else if t < 0.55 {
-        // Beach / Dunes
-        let blend = (t - 0.45) / 0.1;
+    } else if t < 0.48 {
+        // Beach / Dunes (Narrowed from 0.55 to 0.48)
+        let blend = (t - 0.45) / 0.03;
         let h = lerp(0.0, 2.0, blend);
         let m = 0.2; // Soft dunes
-        // Warm Sandy Brown (darker, less white)
-        let c = [0.76, 0.60, 0.35];
+        // Darker Wet Sand - less beige/white
+        let c = [0.60, 0.50, 0.40];
         (h, m, c)
-    } else if t < 0.65 {
-        // Subtropical Scrub
-        // Shortened from 0.75 to 0.65 to reduce middle ground
-        let blend = (t - 0.55) / 0.1; // Adjusted divisor for new range (0.1 width)
+    } else if t < 0.58 {
+        // Subtropical Scrub (Narrowed)
+        let blend = (t - 0.48) / 0.10; 
         let h = lerp(2.0, 6.0, blend);
-        let m = 1.0; // Rougher
-        // Olive Green - Darkened significantly
-        // Old: [0.92, 0.90, 0.85] -> [0.4, 0.5, 0.2]
-        // New: [0.55, 0.55, 0.45] -> [0.25, 0.35, 0.15]
-        let c = lerp_color([0.55, 0.55, 0.45], [0.25, 0.35, 0.15], blend);
+        let m = 1.0; 
+        // Vibrant Dark Scrub - remove grey/beige tones
+        let c = lerp_color([0.35, 0.45, 0.25], [0.20, 0.30, 0.10], blend);
         (h, m, c)
     } else {
         // Coastal Forest
-        let blend = (t - 0.65) / 0.35; // Adjusted start and divisor (remainder of 1.0)
+        let blend = (t - 0.58) / 0.42; 
         let h = lerp(6.0, 15.0, blend);
         let m = 2.0;
-        // Deep Green
-        let c = lerp_color([0.4, 0.5, 0.2], [0.1, 0.35, 0.1], blend);
+        // Deep Green Forest
+        let c = lerp_color([0.25, 0.40, 0.15], [0.1, 0.25, 0.1], blend);
         (h, m, c)
     };
 

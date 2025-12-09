@@ -19,6 +19,10 @@ struct Uniforms {
 @group(0) @binding(1) var t_shadow: texture_depth_2d;
 @group(0) @binding(2) var s_shadow: sampler_comparison;
 
+// Terrain textures (Group 1)
+@group(1) @binding(0) var t_grass_diffuse: texture_2d<f32>;
+@group(1) @binding(1) var s_terrain: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -179,8 +183,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse_contribution = sun_color * diff * 1.3 * shadow; // Increased intensity
     let lighting = ambient_color + diffuse_contribution + rim;
 
+    // Calculate world-space UVs for texture tiling
+    // Tile at 0.1 = 10 meter repeat, adjust for desired scale
+    let terrain_uv = vec2<f32>(input.world_pos.x * 0.1, input.world_pos.z * 0.1);
+
+    // Sample grass diffuse texture
+    let grass_tex = textureSample(t_grass_diffuse, s_terrain, terrain_uv);
+
+    // Determine surface material based on height/biome
+    // Beach threshold ~0.5-2.0, grass above 2.0
+    let height = input.original_y;
+    let is_beach = height >= 0.5 && height < 2.5;
+    let is_grass = height >= 2.5;
+
+    // Base surface color
+    var surface_color = input.color;
+
+    // Grass tiling disabled - use vertex colors only
+
     // Apply lighting to surface color
-    var final_color = input.color * lighting;
+    var final_color = surface_color * lighting;
 
     // Water: Override color with proper ocean blue (vertex colors can be wrong at boundaries)
     if (is_water) {
@@ -218,7 +240,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let dist_fog = clamp(dist_factor * dist_factor, 0.0, 1.0); // Quadratic for natural falloff
 
     // Height fog: denser at low elevations (below y=20)
-    let height_fog = clamp(1.0 - input.world_pos.y / 20.0, 0.0, 0.5);
+    // Disable height fog for water to prevent "soup" look
+    var height_fog = clamp(1.0 - input.world_pos.y / 20.0, 0.0, 0.5);
+    if (is_water) {
+        height_fog = 0.0;
+    }
 
     // Base atmospheric haze - scales with distance
     let base_haze = dist / 400.0;
@@ -234,7 +260,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Fog color with sun tint
     let scatter_color = vec3<f32>(1.0, 0.9, 0.7);
-    let final_fog_color = mix(uniforms.fog_color, scatter_color, sun_scatter * 0.3);
+    
+    // Reduce scatter on water to keep it blue
+    var scatter_mult = 0.3;
+    if (is_water) {
+        scatter_mult = 0.1;
+    }
+    
+    let final_fog_color = mix(uniforms.fog_color, scatter_color, sun_scatter * scatter_mult * day_factor);
 
     // Apply fog
     final_color = mix(final_color, final_fog_color, fog_amount);

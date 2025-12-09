@@ -82,8 +82,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Day/Night sky colors
     let day_top = vec3<f32>(0.2, 0.4, 0.8);
     let day_horizon = vec3<f32>(0.6, 0.7, 0.9);
-    let night_top = vec3<f32>(0.02, 0.02, 0.06);
-    let night_horizon = vec3<f32>(0.05, 0.05, 0.1);
+    let night_top = vec3<f32>(0.002, 0.002, 0.005);
+    let night_horizon = vec3<f32>(0.005, 0.005, 0.01);
     let sunset_horizon = vec3<f32>(0.9, 0.4, 0.2);
 
     // Calculate day factor (0 = night, 1 = day)
@@ -103,16 +103,36 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let y = ray_dir.y * 0.5 + 0.5; // -1..1 to 0..1
     var sky_color = mix(horizon_color, top_color, pow(clamp(y, 0.0, 1.0), 0.5));
 
-    // Stars at night - sparse, subtle
-    if (day_factor < 0.4 && ray_dir.y > 0.1) {
-        let star_pos = ray_dir.xz / (ray_dir.y + 0.001) * 80.0;
-        let star_hash = hash(floor(star_pos * 15.0)); // Fewer cells = fewer stars
-        // Only 0.5% of cells have stars (was 3%)
-        let star_brightness = step(0.995, star_hash) * (1.0 - day_factor * 2.5);
-        let twinkle = sin(uniforms.time * 1.5 + star_hash * 50.0) * 0.2 + 0.8;
-        // Dimmer stars, vary size slightly
-        let star_intensity = star_brightness * twinkle * 0.7;
-        sky_color += vec3<f32>(star_intensity * 0.9, star_intensity * 0.95, star_intensity);
+    // Stars at night - fixed on celestial sphere, no parallax
+    if (day_factor < 0.4 && ray_dir.y > 0.05) {
+        // Use spherical coordinates for stable star positions
+        // This creates a fixed celestial sphere that doesn't shift with camera movement
+        let phi = atan2(ray_dir.z, ray_dir.x); // azimuth angle
+        let theta = acos(clamp(ray_dir.y, -1.0, 1.0)); // polar angle
+
+        // Map to a grid on the celestial sphere
+        let star_u = phi * 10.0; // ~60 cells around horizon
+        let star_v = theta * 15.0; // cells from zenith to horizon
+        let star_cell = vec2<f32>(star_u, star_v);
+
+        let star_hash = hash(floor(star_cell));
+        // Only 0.4% of cells have stars - sparse night sky
+        let star_brightness = step(0.996, star_hash) * (1.0 - day_factor * 2.5);
+
+        // Very slow, subtle twinkle - atmospheric shimmer
+        let twinkle = sin(uniforms.time * 0.4 + star_hash * 30.0) * 0.15 + 0.85;
+
+        // Dimmer, calmer stars
+        let star_intensity = star_brightness * twinkle * 0.5;
+
+        // Slight color variation - some stars warmer, some cooler
+        let color_var = fract(star_hash * 7.3);
+        let star_color = mix(
+            vec3<f32>(0.9, 0.92, 1.0),   // Cool blue-white
+            vec3<f32>(1.0, 0.95, 0.85),  // Warm white
+            color_var
+        );
+        sky_color += star_color * star_intensity;
     }
 
     // Cloud Rendering - wispy, translucent clouds that allow light through

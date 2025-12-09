@@ -812,10 +812,10 @@ impl AnimalSpecies {
     pub fn size_category(&self) -> SizeCategory {
         match self {
             Self::Copperhead | Self::Cottonmouth | Self::TimberRattlesnake => SizeCategory::Small,
-            Self::Bobcat => SizeCategory::Medium,
-            Self::GrayWolf | Self::RedWolf | Self::WildBoar => SizeCategory::Large,
-            Self::BlackBear | Self::EasternCougar => SizeCategory::VeryLarge,
-            Self::AmericanAlligator => SizeCategory::Massive,
+            Self::Bobcat | Self::Fox => SizeCategory::Medium,
+            Self::GrayWolf | Self::RedWolf | Self::WildBoar | Self::Husky | Self::WhitetailDeer => SizeCategory::Large,
+            Self::BlackBear | Self::EasternCougar | Self::Stag | Self::Donkey => SizeCategory::VeryLarge,
+            Self::AmericanAlligator | Self::Horse => SizeCategory::Massive,
         }
     }
 
@@ -848,6 +848,13 @@ impl AnimalSpecies {
             Self::RedWolf => "Canis rufus",
             Self::Bobcat => "Lynx rufus",
             Self::Cottonmouth => "Agkistrodon piscivorus",
+            // Docile animals
+            Self::WhitetailDeer => "Odocoileus virginianus",
+            Self::Stag => "Cervus elaphus",
+            Self::Horse => "Equus caballus",
+            Self::Donkey => "Equus asinus",
+            Self::Fox => "Vulpes vulpes",
+            Self::Husky => "Canis lupus familiaris",
         }
     }
 
@@ -863,6 +870,13 @@ impl AnimalSpecies {
             Self::RedWolf => "Smaller and more wary than gray wolves. Hunts in mated pairs or small family groups. Historically persecuted and now extremely rare.",
             Self::Bobcat => "Adaptable predator of rabbits and rodents. Excellent stalker with keen eyesight. Typically avoids humans. Can leap 10 feet to catch birds.",
             Self::Cottonmouth => "Semi-aquatic pit viper. Named for white mouth displayed as threat. Stands ground rather than fleeing. Feeds on fish, frogs, and small mammals.",
+            // Docile animals
+            Self::WhitetailDeer => "Highly alert and cautious. Communicates danger through tail flagging. Most active at dawn and dusk. Forms loose herds in winter.",
+            Self::Stag => "Male deer with impressive antlers used in mating displays and dominance fights. Leads and protects small herds. Can become aggressive during rutting season.",
+            Self::Horse => "Wild horses live in family groups led by a dominant stallion. Excellent stamina and speed. Communicates through body language and vocalizations.",
+            Self::Donkey => "Hardy and sure-footed pack animal. Intelligent and stubborn. Forms strong bonds with herd mates. Can defend against predators with powerful kicks.",
+            Self::Fox => "Opportunistic omnivore and clever hunter. Caches food for later consumption. Solitary except during mating season. Known for intelligence and adaptability.",
+            Self::Husky => "Pack-oriented working dog. Loyal and energetic. Excellent endurance for long journeys. Thick coat provides protection against harsh weather.",
         }
     }
 }

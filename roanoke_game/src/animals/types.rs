@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Unique identifier for animal species
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AnimalSpecies {
+    // Predators (hostile)
     BlackBear,
     EasternCougar,
     GrayWolf,
@@ -15,6 +16,13 @@ pub enum AnimalSpecies {
     RedWolf,
     Bobcat,
     Cottonmouth,
+    // Docile animals (non-hostile)
+    WhitetailDeer,
+    Stag,
+    Horse,
+    Donkey,
+    Fox,
+    Husky,
 }
 
 impl AnimalSpecies {
@@ -31,7 +39,44 @@ impl AnimalSpecies {
             Self::RedWolf => "Red Wolf",
             Self::Bobcat => "Bobcat",
             Self::Cottonmouth => "Cottonmouth",
+            Self::WhitetailDeer => "Whitetail Deer",
+            Self::Stag => "Stag",
+            Self::Horse => "Horse",
+            Self::Donkey => "Donkey",
+            Self::Fox => "Fox",
+            Self::Husky => "Husky",
         }
+    }
+
+    /// Get the GLTF model file name for this species (without extension)
+    /// Returns None if no model is available (falls back to orb rendering)
+    pub fn model_name(&self) -> Option<&'static str> {
+        match self {
+            Self::GrayWolf | Self::RedWolf => Some("Wolf"),
+            Self::WhitetailDeer => Some("Deer"),
+            Self::Stag => Some("Stag"),
+            Self::Horse => Some("Horse"),
+            Self::Donkey => Some("Donkey"),
+            Self::Fox => Some("Fox"),
+            Self::Husky => Some("Husky"),
+            Self::Bobcat => Some("Fox"), // Use fox as placeholder
+            // No models available for these yet
+            Self::BlackBear => None,
+            Self::EasternCougar => None,
+            Self::TimberRattlesnake => None,
+            Self::AmericanAlligator => None,
+            Self::WildBoar => None,
+            Self::Copperhead => None,
+            Self::Cottonmouth => None,
+        }
+    }
+
+    /// Check if this species is docile (non-hostile by default)
+    pub fn is_docile(&self) -> bool {
+        matches!(
+            self,
+            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey | Self::Fox | Self::Husky
+        )
     }
 
     /// Parse species from name string
@@ -47,6 +92,12 @@ impl AnimalSpecies {
             "red wolf" | "redwolf" => Some(Self::RedWolf),
             "bobcat" => Some(Self::Bobcat),
             "cottonmouth" => Some(Self::Cottonmouth),
+            "whitetail deer" | "whitetaildeer" | "deer" => Some(Self::WhitetailDeer),
+            "stag" => Some(Self::Stag),
+            "horse" => Some(Self::Horse),
+            "donkey" => Some(Self::Donkey),
+            "fox" => Some(Self::Fox),
+            "husky" | "dog" => Some(Self::Husky),
             _ => None,
         }
     }
@@ -134,6 +185,55 @@ impl AnimalSpecies {
                 detection_range: 12.0,
                 attack_range: 1.5,
             },
+            // Docile animals
+            Self::WhitetailDeer => AnimalStats {
+                health: 60.0,
+                damage: 5.0,
+                speed: 50.0,
+                speed_in_water: Some(25.0),
+                detection_range: 35.0,
+                attack_range: 1.5,
+            },
+            Self::Stag => AnimalStats {
+                health: 80.0,
+                damage: 15.0,
+                speed: 45.0,
+                speed_in_water: Some(22.0),
+                detection_range: 40.0,
+                attack_range: 2.0,
+            },
+            Self::Horse => AnimalStats {
+                health: 120.0,
+                damage: 10.0,
+                speed: 55.0,
+                speed_in_water: Some(30.0),
+                detection_range: 30.0,
+                attack_range: 2.0,
+            },
+            Self::Donkey => AnimalStats {
+                health: 100.0,
+                damage: 8.0,
+                speed: 35.0,
+                speed_in_water: Some(20.0),
+                detection_range: 25.0,
+                attack_range: 1.5,
+            },
+            Self::Fox => AnimalStats {
+                health: 40.0,
+                damage: 8.0,
+                speed: 45.0,
+                speed_in_water: None,
+                detection_range: 30.0,
+                attack_range: 1.5,
+            },
+            Self::Husky => AnimalStats {
+                health: 70.0,
+                damage: 12.0,
+                speed: 40.0,
+                speed_in_water: Some(25.0),
+                detection_range: 35.0,
+                attack_range: 1.5,
+            },
         }
     }
 
@@ -146,7 +246,10 @@ impl AnimalSpecies {
             Self::TimberRattlesnake | Self::AmericanAlligator => BehaviorType::Ambush,
             Self::WildBoar | Self::Cottonmouth => BehaviorType::Aggressive,
             Self::Copperhead => BehaviorType::Hidden,
-            Self::Bobcat => BehaviorType::Stalker,
+            Self::Bobcat | Self::Fox => BehaviorType::Stalker,
+            // Docile animals - flee behavior
+            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey => BehaviorType::Hidden,
+            Self::Husky => BehaviorType::Territorial, // Protective when tamed
         }
     }
 
@@ -158,8 +261,12 @@ impl AnimalSpecies {
             Self::GrayWolf => AggressionType::Aggressive,
             Self::TimberRattlesnake | Self::Copperhead => AggressionType::Defensive,
             Self::AmericanAlligator | Self::WildBoar => AggressionType::Territorial,
-            Self::RedWolf | Self::Bobcat => AggressionType::Cautious,
+            Self::RedWolf | Self::Bobcat | Self::Fox => AggressionType::Cautious,
             Self::Cottonmouth => AggressionType::Aggressive,
+            // Docile animals - defensive only when cornered
+            Self::WhitetailDeer | Self::Horse | Self::Donkey => AggressionType::Defensive,
+            Self::Stag => AggressionType::Territorial, // Will charge if cornered
+            Self::Husky => AggressionType::Defensive,
         }
     }
 
@@ -176,6 +283,12 @@ impl AnimalSpecies {
             Self::RedWolf => 5,
             Self::Bobcat => 3,
             Self::Cottonmouth => 4,
+            // Docile animals - low danger
+            Self::WhitetailDeer | Self::Donkey => 1,
+            Self::Stag => 2, // Can be dangerous if provoked
+            Self::Horse => 1,
+            Self::Fox => 1,
+            Self::Husky => 1,
         }
     }
 
@@ -192,6 +305,13 @@ impl AnimalSpecies {
             Self::RedWolf => 0.18,
             Self::Bobcat => 0.22,
             Self::Cottonmouth => 0.20,
+            // Docile animals - common in appropriate areas
+            Self::WhitetailDeer => 0.40,
+            Self::Stag => 0.15,
+            Self::Horse => 0.10, // Wild horses are rare
+            Self::Donkey => 0.08,
+            Self::Fox => 0.25,
+            Self::Husky => 0.05, // Very rare wild husky
         }
     }
 
@@ -208,6 +328,13 @@ impl AnimalSpecies {
             Self::RedWolf => 15.0,
             Self::Bobcat => 12.0,
             Self::Cottonmouth => 10.0,
+            // Docile animals - flee at high health (very skittish)
+            Self::WhitetailDeer => 55.0,
+            Self::Stag => 60.0,
+            Self::Horse => 100.0,
+            Self::Donkey => 80.0,
+            Self::Fox => 35.0,
+            Self::Husky => 50.0,
         }
     }
 
@@ -217,6 +344,9 @@ impl AnimalSpecies {
         match self {
             Self::GrayWolf => Some((1, 6)),  // Now includes lone wolves
             Self::RedWolf => Some((1, 4)),   // Now includes lone wolves
+            Self::WhitetailDeer => Some((2, 5)), // Small herds
+            Self::Horse => Some((3, 8)),     // Wild horse herds
+            Self::Donkey => Some((1, 3)),    // Small groups
             _ => None,
         }
     }
@@ -243,7 +373,10 @@ impl AnimalSpecies {
 
     /// Check if this species can be tamed
     pub fn is_tameable(&self) -> bool {
-        matches!(self, Self::GrayWolf | Self::RedWolf)
+        matches!(
+            self,
+            Self::GrayWolf | Self::RedWolf | Self::Horse | Self::Donkey | Self::Husky
+        )
     }
 
     /// Get habitats where this species can spawn
@@ -259,6 +392,13 @@ impl AnimalSpecies {
             Self::RedWolf => &[Habitat::Forests, Habitat::Swamps, Habitat::CoastalPlains],
             Self::Bobcat => &[Habitat::Forests, Habitat::Swamps, Habitat::RockyAreas],
             Self::Cottonmouth => &[Habitat::Swamps, Habitat::Rivers, Habitat::Marshes],
+            // Docile animals
+            Self::WhitetailDeer => &[Habitat::Forests, Habitat::Meadows, Habitat::Fields],
+            Self::Stag => &[Habitat::Forests, Habitat::Mountains, Habitat::Meadows],
+            Self::Horse => &[Habitat::Plains, Habitat::Meadows, Habitat::Fields, Habitat::Beach],
+            Self::Donkey => &[Habitat::Plains, Habitat::Mountains, Habitat::Fields],
+            Self::Fox => &[Habitat::Forests, Habitat::Fields, Habitat::Meadows],
+            Self::Husky => &[Habitat::Mountains, Habitat::Forests, Habitat::Plains],
         }
     }
 
@@ -275,6 +415,11 @@ impl AnimalSpecies {
             Self::RedWolf => &[TimeOfDay::Night, TimeOfDay::Dawn],
             Self::Bobcat => &[TimeOfDay::Night, TimeOfDay::Dawn, TimeOfDay::Dusk],
             Self::Cottonmouth => &[TimeOfDay::Any],
+            // Docile animals - mostly crepuscular/diurnal
+            Self::WhitetailDeer | Self::Stag => &[TimeOfDay::Dawn, TimeOfDay::Dusk],
+            Self::Horse | Self::Donkey => &[TimeOfDay::Day, TimeOfDay::Dawn, TimeOfDay::Dusk],
+            Self::Fox => &[TimeOfDay::Night, TimeOfDay::Dawn, TimeOfDay::Dusk],
+            Self::Husky => &[TimeOfDay::Any],
         }
     }
 
@@ -286,8 +431,12 @@ impl AnimalSpecies {
             Self::TimberRattlesnake | Self::AmericanAlligator => Weakness::Cold,
             Self::WildBoar => Weakness::Spears,
             Self::Copperhead => Weakness::Boots,
-            Self::Bobcat => Weakness::Dogs,
+            Self::Bobcat | Self::Fox => Weakness::Dogs,
             Self::Cottonmouth => Weakness::LongWeapons,
+            // Docile animals
+            Self::WhitetailDeer | Self::Stag => Weakness::LoudNoises,
+            Self::Horse | Self::Donkey => Weakness::Fire,
+            Self::Husky => Weakness::Cold, // Ironically weak to cold when not in pack
         }
     }
 
@@ -432,6 +581,67 @@ impl AnimalSpecies {
                     effect: Some(StatusEffectType::Intimidate),
                 },
             ],
+            // Docile animals - minimal attacks, mostly defensive
+            Self::WhitetailDeer => &[AttackDef {
+                name: "kick",
+                damage: 5.0,
+                cooldown: 2.0,
+                effect: None,
+            }],
+            Self::Stag => &[
+                AttackDef {
+                    name: "antler_charge",
+                    damage: 15.0,
+                    cooldown: 4.0,
+                    effect: Some(StatusEffectType::Knockback),
+                },
+                AttackDef {
+                    name: "kick",
+                    damage: 8.0,
+                    cooldown: 2.0,
+                    effect: None,
+                },
+            ],
+            Self::Horse => &[
+                AttackDef {
+                    name: "kick",
+                    damage: 10.0,
+                    cooldown: 2.5,
+                    effect: Some(StatusEffectType::Knockback),
+                },
+                AttackDef {
+                    name: "rear_up",
+                    damage: 8.0,
+                    cooldown: 3.0,
+                    effect: Some(StatusEffectType::Intimidate),
+                },
+            ],
+            Self::Donkey => &[AttackDef {
+                name: "kick",
+                damage: 8.0,
+                cooldown: 2.0,
+                effect: None,
+            }],
+            Self::Fox => &[AttackDef {
+                name: "bite",
+                damage: 8.0,
+                cooldown: 1.5,
+                effect: None,
+            }],
+            Self::Husky => &[
+                AttackDef {
+                    name: "bite",
+                    damage: 12.0,
+                    cooldown: 1.5,
+                    effect: None,
+                },
+                AttackDef {
+                    name: "howl",
+                    damage: 0.0,
+                    cooldown: 10.0,
+                    effect: Some(StatusEffectType::Fear),
+                },
+            ],
         }
     }
 
@@ -448,6 +658,13 @@ impl AnimalSpecies {
             Self::RedWolf => &["red_wolf_pelt", "wolf_meat", "teeth"],
             Self::Bobcat => &["bobcat_pelt", "bobcat_meat", "claws"],
             Self::Cottonmouth => &["snake_skin", "venom_gland", "fangs"],
+            // Docile animals
+            Self::WhitetailDeer => &["deer_hide", "venison", "antler_velvet"],
+            Self::Stag => &["deer_hide", "venison", "antlers", "antler_velvet"],
+            Self::Horse => &["horse_hide", "horse_meat", "horse_hair"],
+            Self::Donkey => &["donkey_hide", "donkey_meat"],
+            Self::Fox => &["fox_pelt", "fox_meat"],
+            Self::Husky => &["dog_pelt", "dog_meat"], // Harsh survival loot
         }
     }
 
@@ -464,12 +681,29 @@ impl AnimalSpecies {
             Self::RedWolf,
             Self::Bobcat,
             Self::Cottonmouth,
+            Self::WhitetailDeer,
+            Self::Stag,
+            Self::Horse,
+            Self::Donkey,
+            Self::Fox,
+            Self::Husky,
         ]
         .into_iter()
     }
 
+    /// Iterator over predator species only
+    pub fn predators() -> impl Iterator<Item = AnimalSpecies> {
+        Self::all().filter(|s| !s.is_docile())
+    }
+
+    /// Iterator over docile species only
+    pub fn docile() -> impl Iterator<Item = AnimalSpecies> {
+        Self::all().filter(|s| s.is_docile())
+    }
+
     /// Get the base orb color (RGB) for this species
     /// Colors are designed to be distinctive and reflect the animal's nature
+    /// Also used as tint color for 3D models
     pub fn orb_color(&self) -> [f32; 3] {
         match self {
             // Dark brown - Black Bear (forest creature)
@@ -492,10 +726,24 @@ impl AnimalSpecies {
             Self::Bobcat => [0.70, 0.55, 0.40],
             // Dark water brown - Cottonmouth (aggressive water snake)
             Self::Cottonmouth => [0.40, 0.30, 0.20],
+            // Docile animals - natural coloring
+            // Reddish-brown - Whitetail Deer
+            Self::WhitetailDeer => [0.65, 0.45, 0.30],
+            // Darker brown - Stag (male deer)
+            Self::Stag => [0.55, 0.35, 0.25],
+            // Chestnut brown - Horse
+            Self::Horse => [0.60, 0.40, 0.25],
+            // Gray-brown - Donkey
+            Self::Donkey => [0.50, 0.45, 0.40],
+            // Orange-red - Fox
+            Self::Fox => [0.85, 0.45, 0.20],
+            // Black and white - Husky
+            Self::Husky => [0.70, 0.70, 0.75],
         }
     }
 
     /// Get the orb scale (radius) based on animal size
+    /// Also used as base scale for 3D models
     pub fn orb_scale(&self) -> f32 {
         match self {
             Self::BlackBear => 1.2,
@@ -508,6 +756,42 @@ impl AnimalSpecies {
             Self::RedWolf => 0.75,
             Self::Bobcat => 0.6,
             Self::Cottonmouth => 0.4,
+            // Docile animals
+            Self::WhitetailDeer => 0.9,
+            Self::Stag => 1.1,
+            Self::Horse => 1.4,
+            Self::Donkey => 1.1,
+            Self::Fox => 0.5,
+            Self::Husky => 0.7,
+        }
+    }
+
+    /// Get the model scale multiplier for 3D models
+    /// Adjusts GLTF model scale to match game world units
+    pub fn model_scale(&self) -> f32 {
+        match self {
+            // Models need scaling to fit game world
+            Self::GrayWolf | Self::RedWolf => 0.8,
+            Self::WhitetailDeer => 1.0,
+            Self::Stag => 1.2,
+            Self::Horse => 1.5,
+            Self::Donkey => 1.2,
+            Self::Fox => 0.6,
+            Self::Husky => 0.7,
+            Self::Bobcat => 0.6,
+            // Default for species without models
+            _ => 1.0,
+        }
+    }
+
+    /// Get the Y-axis offset for model positioning
+    /// Used to correct model anchor points (e.g., stag antlers positioned at bottom)
+    pub fn model_y_offset(&self) -> f32 {
+        match self {
+            // Stag model has antlers anchored at bottom, need to lift model
+            Self::Stag => 1.0,
+            Self::WhitetailDeer => 0.3,
+            _ => 0.0,
         }
     }
 }
@@ -585,6 +869,7 @@ pub enum Habitat {
     Fields,
     CoastalPlains,
     NearWater,
+    Beach,
 }
 
 /// Attack definition

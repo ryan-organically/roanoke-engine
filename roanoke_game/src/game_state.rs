@@ -5,7 +5,7 @@
 use crate::progression::{PlayerProgression, QuestManager, EventManager};
 use crate::progression::events::{WorldPhase, PlayerAction, EventNotification, Microcosm, BiomeType};
 use crate::progression::reputation::{Faction, ReputationLevel};
-use crate::npc::NpcManager;
+use crate::npc::{NpcManager, InteractionSystem};
 use crate::animals::{PlayerWildlifeReputation, LegendaryAnimal, AnimalSpecies};
 use crate::animals::player_tracking::create_legendary_animals;
 use crate::economy::{PlayerEconomy, EconomyManager, LootNotification, CombatLootResult};
@@ -26,6 +26,9 @@ pub struct GameProgression {
     pub quest_manager: QuestManager,
     pub event_manager: EventManager,
     pub npc_manager: NpcManager,
+
+    // NPC Interaction & Dialogue system
+    pub interaction_system: InteractionSystem,
 
     // World data
     pub microcosms: Vec<Microcosm>,
@@ -56,6 +59,7 @@ impl GameProgression {
             quest_manager: QuestManager::new(),
             event_manager: EventManager::new(),
             npc_manager: NpcManager::new(),
+            interaction_system: InteractionSystem::new(),
             microcosms: create_default_microcosms(),
             legendary_animals: create_legendary_animals(),
             game_time: 8.0, // Start at 8 AM

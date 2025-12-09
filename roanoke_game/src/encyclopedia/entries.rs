@@ -259,6 +259,13 @@ pub fn get_fauna_location_hint(species: AnimalSpecies) -> &'static str {
         AnimalSpecies::RedWolf => "Rare; seeks out swamps and coastal plain forests",
         AnimalSpecies::Bobcat => "Prowls forests and rocky terrain at twilight",
         AnimalSpecies::Cottonmouth => "Swims through swamps and waterways",
+        // Docile animals
+        AnimalSpecies::WhitetailDeer => "Grazes in forest meadows and field edges at dawn and dusk",
+        AnimalSpecies::Stag => "Leads herds through deep forests and mountain meadows",
+        AnimalSpecies::Horse => "Roams wild across open plains and grasslands",
+        AnimalSpecies::Donkey => "Wanders rocky terrain and mountain trails",
+        AnimalSpecies::Fox => "Hunts small prey in forests and field edges",
+        AnimalSpecies::Husky => "Rare; found in mountainous regions and northern forests",
     }
 }
 
@@ -267,9 +274,13 @@ pub fn get_mystery_silhouette(species: AnimalSpecies) -> &'static str {
     match species {
         AnimalSpecies::BlackBear | AnimalSpecies::WildBoar => "large_quadruped",
         AnimalSpecies::EasternCougar | AnimalSpecies::Bobcat => "feline",
-        AnimalSpecies::GrayWolf | AnimalSpecies::RedWolf => "canine",
+        AnimalSpecies::GrayWolf | AnimalSpecies::RedWolf | AnimalSpecies::Husky => "canine",
         AnimalSpecies::TimberRattlesnake | AnimalSpecies::Copperhead | AnimalSpecies::Cottonmouth => "serpent",
         AnimalSpecies::AmericanAlligator => "reptile_large",
+        // Docile animals
+        AnimalSpecies::WhitetailDeer | AnimalSpecies::Stag => "deer",
+        AnimalSpecies::Horse | AnimalSpecies::Donkey => "equine",
+        AnimalSpecies::Fox => "canine",
     }
 }
 

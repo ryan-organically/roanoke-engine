@@ -171,19 +171,19 @@ pub fn calculate_density(
 fn sea_oats_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.8, 1.4),
-            blade_segments: 5, // More joints for elegant droop
-            curve_factor: 0.6, // Strong graceful bend
-            width_base: 0.025, // Thin stalks
-            width_tip: 0.005,  // Very fine tips
-            color_base: [0.55, 0.50, 0.35], // Sandy tan
-            color_tip: [0.70, 0.65, 0.45],  // Sun-bleached gold
+            height_range: (0.8, 1.4),   // Tall wispy stalks
+            blade_segments: 5,
+            curve_factor: 0.6,          // Graceful droop
+            width_base: 0.04,
+            width_tip: 0.01,
+            color_base: [0.65, 0.58, 0.40],  // Sandy tan base
+            color_tip: [0.75, 0.68, 0.50],   // Bleached straw tip
         },
-        density_range: (0.05, 0.15), // Very sparse, wind-scattered clumps
-        wind_amplitude: 1.2,         // Dramatic coastal sway
-        wind_frequency: 1.3,         // Fast response to gusts
-        clumping_factor: 0.7,        // Grows in distinct clumps
-        tolerates_water: false,      // Salt spray tolerant, not submerged
+        density_range: (0.08, 0.15),  // Sparse dune colonizer
+        wind_amplitude: 1.2,
+        wind_frequency: 1.3,
+        clumping_factor: 0.6,         // Grows in tufts
+        tolerates_water: false,
     }
 }
 
@@ -213,17 +213,17 @@ fn cordgrass_config() -> GrassSpeciesConfig {
 fn sawgrass_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.4, 0.9),
+            height_range: (0.4, 0.8),   // Medium height meadow grass
             blade_segments: 4,
-            curve_factor: 0.35, // Gentle natural bend
+            curve_factor: 0.35,         // Gentle flowing curve
             width_base: 0.04,
             width_tip: 0.01,
-            color_base: [0.25, 0.50, 0.18], // Healthy green
-            color_tip: [0.40, 0.65, 0.25],  // Sun-touched tips
+            color_base: [0.25, 0.45, 0.18],  // Rich meadow green
+            color_tip: [0.40, 0.58, 0.28],   // Lighter green tip
         },
-        density_range: (0.25, 0.4),
-        wind_amplitude: 0.8, // Responsive flowing motion
-        wind_frequency: 1.0, // Natural cadence
+        density_range: (0.2, 0.35),   // Moderate density
+        wind_amplitude: 0.8,
+        wind_frequency: 1.0,
         clumping_factor: 0.4,
         tolerates_water: false,
     }

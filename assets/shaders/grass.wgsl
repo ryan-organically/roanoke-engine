@@ -23,6 +23,7 @@ var s_shadow: sampler_comparison;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
+    @location(2) local_height: f32,  // 0.0 at base, 1.0 at tip - for wind animation
 };
 
 struct VertexOutput {
@@ -32,26 +33,110 @@ struct VertexOutput {
     @location(2) shadow_pos: vec3<f32>,
 };
 
-// Simple wind animation
-// Uses sine waves based on actual elapsed time for organic movement
+// Area-based wind system with gusts and calm periods
+// Creates natural wave-like wind patterns that flow across the landscape
+
+// Simple hash function for pseudo-random values
+fn hash2d(p: vec2<f32>) -> f32 {
+    let p2 = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
+    return fract(sin(dot(p2, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+// Smooth noise for wind patterns
+fn noise2d(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+
+    // Smooth interpolation
+    let u = f * f * (3.0 - 2.0 * f);
+
+    // Four corners
+    let a = hash2d(i);
+    let b = hash2d(i + vec2<f32>(1.0, 0.0));
+    let c = hash2d(i + vec2<f32>(0.0, 1.0));
+    let d = hash2d(i + vec2<f32>(1.0, 1.0));
+
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Fractal Brownian Motion for organic wind patterns
+fn fbm_wind(p: vec2<f32>) -> f32 {
+    var value = 0.0;
+    var amplitude = 0.5;
+    var pos = p;
+
+    // 3 octaves of noise
+    for (var i = 0; i < 3; i++) {
+        value += amplitude * noise2d(pos);
+        pos *= 2.0;
+        amplitude *= 0.5;
+    }
+
+    return value;
+}
+
 fn apply_wind(world_pos: vec3<f32>, height_factor: f32, time: f32) -> vec3<f32> {
-    // Wind direction and strength
-    let wind_strength = 0.15;
-    let wind_direction = vec2<f32>(1.0, 0.5);
+    // Base wind parameters
+    let base_wind_strength = 0.12;
+    let wind_direction = normalize(vec2<f32>(1.0, 0.3));  // Primary wind direction
 
-    // Multiple sine waves for organic motion using REAL TIME
-    // Add world position for spatial variation so all grass doesn't move identically
-    let wave1 = sin(time * 2.0 + world_pos.x * 0.5) * wind_strength;
-    let wave2 = sin(time * 1.5 + world_pos.z * 0.7) * wind_strength * 0.5;
+    // === LAYER 1: Large-scale wind gusts ===
+    // Gusts travel across the landscape over time
+    let gust_scale = 0.02;  // Size of gust areas (larger = bigger gusts)
+    let gust_speed = 0.3;   // How fast gusts travel
+    let gust_pos = vec2<f32>(
+        world_pos.x * gust_scale - time * gust_speed * wind_direction.x,
+        world_pos.z * gust_scale - time * gust_speed * wind_direction.y
+    );
 
-    // Only affect the top of the grass (based on height_factor)
-    let wind_amount = height_factor * height_factor; // Quadratic falloff
+    // Gust intensity varies smoothly across space and time
+    let gust_noise = fbm_wind(gust_pos);
+    // Remap to create calm periods (below 0.3 = calm, above = gusty)
+    let gust_intensity = smoothstep(0.25, 0.7, gust_noise);
 
-    // Apply wind offset
+    // === LAYER 2: Medium-scale wave ripples ===
+    // These are the visible "waves" of grass movement
+    let wave_scale = 0.08;
+    let wave_speed = 1.2;
+    let wave_pos = vec2<f32>(
+        world_pos.x * wave_scale - time * wave_speed,
+        world_pos.z * wave_scale - time * wave_speed * 0.7
+    );
+    let wave = sin(wave_pos.x * 3.14159) * cos(wave_pos.y * 2.5);
+
+    // === LAYER 3: Local turbulence ===
+    // Small rapid variations for realism
+    let turb_scale = 0.15;
+    let turb_pos = vec2<f32>(
+        world_pos.x * turb_scale + time * 0.5,
+        world_pos.z * turb_scale + time * 0.3
+    );
+    let turbulence = noise2d(turb_pos) * 2.0 - 1.0;
+
+    // === LAYER 4: Slow swaying (always present, very gentle) ===
+    let sway = sin(time * 0.5 + world_pos.x * 0.02 + world_pos.z * 0.015) * 0.3;
+
+    // === Combine layers ===
+    // Gust modulates the intensity of waves
+    let wind_power = gust_intensity * 0.8 + 0.2;  // Always some minimal movement
+
+    // Calculate wind displacement
+    let wave_contribution = wave * wind_power * base_wind_strength;
+    let turb_contribution = turbulence * wind_power * base_wind_strength * 0.3;
+    let sway_contribution = sway * base_wind_strength * 0.4;
+
+    let total_wind = wave_contribution + turb_contribution + sway_contribution;
+
+    // Height-based falloff - base stays still, tips move most
+    // Using cubic falloff for more natural bend
+    let wind_amount = height_factor * height_factor * height_factor;
+
+    // Apply wind in primary direction with some perpendicular variation
+    let perpendicular = vec2<f32>(-wind_direction.y, wind_direction.x);
     let wind_offset = vec3<f32>(
-        (wave1 + wave2) * wind_direction.x * wind_amount,
+        (total_wind * wind_direction.x + turbulence * perpendicular.x * 0.2) * wind_amount,
         0.0,
-        (wave1 + wave2) * wind_direction.y * wind_amount
+        (total_wind * wind_direction.y + turbulence * perpendicular.y * 0.2) * wind_amount
     );
 
     return world_pos + wind_offset;
@@ -61,8 +146,9 @@ fn apply_wind(world_pos: vec3<f32>, height_factor: f32, time: f32) -> vec3<f32> 
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // Calculate height factor (0 at base, 1 at tip)
-    let height_factor = saturate(vertex.position.y / 1.0);
+    // Use local_height directly (0.0 at base, 1.0 at tip)
+    // This is independent of world Y position, fixing the floating grass bug
+    let height_factor = vertex.local_height;
 
     // Apply wind animation with real time
     let animated_position = apply_wind(vertex.position, height_factor, camera.time);

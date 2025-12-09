@@ -31,7 +31,8 @@ use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec3, Quat};
 
 /// Minimum distance from shoreline for trees to spawn (40 yards ≈ 36.6 meters)
-pub const TREELINE_DISTANCE: f32 = 36.6;
+/// TEMPORARILY REDUCED FOR DEBUGGING - should be 36.6
+pub const TREELINE_DISTANCE: f32 = 5.0;
 
 /// Upper elevation limit where trees fade out (alpine treeline)
 pub const UPPER_TREELINE_START: f32 = 40.0;
@@ -220,6 +221,13 @@ pub fn generate_trees_for_chunk(
     let noise = Perlin::new(seed + 777);
     let mut all_instances = Vec::new();
 
+    // Debug: track why trees aren't spawning
+    let mut debug_ocean_count = 0;
+    let mut debug_beach_count = 0;
+    let mut debug_density_skip = 0;
+    let mut debug_treeline_skip = 0;
+    let mut debug_trees_added = 0;
+
     //=========================================================================
     // PHASE 1: Generate LowlandBunches
     //=========================================================================
@@ -248,6 +256,8 @@ pub fn generate_trees_for_chunk(
 
             // Skip ocean and beach (bunches only in scrub and forest)
             if biome_t < 0.52 || height < 1.5 {
+                if height < 0.0 { debug_ocean_count += 1; }
+                else { debug_beach_count += 1; }
                 continue;
             }
 
@@ -261,12 +271,16 @@ pub fn generate_trees_for_chunk(
 
             let density_roll = (noise.get([world_x as f64 * 0.05, world_z as f64 * 0.05]) + 1.0) * 0.5;
             if density_roll < bunch_threshold {
+                debug_density_skip += 1;
                 continue;
             }
 
             // Calculate shoreline distance for treeline
             let shore_dist = distance_to_shoreline(world_x, world_z, seed);
             let beyond_treeline = shore_dist > TREELINE_DISTANCE;
+            if !beyond_treeline {
+                debug_treeline_skip += 1;
+            }
 
             // Calculate biome factor for tree scaling
             let biome_factor = if biome_t > 0.65 {
@@ -297,10 +311,17 @@ pub fn generate_trees_for_chunk(
             };
 
             let bunch_instances = bunch.generate(seed);
+            debug_trees_added += bunch_instances.trees.len();
             all_instances.extend(bunch_instances.trees);
             all_instances.extend(bunch_instances.bushes);
             // Note: rocks and pebbles handled by rocks.rs
         }
+    }
+
+    // Debug output for tree generation
+    if debug_ocean_count > 0 || debug_beach_count > 0 || debug_trees_added > 0 {
+        println!("[TREES] Chunk ({}, {}): ocean={}, beach={}, density_skip={}, treeline_skip={}, trees_from_bunches={}",
+            offset_x, offset_z, debug_ocean_count, debug_beach_count, debug_density_skip, debug_treeline_skip, debug_trees_added);
     }
 
     //=========================================================================
@@ -375,6 +396,8 @@ pub fn generate_trees_for_chunk(
         all_instances.push(transform);
     }
 
+    // Final count
+    println!("[TREES] Chunk ({}, {}) TOTAL: {} tree instances", offset_x, offset_z, all_instances.len());
     all_instances
 }
 

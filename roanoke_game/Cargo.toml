@@ -28,6 +28,7 @@ tobj = { version = "4.0", features = ["async"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 image = "0.24"
 noise = "0.8"
+gltf = "1.4"
 
 # Audio
 kira = "0.9"

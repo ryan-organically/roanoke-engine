@@ -10,9 +10,9 @@ use crate::pipeline_validation::{
 };
 
 /// Maximum vertices per tree mesh (safety limit)
-const MAX_TREE_VERTICES: usize = 50_000;
+const MAX_TREE_VERTICES: usize = 100_000;
 /// Maximum indices per tree mesh (safety limit)
-const MAX_TREE_INDICES: usize = 150_000;
+const MAX_TREE_INDICES: usize = 300_000;
 /// Maximum tree instances per frame (safety limit)
 const MAX_TREE_INSTANCES: usize = 10_000;
 
@@ -35,9 +35,9 @@ struct CameraUniform {
     fog_color: [f32; 3],        // 12 bytes (96-108)
     fog_start: f32,             // 4 bytes (108-112) - packs with fog_color
     fog_end: f32,               // 4 bytes (112-116)
-    _align_gap: [f32; 3],       // 12 bytes (116-128) - bridge to vec3 alignment
-    _padding: [f32; 3],         // 12 bytes (128-140) - matches WGSL vec3
-    _struct_pad: f32,           // 4 bytes (140-144) - struct alignment
+    alpha_cutoff: f32,          // 4 bytes (116-120) - for alpha masked materials
+    use_texture: f32,           // 4 bytes (120-124) - 1.0 = texture, 0.0 = procedural
+    _padding: f32,              // 4 bytes (124-128) - struct alignment to 128
 }
 
 #[repr(C)]
@@ -482,6 +482,25 @@ impl TreePipeline {
         fog_end: f32,
         fog_density: f32,
     ) {
+        // Default: procedural rendering, no alpha cutoff
+        self.update_camera_full(queue, view_proj, sun_dir, time, view_pos, fog_color, fog_start, fog_end, fog_density, 0.0, 0.0);
+    }
+
+    /// Update camera uniform with all parameters including texture/alpha settings
+    pub fn update_camera_full(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+        alpha_cutoff: f32,
+        use_texture: f32,
+    ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             sun_dir,
@@ -491,9 +510,9 @@ impl TreePipeline {
             fog_color,
             fog_start,
             fog_end,
-            _align_gap: [0.0; 3],
-            _padding: [0.0; 3],
-            _struct_pad: 0.0,
+            alpha_cutoff,
+            use_texture,
+            _padding: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -548,6 +567,40 @@ impl TreePipeline {
             && self.instance_buffer.is_some()
             && self.instance_count > 0
             && self.mesh.as_ref().map(|m| m.index_count > 0).unwrap_or(false)
+    }
+
+    /// Create a texture bind group from a texture view
+    /// Use this for loading external textures (e.g., from GLTF models)
+    pub fn create_texture_bind_group(
+        &self,
+        device: &Device,
+        texture_view: &wgpu::TextureView,
+        label: Option<&str>,
+    ) -> BindGroup {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+            label,
+        })
     }
 
     /// Get the current instance count

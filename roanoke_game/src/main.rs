@@ -4,8 +4,8 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -38,6 +38,7 @@ mod atmosphere;
 mod audio_system;
 mod procedural_synth;
 mod animals;
+mod gltf_loader;
 mod village_manager;
 mod progression;
 mod npc;
@@ -325,6 +326,7 @@ struct SharedState {
     // Asset Registry
     mesh_registry: std::collections::HashMap<String, TreeMesh>, // For Trees/Rocks
     building_registry: std::collections::HashMap<String, Arc<BuildingMesh>>, // For Buildings
+    terrain_textures: Option<Arc<TerrainTextures>>, // Shared terrain textures for all chunks
     background_texture: Option<egui::TextureHandle>, // For Home Screen
     loading_slideshow: LoadingSlideshow, // For Loading Screen
     weather: WeatherSystem,
@@ -370,6 +372,8 @@ struct SharedState {
     faction_audio: FactionAudioBridge,
     // Systems Manager (encyclopedia, flora, ecology, weather coordination)
     systems_manager: systems_manager::SystemsManager,
+    // Dialogue UI state
+    current_dialogue: Option<npc::interaction::DialogueUIData>,
 }
 
 impl SharedState {
@@ -417,6 +421,133 @@ impl SharedState {
         // Split borrow: systems_manager and animal_manager are separate fields
         // Within a method on SharedState, Rust can see they're distinct
         self.systems_manager.update(delta, player_pos, look_dir, &self.animal_manager);
+    }
+}
+
+/// Spawn tame animals (horses, donkeys) in villages
+/// Each village gets 4 tame horses and 1 tame donkey that stay within village bounds
+fn spawn_village_animals(
+    animal_manager: &mut animals::AnimalManager,
+    village_data: &[(Vec3, f32, String)],
+    seed: u32,
+) {
+    use croatoan_wfc::get_height_at;
+
+    for (center, bounds_radius, name) in village_data {
+        // Spawn 4 tame horses spread around the village
+        for i in 0..4 {
+            let angle = (i as f32 / 4.0) * std::f32::consts::TAU + 0.3;
+            let radius = bounds_radius * 0.4 + (i as f32 * 5.0);
+            let x = center.x + angle.cos() * radius;
+            let z = center.z + angle.sin() * radius;
+            let (height, _) = get_height_at(x, z, seed);
+            let pos = Vec3::new(x, height, z);
+
+            // Spawn tame horse with village as home
+            let id = animal_manager.spawn(animals::AnimalSpecies::Horse, pos, (0, 0), None);
+            if let Some(horse) = animal_manager.get_mut(id) {
+                horse.home_position = *center;
+                horse.territory_radius = bounds_radius * 0.8;
+                horse.taming_progress = 1.0; // Fully tamed
+            }
+        }
+
+        // Spawn 1 tame donkey
+        let donkey_angle: f32 = 2.5;
+        let donkey_radius = bounds_radius * 0.3;
+        let x = center.x + donkey_angle.cos() * donkey_radius;
+        let z = center.z + donkey_angle.sin() * donkey_radius;
+        let (height, _) = get_height_at(x, z, seed);
+        let pos = Vec3::new(x, height, z);
+
+        let id = animal_manager.spawn(animals::AnimalSpecies::Donkey, pos, (0, 0), None);
+        if let Some(donkey) = animal_manager.get_mut(id) {
+            donkey.home_position = *center;
+            donkey.territory_radius = bounds_radius * 0.7;
+            donkey.taming_progress = 1.0; // Fully tamed
+        }
+
+        println!("[VILLAGE] Spawned 4 horses and 1 donkey in '{}'", name);
+    }
+}
+
+/// Spawn wild horse herds on beaches throughout the world
+/// Horses spawn in groups of 2-7, flee from player, and roam beach areas
+fn spawn_beach_horses(
+    animal_manager: &mut animals::AnimalManager,
+    seed: u32,
+) {
+    use croatoan_wfc::{get_height_at, get_biome_t};
+    use rand::SeedableRng;
+    use rand::Rng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+
+    // Scan for beach areas and spawn horse herds
+    // We sample points in a large grid and look for beach biome (t between 0.45-0.55)
+    let world_size = 4000.0; // Scan radius from origin
+    let sample_step = 200.0; // Check every 200 units
+    let mut herds_spawned = 0;
+    let max_herds = 20; // Limit total beach horse herds
+
+    let mut x = -world_size;
+    while x < world_size && herds_spawned < max_herds {
+        let mut z = -world_size;
+        while z < world_size && herds_spawned < max_herds {
+            // Check if this is a beach biome
+            let biome_t = get_biome_t(x, z, seed);
+
+            // Beach is biome_t between 0.45 and 0.55
+            if biome_t >= 0.45 && biome_t <= 0.55 {
+                // Use deterministic randomness based on position
+                let pos_hash = ((x as i32).wrapping_mul(73856093)) ^ ((z as i32).wrapping_mul(19349663));
+                let spawn_chance = ((pos_hash as u32) % 100) as f32 / 100.0;
+
+                // 15% chance to spawn a herd at each beach sample point
+                if spawn_chance < 0.15 {
+                    // Determine herd size (2-7 horses)
+                    let herd_size = 2 + (rng.gen::<u32>() % 6) as usize;
+
+                    // Create a pack for this herd
+                    let pack_id = animal_manager.create_pack(animals::AnimalSpecies::Horse);
+
+                    // Spawn horses in a loose group
+                    for i in 0..herd_size {
+                        let angle = (i as f32 / herd_size as f32) * std::f32::consts::TAU + rng.gen::<f32>() * 0.5;
+                        let radius = 5.0 + rng.gen::<f32>() * 10.0; // 5-15m spread
+                        let hx = x + angle.cos() * radius;
+                        let hz = z + angle.sin() * radius;
+                        let (height, _) = get_height_at(hx, hz, seed);
+
+                        // Only spawn if above water
+                        if height > 0.5 {
+                            let pos = glam::Vec3::new(hx, height, hz);
+                            let id = animal_manager.spawn(
+                                animals::AnimalSpecies::Horse,
+                                pos,
+                                (0, 0),
+                                Some(pack_id),
+                            );
+
+                            // Set home position and territory for the herd
+                            if let Some(horse) = animal_manager.get_mut(id) {
+                                horse.home_position = glam::Vec3::new(x, height, z);
+                                horse.territory_radius = 150.0; // Roam within 150m of spawn
+                            }
+                        }
+                    }
+
+                    herds_spawned += 1;
+                }
+            }
+
+            z += sample_step;
+        }
+        x += sample_step;
+    }
+
+    if herds_spawned > 0 {
+        println!("[ANIMALS] Spawned {} wild horse herds on beaches", herds_spawned);
     }
 }
 
@@ -554,6 +685,7 @@ fn main() {
         },
         mesh_registry: std::collections::HashMap::new(),
         building_registry: std::collections::HashMap::new(),
+        terrain_textures: None, // Loaded on first GPU access
         background_texture: None,
         loading_slideshow: LoadingSlideshow::new(),
         weather: WeatherSystem::new(),
@@ -593,7 +725,7 @@ fn main() {
         combat_kill_time: 0.0,
         // Debug
         debug_timer: 0.0,
-        fog_level: 2, // Start with medium fog
+        fog_level: 0, // Start with fog off
         // Audio state tracking
         was_in_village: false,
         // Data Pipeline
@@ -603,13 +735,15 @@ fn main() {
         faction_audio: FactionAudioBridge::new(),
         // Systems Manager (will be re-seeded when game starts)
         systems_manager: systems_manager::SystemsManager::new(12345),
+        // Dialogue state
+        current_dialogue: None,
     }));
 
     // ... (Channel setup) ...
     // Response Data: (Terrain, Grass, Trees, Detritus, Rocks, Coord X, Coord Z)
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
-        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Grass
+        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>, // Grass (pos, col, local_height, idx)
         Vec<Mat4>, // Trees (Instanced)
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
         Vec<(String, Mat4)>, // Rocks (Named Instances)
@@ -642,7 +776,7 @@ fn main() {
                 generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
 
             // Generate grass
-            let (grass_pos, grass_col, grass_idx) = generate_vegetation_for_chunk(
+            let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
@@ -685,7 +819,7 @@ fn main() {
             println!("[GEN] Chunk ({}, {}) generated, sending to main thread...", req.coord.x, req.coord.z);
             if chunk_tx.send((
                 terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                grass_pos, grass_col, grass_idx,
+                grass_pos, grass_col, grass_heights, grass_idx,
                 tree_instances,
                 det_pos, det_nrm, det_uv, det_idx,
                 rock_instances,
@@ -762,12 +896,19 @@ fn main() {
                     if let PhysicalKey::Code(keycode) = key_event.physical_key {
                         state.keys.insert(keycode, key_event.state);
 
-                        // ESC key toggles pause (works in both Playing and Paused states)
+                        // ESC key: close dialogue first, then toggle pause
                         if key_event.state == ElementState::Pressed && keycode == KeyCode::Escape {
                             if state.game_state == GameState::Playing {
-                                state.game_state = GameState::Paused;
-                                state.pause_menu_page = PauseMenuPage::Main;
-                                println!("[PAUSE] Game paused");
+                                // If in dialogue, close it instead of pausing
+                                if state.current_dialogue.is_some() {
+                                    state.current_dialogue = None;
+                                    state.game_progression.interaction_system.interacting_npc = None;
+                                    log::info!("[DIALOGUE] Closed with ESC");
+                                } else {
+                                    state.game_state = GameState::Paused;
+                                    state.pause_menu_page = PauseMenuPage::Main;
+                                    println!("[PAUSE] Game paused");
+                                }
                             } else if state.game_state == GameState::Paused {
                                 state.game_state = GameState::Playing;
                                 println!("[PAUSE] Game resumed");
@@ -828,20 +969,20 @@ fn main() {
                                     println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
                                 }
                                 // F5 = Spawn debug animals in a circle around player
+                                // Only spawns species that have 3D models
                                 KeyCode::F5 => {
                                     use animals::AnimalSpecies;
                                     let player_pos = state.player.position;
                                     let species_list = [
-                                        AnimalSpecies::BlackBear,
-                                        AnimalSpecies::EasternCougar,
                                         AnimalSpecies::GrayWolf,
-                                        AnimalSpecies::TimberRattlesnake,
-                                        AnimalSpecies::AmericanAlligator,
-                                        AnimalSpecies::WildBoar,
-                                        AnimalSpecies::Copperhead,
                                         AnimalSpecies::RedWolf,
-                                        AnimalSpecies::Bobcat,
-                                        AnimalSpecies::Cottonmouth,
+                                        AnimalSpecies::WhitetailDeer,
+                                        AnimalSpecies::Stag,
+                                        AnimalSpecies::Horse,
+                                        AnimalSpecies::Donkey,
+                                        AnimalSpecies::Fox,
+                                        AnimalSpecies::Husky,
+                                        AnimalSpecies::Bobcat, // Uses Fox model
                                     ];
                                     let num_species = species_list.len();
                                     for (i, species) in species_list.iter().enumerate() {
@@ -868,24 +1009,62 @@ fn main() {
                                     }
                                     println!("[DEBUG] Cleared {} animals", count);
                                 }
-                                // E = Pickup closest item
+                                // E = Interact with NPC or pickup closest item
                                 KeyCode::KeyE => {
-                                    let pickup_range = 3.0;
-                                    if let Some(closest) = state.dropped_items.closest_drop(
-                                        state.player.position,
-                                        pickup_range,
-                                    ) {
-                                        let item_name = closest.item.name.clone();
-                                        let rarity = closest.item.rarity;
-                                        let drop_id = closest.id;
-
-                                        // Pick up the item
-                                        if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
-                                            // Add to player inventory
-                                            if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
-                                                log::warn!("Failed to add item to inventory: {:?}", e);
+                                    // Check if we're in an active dialogue - select choice 0 (or close if no choices)
+                                    if let Some(dialogue) = &state.current_dialogue {
+                                        if dialogue.choices.is_empty() {
+                                            // End dialogue
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                            log::info!("[DIALOGUE] Ended");
+                                        } else {
+                                            // Make choice 0 by pressing E (1-4 for specific choices)
+                                            let game_time = state.game_progression.game_time;
+                                            if let Some(next) = state.game_progression.interaction_system.make_choice(0, game_time) {
+                                                state.current_dialogue = Some(next);
+                                                log::info!("[DIALOGUE] Selected choice 1");
                                             } else {
-                                                log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                                // Dialogue ended
+                                                state.current_dialogue = None;
+                                                state.game_progression.interaction_system.interacting_npc = None;
+                                                log::info!("[DIALOGUE] Ended");
+                                            }
+                                        }
+                                    }
+                                    // Check if looking at an NPC to start dialogue
+                                    else if let Some(focused) = state.village_manager.focused_npc.clone() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(dialogue_data) = state.game_progression.interaction_system.start_interaction(
+                                            focused.index,
+                                            &focused.name,
+                                            &focused.role,
+                                            focused.position,
+                                            game_time,
+                                        ) {
+                                            state.current_dialogue = Some(dialogue_data);
+                                            log::info!("[DIALOGUE] Started with {} ({})", focused.name, focused.role);
+                                        }
+                                    }
+                                    // Otherwise pickup closest item
+                                    else {
+                                        let pickup_range = 3.0;
+                                        if let Some(closest) = state.dropped_items.closest_drop(
+                                            state.player.position,
+                                            pickup_range,
+                                        ) {
+                                            let item_name = closest.item.name.clone();
+                                            let rarity = closest.item.rarity;
+                                            let drop_id = closest.id;
+
+                                            // Pick up the item
+                                            if let Some(picked_up) = state.dropped_items.pickup(drop_id) {
+                                                // Add to player inventory
+                                                if let Err(e) = state.player_economy.inventory.add_item(picked_up.item) {
+                                                    log::warn!("Failed to add item to inventory: {:?}", e);
+                                                } else {
+                                                    log::info!("[PICKUP] {} ({:?})", item_name, rarity);
+                                                }
                                             }
                                         }
                                     }
@@ -904,11 +1083,63 @@ fn main() {
                                         }
                                     }
                                 }
-                                // Number keys 1-9, 0 = Select hotbar slot
-                                KeyCode::Digit1 => state.active_hotbar_slot = 0,
-                                KeyCode::Digit2 => state.active_hotbar_slot = 1,
-                                KeyCode::Digit3 => state.active_hotbar_slot = 2,
-                                KeyCode::Digit4 => state.active_hotbar_slot = 3,
+                                // Number keys 1-4 = Dialogue choices (when in dialogue), otherwise hotbar
+                                KeyCode::Digit1 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(0, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 1");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 0;
+                                    }
+                                }
+                                KeyCode::Digit2 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(1, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 2");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 1;
+                                    }
+                                }
+                                KeyCode::Digit3 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(2, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 3");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 2;
+                                    }
+                                }
+                                KeyCode::Digit4 => {
+                                    if state.current_dialogue.is_some() {
+                                        let game_time = state.game_progression.game_time;
+                                        if let Some(next) = state.game_progression.interaction_system.make_choice(3, game_time) {
+                                            state.current_dialogue = Some(next);
+                                            log::info!("[DIALOGUE] Selected choice 4");
+                                        } else {
+                                            state.current_dialogue = None;
+                                            state.game_progression.interaction_system.interacting_npc = None;
+                                        }
+                                    } else {
+                                        state.active_hotbar_slot = 3;
+                                    }
+                                }
                                 KeyCode::Digit5 => state.active_hotbar_slot = 4,
                                 KeyCode::Digit6 => state.active_hotbar_slot = 5,
                                 KeyCode::Digit7 => state.active_hotbar_slot = 6,
@@ -936,37 +1167,212 @@ fn main() {
             if state.mesh_registry.is_empty() {
                 println!("[GPU] Initializing Mesh Registry...");
 
-                // 1. Oak Tree - USING SIMPLE LOW-POLY MESH (not OBJ)
-                // The OBJ file has 247K faces which destroys FPS
-                // Simple tree: ~36 triangles (cylinder trunk + icosphere canopy)
-                {
-                    println!("[ASSET] ========== TREE LOADING START ==========");
-                    println!("[ASSET] Using SIMPLE LOW-POLY tree mesh (~36 tris)");
-                    println!("[ASSET] Skipping OBJ (247K faces = unplayable FPS)");
+                // ========================================================================
+                // TREE SYSTEM - FRAMEWORK ONLY
+                // ========================================================================
+                // Current status: NO TREE MODELS AVAILABLE
+                //
+                // The assets/models/foliage/scene.gltf contains only billboard grass planes,
+                // NOT actual 3D tree models. The tree system requires proper tree GLTFs.
+                //
+                // To add trees:
+                // 1. Acquire tree GLTF models (e.g., from Poly Haven, Sketchfab)
+                // 2. Place in assets/models/trees/
+                // 3. Load here using gltf_loader::load_gltf()
+                // 4. Register as "tree_oak", "tree_pine", etc. in mesh_registry
+                //
+                // The TreePipeline infrastructure is ready:
+                // - TreePipeline::create_mesh() for GPU mesh creation
+                // - TreePipeline::new() for rendering pipeline
+                // - tree_instances from generate_trees_for_chunk() for placement
+                // ========================================================================
+                // Create a temporary TreePipeline to get access to texture_bind_group_layout
+                let texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
 
-                    // Generate simple tree mesh: trunk height, trunk radius, canopy radius, seed
-                    let mesh = generate_simple_tree_mesh(3.5, 0.25, 2.2, 12345);
+                // Load tree models from assets/models/trees/
+                // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
+                // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
+                let tree_models = ["tree_0", "tree_1"];
+                let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                for name in &tree_models {
+                    if let Some(model) = tree_cache.load(name) {
+                        // Separate meshes into bark (OPAQUE) and leaves (BLEND)
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                    let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
-                    let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-                    let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                    let gpu_mesh = TreePipeline::create_mesh(
-                        ctx.device(),
-                        &positions,
-                        &normals,
-                        &uvs,
-                        &mesh.indices,
-                        None, // No texture - shader uses procedural colors
-                    );
+                        for mesh in &model.meshes {
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
 
-                    println!("[ASSET] Simple tree mesh: {} vertices, {} triangles",
-                        positions.len(), mesh.indices.len() / 3);
-                    state.mesh_registry.insert("tree_oak".to_string(), gpu_mesh);
-                    println!("[ASSET] ========== TREE LOADING COMPLETE ==========");
+                            if is_leaves {
+                                // Combine into leaves mesh
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                // Use first leaf texture we find
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            } else {
+                                // Combine into bark mesh
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                // Use first bark texture we find
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            }
+                        }
 
-                    // OBJ loading code removed - was loading 247K face tree mesh
-                    // Simple low-poly tree (~36 tris) already registered above
+                        // Create bark mesh
+                        if !bark_positions.is_empty() {
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_bark_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_bark", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_bark: {} verts, {} tris",
+                                name, bark_positions.len(), bark_indices.len() / 3);
+                        }
+
+                        // Create leaves mesh
+                        if !leaf_positions.is_empty() {
+                            let texture_bind_group = leaf_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_leaf_texture", name)),
+                                );
+                                println!("[FOLIAGE] Created leaf texture for {}: {}x{}", name, tex_data.width, tex_data.height);
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_leaves", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_leaves: {} verts, {} tris",
+                                name, leaf_positions.len(), leaf_indices.len() / 3);
+                        }
+
+                        // Also register combined mesh for backwards compatibility
+                        // (uses bark texture - procedural shader handles leaves via UV heuristic)
+                        if !bark_positions.is_empty() {
+                            let all_positions: Vec<[f32; 3]> = bark_positions.iter().chain(leaf_positions.iter()).cloned().collect();
+                            let all_normals: Vec<[f32; 3]> = bark_normals.iter().chain(leaf_normals.iter()).cloned().collect();
+                            let all_uvs: Vec<[f32; 2]> = bark_uvs.iter().chain(leaf_uvs.iter()).cloned().collect();
+                            let bark_count = bark_indices.len();
+                            let all_indices: Vec<u32> = bark_indices.iter().cloned()
+                                .chain(leaf_indices.iter().map(|i| i + bark_positions.len() as u32))
+                                .collect();
+
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_combined_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_combined_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[FOLIAGE] Registered {} (combined): {} verts", name, all_positions.len());
+                        }
+                    } else {
+                        println!("[FOLIAGE] WARNING: Tree model '{}' not found", name);
+                    }
+                }
+
+                // Load shrub/bush models from assets/models/shrubs/
+                let shrub_models = ["shrub_0", "bush_0", "grass_0"];
+                let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
+                for name in &shrub_models {
+                    if let Some(model) = shrub_cache.load(name) {
+                        for mesh in &model.meshes {
+                            // Create texture bind group if mesh has embedded texture
+                            let texture_bind_group = if let Some(ref tex_data) = mesh.material.base_color_texture_data {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                let bind_group = texture_helper.create_texture_bind_group(
+                                    ctx.device(),
+                                    &tex_view,
+                                    Some(&format!("{}_bind_group", name)),
+                                );
+                                println!("[FOLIAGE] Created texture for {}: {}x{}", name, tex_data.width, tex_data.height);
+                                Some(std::sync::Arc::new(bind_group))
+                            } else if let Some(ref tex_path) = mesh.material.base_color_texture {
+                                match gltf_loader::load_texture(tex_path) {
+                                    Ok(tex_data) => {
+                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                            ctx.device(),
+                                            ctx.queue(),
+                                            &tex_data,
+                                            Some(&format!("{}_texture", name)),
+                                        );
+                                        let bind_group = texture_helper.create_texture_bind_group(
+                                            ctx.device(),
+                                            &tex_view,
+                                            Some(&format!("{}_bind_group", name)),
+                                        );
+                                        println!("[FOLIAGE] Loaded external texture for {}: {}", name, tex_path);
+                                        Some(std::sync::Arc::new(bind_group))
+                                    }
+                                    Err(e) => {
+                                        println!("[FOLIAGE] WARNING: Failed to load texture for {}: {}", name, e);
+                                        None
+                                    }
+                                }
+                            } else {
+                                println!("[FOLIAGE] No texture found for {}, using procedural colors", name);
+                                None
+                            };
+
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &mesh.positions,
+                                &mesh.normals,
+                                &mesh.uvs,
+                                &mesh.indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[FOLIAGE] Registered shrub: {} ({} verts)", name, mesh.positions.len());
+                            break; // Only first mesh per model
+                        }
+                    } else {
+                        println!("[FOLIAGE] WARNING: Shrub model '{}' not found", name);
+                    }
                 }
 
                 // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
@@ -998,6 +1404,23 @@ fn main() {
                 }
 
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
+            }
+
+            // Load terrain textures if not already loaded
+            if state.terrain_textures.is_none() {
+                println!("[GPU] Loading terrain textures...");
+                match TerrainTextures::load(ctx.device(), ctx.queue(), "assets") {
+                    Ok(textures) => {
+                        state.terrain_textures = Some(Arc::new(textures));
+                        println!("[GPU] Terrain textures loaded successfully");
+                    }
+                    Err(e) => {
+                        println!("[GPU] WARNING: Failed to load terrain textures: {}", e);
+                        println!("[GPU] Using fallback placeholder texture");
+                        let fallback = TerrainTextures::create_fallback(ctx.device(), ctx.queue());
+                        state.terrain_textures = Some(Arc::new(fallback));
+                    }
+                }
             }
 
             if state.building_registry.is_empty() {
@@ -1123,10 +1546,25 @@ fn main() {
             Mutex::new(LightShaftPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
-        // Animal Orb Pipeline (Visual representation of animals)
+        // Animal Orb Pipeline (Visual representation of animals - fallback for species without models)
         static ANIMAL_ORB_PIPELINE: OnceLock<Mutex<AnimalOrbPipeline>> = OnceLock::new();
         let animal_orb_pipeline_mutex = ANIMAL_ORB_PIPELINE.get_or_init(|| {
             Mutex::new(AnimalOrbPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Animal Model Pipeline (3D models for animals)
+        static ANIMAL_MODEL_PIPELINE: OnceLock<Mutex<AnimalModelPipeline>> = OnceLock::new();
+        let animal_model_pipeline_mutex = ANIMAL_MODEL_PIPELINE.get_or_init(|| {
+            Mutex::new(AnimalModelPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Animal Model Cache (loads GLTF models)
+        static ANIMAL_MODEL_CACHE: OnceLock<Mutex<gltf_loader::ModelCache>> = OnceLock::new();
+        let animal_model_cache_mutex = ANIMAL_MODEL_CACHE.get_or_init(|| {
+            let mut cache = gltf_loader::ModelCache::new("assets/models/animals");
+            // Preload available models
+            cache.preload(&["Wolf", "Deer", "Stag", "Horse", "Donkey", "Fox", "Husky"]);
+            Mutex::new(cache)
         });
 
         // Offscreen Render Target (for post-process effects)
@@ -1431,7 +1869,8 @@ fn main() {
 
                 // Update village NPC movement and communication
                 let game_hour = (state.game_progression.game_time % 24.0) as f32;
-                state.village_manager.update(delta, game_hour, player_pos);
+                let player_look_dir = state.camera.forward();
+                state.village_manager.update(delta, game_hour, player_pos, player_look_dir);
 
                 // Check for achievements
                 let game_time = state.game_progression.game_time;
@@ -1453,68 +1892,191 @@ fn main() {
                         println!("[FACTION] {}", notification.message);
                     }
                 }
+
+                // Process pending dialogue effects
+                let pending_effects = std::mem::take(&mut state.game_progression.interaction_system.pending_effects);
+                for effect in pending_effects {
+                    match effect {
+                        npc::interaction::PendingEffect::ModifyReputation { faction, delta } => {
+                            state.game_progression.player_progression.modify_reputation(faction, delta);
+                            log::info!("[DIALOGUE EFFECT] Reputation {:?} {:+}", faction, delta);
+                        }
+                        npc::interaction::PendingEffect::GiveItem { item, count } => {
+                            // Create item and add to inventory
+                            let new_item = economy::Item::new(
+                                &item,
+                                &item,
+                                economy::item::ItemType::Material,
+                                10, // Base value
+                            );
+                            if let Err(e) = state.player_economy.inventory.add_item(new_item) {
+                                log::warn!("[DIALOGUE EFFECT] Failed to give item {}: {:?}", item, e);
+                            } else {
+                                log::info!("[DIALOGUE EFFECT] Received {} x{}", item, count);
+                            }
+                        }
+                        npc::interaction::PendingEffect::TakeItem { item, count } => {
+                            // Find and remove item from inventory
+                            if let Some(item_in_inv) = state.player_economy.inventory.slots.iter()
+                                .filter_map(|s| s.as_ref())
+                                .find(|i| i.name == item)
+                                .map(|i| i.id) {
+                                state.player_economy.inventory.remove_item(item_in_inv);
+                                log::info!("[DIALOGUE EFFECT] Gave away {} x{}", item, count);
+                            }
+                        }
+                        npc::interaction::PendingEffect::StartQuest(quest_id) => {
+                            log::info!("[DIALOGUE EFFECT] Quest started: {}", quest_id);
+                            // Quest system integration would go here
+                        }
+                        npc::interaction::PendingEffect::CompleteObjective { quest, objective } => {
+                            log::info!("[DIALOGUE EFFECT] Objective completed: {} - {}", quest, objective);
+                        }
+                        npc::interaction::PendingEffect::SetFlag { flag, value } => {
+                            log::info!("[DIALOGUE EFFECT] Flag set: {} = {}", flag, value);
+                        }
+                        npc::interaction::PendingEffect::UnlockTrading(npc_id) => {
+                            log::info!("[DIALOGUE EFFECT] Trading unlocked with NPC #{}", npc_id);
+                        }
+                        npc::interaction::PendingEffect::TeachSkill(skill) => {
+                            log::info!("[DIALOGUE EFFECT] Learned skill: {}", skill);
+                        }
+                        npc::interaction::PendingEffect::Heal(amount) => {
+                            log::info!("[DIALOGUE EFFECT] Healed for {}", amount);
+                            // Player health system integration would go here
+                        }
+                        npc::interaction::PendingEffect::ModifyRelationship { npc_id, affinity, trust, respect } => {
+                            // Already handled by interaction system
+                            log::info!("[DIALOGUE EFFECT] Relationship modified: NPC#{} A{:+} T{:+} R{:+}",
+                                npc_id, affinity, trust, respect);
+                        }
+                        npc::interaction::PendingEffect::SpreadRumor { positive, radius } => {
+                            log::info!("[DIALOGUE EFFECT] Rumor spread ({}) in {}m radius",
+                                if positive { "positive" } else { "negative" }, radius);
+                        }
+                    }
+                }
             }
 
-            // Update animal orb visual representation - only render nearby animals
+            // Update animal visual representation - only render nearby animals
+            // Animals with 3D models use the model pipeline, others use orbs as fallback
             let nearby_animals = state.animal_manager.animals_near(player_pos, state.render_distance * 0.5);
-            let mut orb_instances: Vec<OrbInstance> = nearby_animals
-                .iter()
-                .map(|animal| {
-                    let base_color = animal.species.orb_color();
-                    let scale = animal.species.orb_scale();
 
-                    // Modify color based on behavior state
-                    let (mut color, mut emissive) = match &animal.behavior_state {
-                        animals::BehaviorState::Attack(_) => {
-                            // Red tint and strong glow when attacking
-                            ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
-                        }
-                        animals::BehaviorState::Pursue(_) => {
-                            // Orange-ish tint and moderate glow when pursuing
-                            ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
-                        }
-                        animals::BehaviorState::Alert(_) => {
-                            // Slight yellow tint when alert
-                            ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
-                        }
-                        animals::BehaviorState::Flee(_) => {
-                            // Pale/washed out when fleeing
-                            ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
-                        }
-                        animals::BehaviorState::Dead => {
-                            // Dark gray when dead
-                            ([0.2, 0.2, 0.2], 0.0)
-                        }
-                        _ => {
-                            // Normal color for idle/patrol
-                            (base_color, 0.0)
-                        }
-                    };
+            // Separate animals by whether they have 3D models
+            let mut orb_instances: Vec<OrbInstance> = Vec::new();
+            let mut model_instances: std::collections::HashMap<&'static str, Vec<AnimalInstance>> = std::collections::HashMap::new();
 
-                    // Apply damage flash effect (bright white/red flash when hit)
-                    let (flash_tint, flash_emissive) = animal.damage_flash_effect();
-                    color = [
-                        (color[0] * flash_tint[0]).min(2.0),
-                        (color[1] * flash_tint[1]).min(2.0),
-                        (color[2] * flash_tint[2]).min(2.0),
-                    ];
-                    emissive = (emissive + flash_emissive).min(2.0);
+            for animal in &nearby_animals {
+                let base_color = animal.species.orb_color();
+                let scale = animal.species.orb_scale();
 
-                    // Create transform matrix (position + scale, orbs hover slightly above ground)
+                // Modify color based on behavior state
+                let (mut color, mut emissive) = match &animal.behavior_state {
+                    animals::BehaviorState::Attack(_) => {
+                        // Red tint and strong glow when attacking
+                        ([base_color[0] * 1.5, base_color[1] * 0.5, base_color[2] * 0.5], 0.8)
+                    }
+                    animals::BehaviorState::Pursue(_) => {
+                        // Orange-ish tint and moderate glow when pursuing
+                        ([base_color[0] * 1.3, base_color[1] * 0.8, base_color[2] * 0.6], 0.5)
+                    }
+                    animals::BehaviorState::Alert(_) => {
+                        // Slight yellow tint when alert
+                        ([base_color[0] * 1.1, base_color[1] * 1.1, base_color[2] * 0.8], 0.2)
+                    }
+                    animals::BehaviorState::Flee(_) => {
+                        // Pale/washed out when fleeing
+                        ([base_color[0] * 0.7, base_color[1] * 0.7, base_color[2] * 0.7], 0.0)
+                    }
+                    animals::BehaviorState::Dead => {
+                        // Dark gray when dead
+                        ([0.2, 0.2, 0.2], 0.0)
+                    }
+                    _ => {
+                        // Normal color for idle/patrol
+                        (base_color, 0.0)
+                    }
+                };
+
+                // Apply damage flash effect (bright white/red flash when hit)
+                let (flash_tint, flash_emissive) = animal.damage_flash_effect();
+                color = [
+                    (color[0] * flash_tint[0]).min(2.0),
+                    (color[1] * flash_tint[1]).min(2.0),
+                    (color[2] * flash_tint[2]).min(2.0),
+                ];
+                emissive = (emissive + flash_emissive).min(2.0);
+
+                // Check if this species has a 3D model
+                if let Some(model_name) = animal.species.model_name() {
+                    // Use 3D model pipeline
+                    let model_scale = animal.species.model_scale();
+                    // Apply Y offset to correct model anchor points (e.g., stag antlers)
+                    let y_offset = animal.species.model_y_offset();
+                    let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
+                    let model_matrix = Mat4::from_scale_rotation_translation(
+                        Vec3::splat(model_scale),
+                        animal.rotation,
+                        model_position,
+                    );
+                    let instance = AnimalInstance::new(model_matrix, color, emissive);
+                    model_instances.entry(model_name).or_insert_with(Vec::new).push(instance);
+                } else {
+                    // Fall back to orb rendering
                     let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         Vec3::splat(scale),
                         glam::Quat::IDENTITY,
                         pos,
                     );
-
-                    OrbInstance {
+                    orb_instances.push(OrbInstance {
                         model_matrix: model_matrix.to_cols_array_2d(),
                         color,
                         emissive,
+                    });
+                }
+            }
+
+            // Upload model instances to model pipeline
+            {
+                let mut model_pipeline = animal_model_pipeline_mutex.safe_lock();
+                let model_cache = animal_model_cache_mutex.safe_lock();
+
+                // Upload meshes for any new species (only once per species)
+                for (model_name, instances) in &model_instances {
+                    if !model_pipeline.has_mesh(model_name) {
+                        if let Some(loaded_model) = model_cache.get(model_name) {
+                            // Combine all meshes into one for this species
+                            let mut all_vertices: Vec<AnimalVertex> = Vec::new();
+                            let mut all_indices: Vec<u32> = Vec::new();
+
+                            for mesh in &loaded_model.meshes {
+                                let vertex_offset = all_vertices.len() as u32;
+                                for i in 0..mesh.positions.len() {
+                                    all_vertices.push(AnimalVertex {
+                                        position: mesh.positions[i],
+                                        normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                                        uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                                    });
+                                }
+                                for idx in &mesh.indices {
+                                    all_indices.push(*idx + vertex_offset);
+                                }
+                            }
+
+                            model_pipeline.upload_species_mesh(
+                                ctx.device(),
+                                model_name,
+                                &all_vertices,
+                                &all_indices,
+                            );
+                        }
                     }
-                })
-                .collect();
+
+                    // Upload instances for this species
+                    model_pipeline.upload_instances(ctx.device(), model_name, instances);
+                }
+            }
 
             // Add village NPC orbs
             for npc_orb in &state.village_manager.npc_orbs {
@@ -1842,6 +2404,14 @@ fn main() {
                                                     2000.0, // 2km radius
                                                     10,     // max 10 villages
                                                 );
+                                                // Spawn tame animals (horses, donkeys) in villages
+                                                {
+                                                    let village_data = state.village_manager.get_village_spawn_data();
+                                                    let seed = state.village_manager.get_seed();
+                                                    spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                                }
+                                                // Spawn wild horse herds on beaches
+                                                spawn_beach_horses(&mut state.animal_manager, data.seed);
                                                 // Register village factions
                                                 register_village_factions(&mut *state);
                                             }
@@ -1877,6 +2447,14 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Spawn tame animals (horses, donkeys) in villages
+                                        {
+                                            let village_data = state.village_manager.get_village_spawn_data();
+                                            let seed = state.village_manager.get_seed();
+                                            spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                        }
+                                        // Spawn wild horse herds on beaches
+                                        spawn_beach_horses(&mut state.animal_manager, seed);
                                         // Register village factions
                                         register_village_factions(&mut *state);
                                     }
@@ -2076,6 +2654,114 @@ fn main() {
                                 });
                             });
                         });
+
+                    // === "E to interact" prompt when looking at NPC ===
+                    if state.current_dialogue.is_none() {
+                        if let Some((name, role, distance)) = state.village_manager.get_focused_npc_info() {
+                            egui::Area::new(egui::Id::new("npc_interact_prompt"))
+                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 100.0))
+                                .show(ui_ctx, |ui| {
+                                    let bg = egui::Frame::none()
+                                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
+                                        .rounding(egui::Rounding::same(8.0))
+                                        .inner_margin(egui::Margin::same(12.0));
+                                    bg.show(ui, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(egui::RichText::new(format!("{} - {}", name, role))
+                                                .color(egui::Color32::WHITE)
+                                                .size(18.0));
+                                            ui.label(egui::RichText::new(format!("{:.1}m away", distance))
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                            ui.add_space(4.0);
+                                            ui.label(egui::RichText::new("[E] Talk")
+                                                .color(egui::Color32::from_rgb(100, 200, 255))
+                                                .size(14.0));
+                                        });
+                                    });
+                                });
+                        }
+                    }
+
+                    // === Dialogue UI ===
+                    if let Some(dialogue) = &state.current_dialogue {
+                        egui::Area::new(egui::Id::new("dialogue_window"))
+                            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -100.0))
+                            .show(ui_ctx, |ui| {
+                                let bg = egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(20, 15, 10, 240))
+                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(139, 90, 43)))
+                                    .rounding(egui::Rounding::same(10.0))
+                                    .inner_margin(egui::Margin::same(16.0));
+                                bg.show(ui, |ui| {
+                                    ui.set_min_width(500.0);
+                                    ui.set_max_width(600.0);
+
+                                    // Speaker name
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&dialogue.speaker_name)
+                                            .color(egui::Color32::from_rgb(255, 220, 150))
+                                            .size(20.0)
+                                            .strong());
+                                        // Relationship status if available
+                                        if let Some(rel) = &dialogue.relationship_status {
+                                            ui.label(egui::RichText::new(format!("({})", rel.relationship_type))
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                        }
+                                    });
+
+                                    ui.add_space(8.0);
+
+                                    // Dialogue text
+                                    ui.label(egui::RichText::new(&dialogue.text)
+                                        .color(egui::Color32::WHITE)
+                                        .size(16.0));
+
+                                    ui.add_space(12.0);
+                                    ui.separator();
+                                    ui.add_space(8.0);
+
+                                    // Dialogue choices
+                                    if dialogue.choices.is_empty() {
+                                        ui.label(egui::RichText::new("[E] Continue")
+                                            .color(egui::Color32::from_rgb(100, 200, 255))
+                                            .size(14.0));
+                                    } else {
+                                        for choice in &dialogue.choices {
+                                            let color = if choice.locked {
+                                                egui::Color32::DARK_GRAY
+                                            } else if choice.has_effect {
+                                                egui::Color32::from_rgb(180, 255, 180)
+                                            } else {
+                                                egui::Color32::WHITE
+                                            };
+                                            let key = choice.index + 1;
+                                            let prefix = format!("[{}] ", key);
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new(&prefix)
+                                                    .color(egui::Color32::from_rgb(100, 200, 255))
+                                                    .size(14.0));
+                                                ui.label(egui::RichText::new(&choice.text)
+                                                    .color(color)
+                                                    .size(14.0));
+                                                if choice.locked {
+                                                    if let Some(reason) = &choice.lock_reason {
+                                                        ui.label(egui::RichText::new(format!("({})", reason))
+                                                            .color(egui::Color32::from_rgb(200, 100, 100))
+                                                            .size(11.0));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new("[ESC] Leave conversation")
+                                            .color(egui::Color32::GRAY)
+                                            .size(12.0));
+                                    }
+                                });
+                            });
+                    }
 
                     // === Debug window (existing) ===
                     egui::Window::new("Game Menu").show(ui_ctx, |ui| {
@@ -2488,7 +3174,7 @@ fn main() {
                 for _ in 0..chunks_per_frame {
                     match rx.try_recv() {
                         Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                            grass_pos, grass_col, grass_idx,
+                            grass_pos, grass_col, grass_heights, grass_idx,
                             tree_instances,
                             det_pos, det_nrm, det_uv, det_idx,
                             rock_instances,
@@ -2518,11 +3204,15 @@ fn main() {
                             // Create Pipelines
                             let terrain_pipeline = {
                                 let shadow_map = shadow_map_mutex.safe_lock();
+                                // Get terrain textures (should be loaded by now)
+                                let terrain_textures = state.terrain_textures.as_ref()
+                                    .expect("Terrain textures should be loaded before chunks");
                                 TerrainPipeline::new(
                                     ctx.device(),
                                     ctx.surface_format(),
                                     &terrain_pos, &terrain_col, &terrain_nrm, &terrain_idx,
-                                    &shadow_map
+                                    &shadow_map,
+                                    terrain_textures.as_ref()
                                 )
                             };
 
@@ -2531,23 +3221,67 @@ fn main() {
                                 let shadow_map = shadow_map_mutex.safe_lock();
                                 let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                                 drop(shadow_map);
-                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_idx);
+                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_heights, &grass_idx);
                                 grass_pipeline = Some(gp);
                             }
 
-                            let mut tree_pipeline = None;
-                            println!("[CHUNK] Tree instances: {}", tree_instances.len());
-                            if !tree_instances.is_empty() {
-                                if let Some(mesh) = state.mesh_registry.get("tree_oak") {
+                            // FOLIAGE: Create pipelines for trees and shrubs
+                            let mut foliage_pipelines: Vec<TreePipeline> = Vec::new();
+                            let tree_model_names = ["tree_0", "tree_1"];
+                            let shrub_model_names = ["shrub_0", "bush_0"];
+
+                            // Group trees by model
+                            let mut tree_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (i, transform) in tree_instances.iter().enumerate() {
+                                let name = tree_model_names[i % tree_model_names.len()].to_string();
+                                tree_groups.entry(name).or_default().push(*transform);
+                            }
+                            for (name, transforms) in &tree_groups {
+                                // Render bark mesh (OPAQUE)
+                                let bark_name = format!("{}_bark", name);
+                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
                                     let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                     tp.set_mesh(mesh.clone());
-                                    tp.upload_instances(ctx.device(), &tree_instances);
-                                    tree_pipeline = Some(tp);
-                                    println!("[CHUNK] Created tree pipeline with {} instances", tree_instances.len());
-                                } else {
-                                    println!("[WARN] tree_oak mesh not found in registry!");
+                                    tp.upload_instances(ctx.device(), transforms);
+                                    foliage_pipelines.push(tp);
+                                    println!("[FOLIAGE] Tree '{}' bark: {} instances", name, transforms.len());
+                                }
+                                // Render leaves mesh (BLEND) with same transforms
+                                let leaves_name = format!("{}_leaves", name);
+                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), transforms);
+                                    foliage_pipelines.push(tp);
+                                    println!("[FOLIAGE] Tree '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
+
+                            // Generate shrubs around trees
+                            let mut shrub_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (i, t) in tree_instances.iter().enumerate() {
+                                let name = shrub_model_names[i % shrub_model_names.len()].to_string();
+                                let pos = t.w_axis;
+                                for j in 0..2 {
+                                    let ang = (i + j) as f32 * 2.1;
+                                    let shrub_t = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(1.0),
+                                        glam::Quat::from_rotation_y(ang),
+                                        Vec3::new(pos.x + ang.cos() * 4.0, pos.y + 0.5, pos.z + ang.sin() * 4.0),
+                                    );
+                                    shrub_groups.entry(name.clone()).or_default().push(shrub_t);
+                                }
+                            }
+                            for (name, transforms) in shrub_groups {
+                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                                    let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    sp.set_mesh(mesh.clone());
+                                    sp.upload_instances(ctx.device(), &transforms);
+                                    foliage_pipelines.push(sp);
+                                    println!("[FOLIAGE] Shrub '{}': {} instances", name, transforms.len());
+                                }
+                            }
+                            println!("[CHUNK] Foliage: {} pipelines", foliage_pipelines.len());
 
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
@@ -2660,7 +3394,7 @@ fn main() {
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
                                 grass: grass_pipeline,
-                                trees: tree_pipeline,
+                                trees: foliage_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
                                 buildings: building_pipelines,
@@ -2792,8 +3526,9 @@ fn main() {
                             fog_density,
                         );
                     }
-                    if let Some(trees) = &chunk.trees {
-                        trees.update_camera(
+                    for trees in &chunk.trees {
+                        // Textured foliage from GLTF - enable texture sampling + alpha discard
+                        trees.update_camera_full(
                             ctx.queue(),
                             &view_proj,
                             sun_dir.to_array(),
@@ -2803,6 +3538,8 @@ fn main() {
                             fog_start,
                             fog_end,
                             fog_density,
+                            0.5,   // alpha_cutoff - use 0.5 for clean leaf edges
+                            1.0,   // use_texture = sample from texture
                         );
                     }
                     if let Some(detritus) = &chunk.detritus {
@@ -2913,9 +3650,12 @@ fn main() {
             // 0.5 Sky Pass (Draw Skybox/Clouds first)
             {
                 let sky_pipeline = sky_pipeline_mutex.safe_lock();
+                // Use rotation-only view matrix for sky - removes translation so sky
+                // appears at infinity and doesn't shift with player movement
+                let sky_view_proj = state.camera.sky_view_projection_matrix();
                 sky_pipeline.update_uniforms(
                     ctx.queue(),
-                    view_proj,
+                    sky_view_proj,
                     sun_dir,
                     Vec3::new(1.0, 1.0, 1.0), // Sun Color (White for now)
                     elapsed,
@@ -2987,6 +3727,8 @@ fn main() {
             {
                 // let water_system_guard = water_system_mutex.safe_lock();
                 let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
+                // Lock model_pipeline early so it outlives render_pass
+                let model_pipeline = animal_model_pipeline_mutex.safe_lock();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3026,9 +3768,8 @@ fn main() {
                 // Use render distance setting from pause menu
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
-                // Need at least 200+ to reliably see grass in current and adjacent chunks
-                let grass_max_distance = (state.render_distance * 0.8).max(200.0);  // Minimum 200 for visibility
-                let tree_max_distance = (state.render_distance * 0.7).max(180.0);   // Trees slightly farther
+                let grass_max_distance = 0.0;  // DISABLED - using GLTF foliage instead
+                let tree_max_distance = (state.render_distance * 1.5).max(300.0);   // Foliage visible far
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
@@ -3069,7 +3810,7 @@ fn main() {
                     // Trees - RE-ENABLED with simple low-poly mesh (~36 tris per tree)
                     // Previously: 94K tris per instance (247K face OBJ)
                     // Now: ~36 tris per instance (cylinder trunk + icosphere canopy)
-                    if let Some(trees) = &chunk.trees {
+                    for trees in &chunk.trees {
                         if dist <= tree_max_distance {
                             trees_rendered += 1;
                             trees.render(&mut render_pass);
@@ -3083,12 +3824,12 @@ fn main() {
                         }
                     }
 
-                    // Rocks - TEMPORARILY DISABLED (unknown rock types in log)
-                    // for rock in &chunk.rocks {
-                    //     if dist <= tree_max_distance {
-                    //         rock.render(&mut render_pass);
-                    //     }
-                    // }
+                    // Rocks
+                    for rock in &chunk.rocks {
+                        if dist <= tree_max_distance {
+                            rock.render(&mut render_pass);
+                        }
+                    }
 
                     // Buildings
                     for building in &chunk.buildings {
@@ -3108,7 +3849,20 @@ fn main() {
                     }
                 }
 
-                // Render Animal Orbs
+                // Render Animal Models (3D models for species that have them)
+                model_pipeline.update_camera(
+                    ctx.queue(),
+                    &view_proj,
+                    state.camera.position,
+                    state.time_of_day,
+                    Vec3::from_array(fog_color),
+                    fog_start,
+                    fog_end,
+                    1.5, // fog_density
+                );
+                model_pipeline.render(&mut render_pass);
+
+                // Render Animal Orbs (fallback for species without 3D models)
                 orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position);
                 orb_pipeline.render(&mut render_pass);
 

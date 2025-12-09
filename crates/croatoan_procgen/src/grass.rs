@@ -32,6 +32,7 @@ impl Default for GrassBladeRecipe {
 pub struct GrassBlade {
     pub positions: Vec<[f32; 3]>,
     pub colors: Vec<[f32; 3]>,
+    pub local_heights: Vec<f32>,  // 0.0 at base, 1.0 at tip - for wind animation
     pub indices: Vec<u32>,
 }
 
@@ -55,6 +56,7 @@ pub fn generate_grass_blade(recipe: &GrassBladeRecipe, seed: u32, base_pos: Vec3
 
     let mut positions = Vec::with_capacity(vertex_count);
     let mut colors = Vec::with_capacity(vertex_count);
+    let mut local_heights = Vec::with_capacity(vertex_count);
     let mut indices = Vec::new();
 
     // Generate vertices along the blade
@@ -85,6 +87,7 @@ pub fn generate_grass_blade(recipe: &GrassBladeRecipe, seed: u32, base_pos: Vec3
             base_pos.z + local_z + left_offset.y,
         ]);
         colors.push(color);
+        local_heights.push(t); // 0.0 at base, 1.0 at tip
 
         // Right vertex
         positions.push([
@@ -93,6 +96,7 @@ pub fn generate_grass_blade(recipe: &GrassBladeRecipe, seed: u32, base_pos: Vec3
             base_pos.z + local_z + right_offset.y,
         ]);
         colors.push(color);
+        local_heights.push(t); // Same height for both left and right vertices
     }
 
     // Generate indices for triangles
@@ -113,6 +117,7 @@ pub fn generate_grass_blade(recipe: &GrassBladeRecipe, seed: u32, base_pos: Vec3
     GrassBlade {
         positions,
         colors,
+        local_heights,
         indices,
     }
 }
@@ -121,6 +126,8 @@ pub fn generate_grass_blade(recipe: &GrassBladeRecipe, seed: u32, base_pos: Vec3
 ///
 /// density: blades per square unit
 /// biome_filter: function to determine if grass should spawn at location
+///
+/// Returns (positions, colors, local_heights, indices)
 pub fn generate_grass_patch(
     recipe: &GrassBladeRecipe,
     seed: u32,
@@ -129,12 +136,13 @@ pub fn generate_grass_patch(
     density: f32,
     terrain_height_fn: impl Fn(f32, f32) -> f32,
     biome_filter: impl Fn(f32, f32) -> bool,
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
+) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>) {
     let noise = Perlin::new(seed + 999);
 
     let blade_count = (chunk_size * chunk_size * density) as u32;
     let mut all_positions = Vec::new();
     let mut all_colors = Vec::new();
+    let mut all_local_heights = Vec::new();
     let mut all_indices = Vec::new();
 
     for i in 0..blade_count {
@@ -164,10 +172,11 @@ pub fn generate_grass_patch(
         let vertex_offset = all_positions.len() as u32;
         all_positions.extend(blade.positions);
         all_colors.extend(blade.colors);
+        all_local_heights.extend(blade.local_heights);
         all_indices.extend(blade.indices.iter().map(|idx| idx + vertex_offset));
     }
 
-    (all_positions, all_colors, all_indices)
+    (all_positions, all_colors, all_local_heights, all_indices)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
