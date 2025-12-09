@@ -67,13 +67,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let center = vec2<f32>(0.5, 0.5);
     let dist = distance(in.uv, center) * 2.0;
 
-    // Moon disk radius
+    // Moon disk and glow radii
     let moon_radius = 0.35;
+    let corona_radius = 1.0;
 
     // Silvery moon colors
     let moon_bright = vec3<f32>(0.95, 0.95, 1.0);    // Bright silver-white
     let moon_mid = vec3<f32>(0.85, 0.87, 0.92);      // Slightly blue-grey
     let moon_dark = vec3<f32>(0.6, 0.62, 0.68);      // Darker maria regions
+    let glow_color = vec3<f32>(0.7, 0.75, 0.9);      // Cool silvery-blue glow
 
     if (dist < moon_radius) {
         // Moon surface with subtle texture
@@ -98,7 +100,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         surface_color *= limb_factor;
 
+        // Add subtle bright rim at the edge (atmospheric scattering effect)
+        let rim_factor = smoothstep(moon_radius * 0.7, moon_radius, dist);
+        surface_color = mix(surface_color, moon_bright * 1.1, rim_factor * 0.3);
+
         return vec4<f32>(surface_color, 1.0);
+    } else if (dist < corona_radius) {
+        // Ethereal lunar corona - soft atmospheric glow
+        let corona_blend = (dist - moon_radius) / (corona_radius - moon_radius);
+
+        // Softer, more gradual falloff than the sun - moon glow is gentler
+        let glow_intensity = exp(-corona_blend * 3.5) * 0.6;
+
+        // Add subtle noise to break up the perfect circle
+        let glow_uv = (in.uv - center) * 4.0;
+        let glow_noise = noise2(glow_uv + vec2<f32>(uniforms.time * 0.02, 0.0)) * 0.15;
+        let final_intensity = glow_intensity * (1.0 + glow_noise);
+
+        return vec4<f32>(glow_color, final_intensity);
     }
 
     discard;

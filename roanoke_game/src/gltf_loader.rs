@@ -236,10 +236,12 @@ pub fn load_gltf_with_options(
                 }
             };
 
-            log::debug!("[GLTF] Extracted embedded texture: {}x{}", width, height);
+            println!("[GLTF] Extracted embedded texture {}: {}x{}", images.iter().position(|i| std::ptr::eq(i, img)).unwrap_or(999), width, height);
             Some(LoadedTexture { width, height, data })
         })
         .collect();
+
+    println!("[GLTF] Total embedded textures: {}", embedded_textures.iter().filter(|t| t.is_some()).count());
 
     // Build image URI lookup for external textures
     let image_uris: Vec<Option<String>> = document
@@ -286,9 +288,14 @@ pub fn load_gltf_with_options(
                 let pbr = gltf_mat.pbr_metallic_roughness();
 
                 // Get base color texture - try embedded first, then external path
-                let texture_image_idx = pbr
-                    .base_color_texture()
-                    .and_then(|info| texture_to_image.get(info.texture().index()).cloned().flatten());
+                let texture_idx = pbr.base_color_texture().map(|info| info.texture().index());
+                let texture_image_idx = texture_idx
+                    .and_then(|idx| texture_to_image.get(idx).cloned().flatten());
+
+                // Debug: log which texture index this mesh uses
+                if let Some(idx) = texture_idx {
+                    println!("[GLTF]     -> uses texture {} -> image {:?}", idx, texture_image_idx);
+                }
 
                 // Try to get embedded texture data
                 let base_color_texture_data = texture_image_idx
@@ -420,8 +427,18 @@ pub fn load_gltf_with_options(
                 continue;
             }
 
+            let mesh_name = mesh.name().unwrap_or("unnamed").to_string();
+            println!(
+                "[GLTF]   Mesh '{}': {} verts, {} tris, has_texture={}, alpha_mode={}",
+                mesh_name,
+                positions.len(),
+                valid_indices.len() / 3,
+                material.has_texture(),
+                material.alpha_mode
+            );
+
             meshes.push(LoadedMesh {
-                name: mesh.name().unwrap_or("unnamed").to_string(),
+                name: mesh_name,
                 positions,
                 normals,
                 uvs,

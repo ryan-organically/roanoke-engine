@@ -1190,67 +1190,120 @@ fn main() {
                 let texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
 
                 // Load tree models from assets/models/trees/
+                // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
+                // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
                 let tree_models = ["tree_0", "tree_1"];
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
+                        // Separate meshes into bark (OPAQUE) and leaves (BLEND)
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
+
                         for mesh in &model.meshes {
-                            // Create texture bind group if mesh has embedded texture
-                            let texture_bind_group = if let Some(ref tex_data) = mesh.material.base_color_texture_data {
-                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                    ctx.device(),
-                                    ctx.queue(),
-                                    tex_data,
-                                    Some(&format!("{}_texture", name)),
-                                );
-                                let bind_group = texture_helper.create_texture_bind_group(
-                                    ctx.device(),
-                                    &tex_view,
-                                    Some(&format!("{}_bind_group", name)),
-                                );
-                                println!("[FOLIAGE] Created texture for {}: {}x{}, alpha_mode={}, alpha_cutoff={}",
-                                    name, tex_data.width, tex_data.height,
-                                    mesh.material.alpha_mode, mesh.material.alpha_cutoff);
-                                Some(std::sync::Arc::new(bind_group))
-                            } else if let Some(ref tex_path) = mesh.material.base_color_texture {
-                                // Try loading external texture
-                                match gltf_loader::load_texture(tex_path) {
-                                    Ok(tex_data) => {
-                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                            ctx.device(),
-                                            ctx.queue(),
-                                            &tex_data,
-                                            Some(&format!("{}_texture", name)),
-                                        );
-                                        let bind_group = texture_helper.create_texture_bind_group(
-                                            ctx.device(),
-                                            &tex_view,
-                                            Some(&format!("{}_bind_group", name)),
-                                        );
-                                        println!("[FOLIAGE] Loaded external texture for {}: {}", name, tex_path);
-                                        Some(std::sync::Arc::new(bind_group))
-                                    }
-                                    Err(e) => {
-                                        println!("[FOLIAGE] WARNING: Failed to load texture for {}: {}", name, e);
-                                        None
-                                    }
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
+
+                            if is_leaves {
+                                // Combine into leaves mesh
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                // Use first leaf texture we find
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
                                 }
                             } else {
-                                println!("[FOLIAGE] No texture found for {}, using procedural colors", name);
-                                None
-                            };
+                                // Combine into bark mesh
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                // Use first bark texture we find
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            }
+                        }
 
+                        // Create bark mesh
+                        if !bark_positions.is_empty() {
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_bark_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", name)),
+                                ))
+                            });
                             let gpu_mesh = TreePipeline::create_mesh(
-                                ctx.device(),
-                                &mesh.positions,
-                                &mesh.normals,
-                                &mesh.uvs,
-                                &mesh.indices,
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_bark", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_bark: {} verts, {} tris",
+                                name, bark_positions.len(), bark_indices.len() / 3);
+                        }
+
+                        // Create leaves mesh
+                        if !leaf_positions.is_empty() {
+                            let texture_bind_group = leaf_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_leaf_texture", name)),
+                                );
+                                println!("[FOLIAGE] Created leaf texture for {}: {}x{}", name, tex_data.width, tex_data.height);
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_leaves", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_leaves: {} verts, {} tris",
+                                name, leaf_positions.len(), leaf_indices.len() / 3);
+                        }
+
+                        // Also register combined mesh for backwards compatibility
+                        // (uses bark texture - procedural shader handles leaves via UV heuristic)
+                        if !bark_positions.is_empty() {
+                            let all_positions: Vec<[f32; 3]> = bark_positions.iter().chain(leaf_positions.iter()).cloned().collect();
+                            let all_normals: Vec<[f32; 3]> = bark_normals.iter().chain(leaf_normals.iter()).cloned().collect();
+                            let all_uvs: Vec<[f32; 2]> = bark_uvs.iter().chain(leaf_uvs.iter()).cloned().collect();
+                            let bark_count = bark_indices.len();
+                            let all_indices: Vec<u32> = bark_indices.iter().cloned()
+                                .chain(leaf_indices.iter().map(|i| i + bark_positions.len() as u32))
+                                .collect();
+
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_combined_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_combined_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[FOLIAGE] Registered tree: {} ({} verts)", name, mesh.positions.len());
-                            break; // Only first mesh per model
+                            println!("[FOLIAGE] Registered {} (combined): {} verts", name, all_positions.len());
                         }
                     } else {
                         println!("[FOLIAGE] WARNING: Tree model '{}' not found", name);
@@ -3183,13 +3236,24 @@ fn main() {
                                 let name = tree_model_names[i % tree_model_names.len()].to_string();
                                 tree_groups.entry(name).or_default().push(*transform);
                             }
-                            for (name, transforms) in tree_groups {
-                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                            for (name, transforms) in &tree_groups {
+                                // Render bark mesh (OPAQUE)
+                                let bark_name = format!("{}_bark", name);
+                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
                                     let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                     tp.set_mesh(mesh.clone());
-                                    tp.upload_instances(ctx.device(), &transforms);
+                                    tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
-                                    println!("[FOLIAGE] Tree '{}': {} instances", name, transforms.len());
+                                    println!("[FOLIAGE] Tree '{}' bark: {} instances", name, transforms.len());
+                                }
+                                // Render leaves mesh (BLEND) with same transforms
+                                let leaves_name = format!("{}_leaves", name);
+                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), transforms);
+                                    foliage_pipelines.push(tp);
+                                    println!("[FOLIAGE] Tree '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
 
