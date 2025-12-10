@@ -363,7 +363,7 @@ impl AnimalManager {
     /// New complexity: O(n) - single batched query pass, cached results
     ///
     /// Performance gain: ~50-80% with 50 animals
-    pub fn update(&mut self, dt: f32, player_pos: Vec3, player_velocity: Vec3) {
+    pub fn update(&mut self, dt: f32, player_pos: Vec3, player_velocity: Vec3, height_fn: impl Fn(f32, f32) -> f32) {
         // ========================================================================
         // PHASE 1: Batch Spatial Query (O(n) instead of O(n²))
         // ========================================================================
@@ -425,12 +425,13 @@ impl AnimalManager {
                     // Update animation
                     animal.update_animation(dt);
 
-                    // Apply movement
+                    // Apply movement with terrain height correction
                     let new_pos = animal.position + animal.velocity * dt;
-                    animal.position = new_pos;
+                    let ground_height = height_fn(new_pos.x, new_pos.z);
+                    animal.position = Vec3::new(new_pos.x, ground_height, new_pos.z);
 
                     // Update spatial hash
-                    self.spatial.update(id, new_pos);
+                    self.spatial.update(id, animal.position);
 
                     // Update despawn timer
                     if let Some(timer) = &mut animal.despawn_timer {
@@ -563,6 +564,58 @@ impl AnimalManager {
                 animal.awareness = (animal.awareness + alert_amount).min(1.0);
                 // Make them look toward the sound
                 animal.look_at(position);
+            }
+        }
+    }
+
+    /// Update inverse kinematics for all quadruped animals
+    ///
+    /// Call this after the main update() with terrain height access.
+    /// Adjusts leg positions and body tilt to match terrain.
+    ///
+    /// # Arguments
+    /// * `height_fn` - Function that returns terrain height at (x, z) coordinates
+    /// * `camera_pos` - Camera position for LOD (skip IK for distant animals)
+    /// * `max_ik_distance` - Maximum distance from camera to update IK (default ~50)
+    pub fn update_ik(
+        &mut self,
+        height_fn: impl Fn(f32, f32) -> f32,
+        camera_pos: Vec3,
+        max_ik_distance: f32,
+    ) {
+        for animal in self.animals.values_mut() {
+            // Skip dead animals
+            if !animal.is_alive() {
+                continue;
+            }
+
+            // LOD: Skip IK for distant animals
+            let dist_sq = (animal.position - camera_pos).length_squared();
+            if dist_sq > max_ik_distance * max_ik_distance {
+                continue;
+            }
+
+            // Update IK (no-op for non-quadrupeds)
+            animal.update_ik(&height_fn);
+        }
+    }
+
+    /// Update IK for animals near a specific position
+    ///
+    /// More efficient version for when you only need IK in a small area.
+    pub fn update_ik_near(
+        &mut self,
+        height_fn: impl Fn(f32, f32) -> f32,
+        center: Vec3,
+        radius: f32,
+    ) {
+        let nearby_ids = self.spatial.query_radius(center, radius);
+
+        for id in nearby_ids {
+            if let Some(animal) = self.animals.get_mut(&id) {
+                if animal.is_alive() {
+                    animal.update_ik(&height_fn);
+                }
             }
         }
     }

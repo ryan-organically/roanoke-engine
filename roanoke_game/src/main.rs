@@ -20,9 +20,11 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
 mod player;
+mod biped_ik;
 mod chunk_manager;
 mod asset_loader;
 use player::Player;
+use biped_ik::{BipedIK, PlayerMoveState};
 use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 // Extend LoadedChunk to include buildings (we can't modify the struct definition in chunk_manager.rs from here easily without replacing the file, 
@@ -2168,7 +2170,7 @@ fn main() {
         // Animal Model Pipeline (3D models for animals)
         static ANIMAL_MODEL_PIPELINE: OnceLock<Mutex<AnimalModelPipeline>> = OnceLock::new();
         let animal_model_pipeline_mutex = ANIMAL_MODEL_PIPELINE.get_or_init(|| {
-            Mutex::new(AnimalModelPipeline::new(ctx.device(), ctx.surface_format()))
+            Mutex::new(AnimalModelPipeline::new_with_queue(ctx.device(), Some(ctx.queue()), ctx.surface_format()))
         });
 
         // Animal Model Cache (loads GLTF models)
@@ -2365,7 +2367,18 @@ fn main() {
             // Update animal AI and movement
             let player_pos = state.player.position;
             let player_vel = state.player.velocity;
-            state.animal_manager.update(delta, player_pos, player_vel);
+            let terrain_seed = state.seed;
+            state.animal_manager.update(delta, player_pos, player_vel, |x, z| {
+                croatoan_wfc::get_height_at(x, z, terrain_seed).0
+            });
+
+            // Update quadruped IK for ground adaptation (horses, wolves, deer, etc.)
+            let ik_seed = state.seed;
+            state.animal_manager.update_ik(
+                |x, z| croatoan_wfc::get_height_at(x, z, ik_seed).0,
+                player_pos,
+                50.0, // Max IK distance from player
+            );
 
             // === AUDIO EVENTS INTEGRATION ===
             // Collect audio events to avoid borrow conflicts
@@ -2626,10 +2639,20 @@ fn main() {
                     let model_scale = animal.species.model_scale();
                     // Apply Y offset to correct model anchor points (e.g., stag antlers)
                     let y_offset = animal.species.model_y_offset();
+
+                    // Apply IK tilt for slope adaptation (position.y already at ground from manager update)
+                    let ik_tilt = animal.get_ik_pelvis_tilt()
+                        .unwrap_or(glam::Quat::IDENTITY);
+
+                    // Combine base rotation with IK pelvis tilt
+                    let final_rotation = animal.rotation * ik_tilt;
+
+                    // Model position - animal.position.y is already ground height
                     let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
+
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         Vec3::splat(model_scale),
-                        animal.rotation,
+                        final_rotation,
                         model_position,
                     );
                     let instance = AnimalInstance::new(model_matrix, color, emissive);
@@ -2663,6 +2686,9 @@ fn main() {
                             let mut all_vertices: Vec<AnimalVertex> = Vec::new();
                             let mut all_indices: Vec<u32> = Vec::new();
 
+                            // Find the first mesh with a texture
+                            let mut texture_data: Option<&gltf_loader::LoadedTexture> = None;
+
                             for mesh in &loaded_model.meshes {
                                 let vertex_offset = all_vertices.len() as u32;
                                 for i in 0..mesh.positions.len() {
@@ -2675,6 +2701,13 @@ fn main() {
                                 for idx in &mesh.indices {
                                     all_indices.push(*idx + vertex_offset);
                                 }
+
+                                // Get texture from first mesh that has one
+                                if texture_data.is_none() {
+                                    if let Some(ref tex) = mesh.material.base_color_texture_data {
+                                        texture_data = Some(tex);
+                                    }
+                                }
                             }
 
                             model_pipeline.upload_species_mesh(
@@ -2683,6 +2716,18 @@ fn main() {
                                 &all_vertices,
                                 &all_indices,
                             );
+
+                            // Upload texture if available
+                            if let Some(tex) = texture_data {
+                                model_pipeline.upload_species_texture(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    model_name,
+                                    &tex.data,
+                                    tex.width,
+                                    tex.height,
+                                );
+                            }
                         }
                     }
 

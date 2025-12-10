@@ -1,6 +1,7 @@
 //! Animal entity - runtime state for individual animals
 
 use super::behavior::BehaviorState;
+use super::quadruped_ik::{QuadrupedConfig, QuadrupedIK};
 use super::types::{AnimalSpecies, StatusEffectType, WolfGroupType};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,9 @@ pub struct Animal {
     pub animation_state: AnimationState,
     pub animation_time: f32,
 
+    // Inverse Kinematics for ground adaptation
+    pub quadruped_ik: Option<QuadrupedIK>,
+
     // Spawning
     pub spawn_chunk: (i32, i32),
     pub despawn_timer: Option<f32>,
@@ -115,6 +119,9 @@ impl Animal {
     ) -> Self {
         let num_attacks = species.attacks().len();
 
+        // Initialize IK for quadruped species
+        let quadruped_ik = Self::create_ik_for_species(species, position.y);
+
         Self {
             id,
             species,
@@ -138,6 +145,7 @@ impl Animal {
             last_seen_player: None,
             animation_state: AnimationState::Idle,
             animation_time: 0.0,
+            quadruped_ik,
             spawn_chunk: chunk,
             despawn_timer: None,
             wolf_group_type: None,
@@ -148,6 +156,39 @@ impl Animal {
             positive_interactions: 0,
             flee_chance_roll: 0.0,
         }
+    }
+
+    /// Create IK configuration based on species type
+    fn create_ik_for_species(species: AnimalSpecies, initial_height: f32) -> Option<QuadrupedIK> {
+        let config = match species {
+            // Horses and similar
+            AnimalSpecies::Horse => Some(QuadrupedConfig::horse()),
+
+            // Canines
+            AnimalSpecies::GrayWolf
+            | AnimalSpecies::RedWolf
+            | AnimalSpecies::Fox
+            | AnimalSpecies::Husky => Some(QuadrupedConfig::wolf()),
+
+            // Deer family
+            AnimalSpecies::WhitetailDeer
+            | AnimalSpecies::Stag => Some(QuadrupedConfig::deer()),
+
+            // Donkey uses horse proportions (slightly adjusted)
+            AnimalSpecies::Donkey => {
+                let mut config = QuadrupedConfig::horse();
+                config.upper_leg_length *= 0.85;
+                config.lower_leg_length *= 0.85;
+                config.body_length *= 0.9;
+                Some(config)
+            }
+
+            // Other quadrupeds can be added here
+            // For now, non-quadrupeds (snakes, birds, etc.) return None
+            _ => None,
+        };
+
+        config.map(|c| QuadrupedIK::new(c, initial_height))
     }
 
     /// Create a wolf with specific group behavior
@@ -412,5 +453,55 @@ impl Animal {
         } else {
             ([1.0, 1.0, 1.0], 0.0)
         }
+    }
+
+    /// Update inverse kinematics for ground adaptation
+    ///
+    /// Call this each frame with a terrain height function to adjust
+    /// leg positions and body tilt to match terrain.
+    pub fn update_ik(&mut self, height_fn: impl Fn(f32, f32) -> f32) {
+        let Some(ref mut ik) = self.quadruped_ik else {
+            return;
+        };
+
+        // Update IK blend based on current speed
+        let speed = self.velocity.length();
+        let is_airborne = !self.on_ground;
+        ik.ik_blend = ik.get_blend_for_gait(speed, is_airborne);
+
+        // Skip expensive calculations if blend is too low
+        if ik.ik_blend < 0.05 {
+            return;
+        }
+
+        // Probe terrain under each foot
+        ik.probe_terrain(self.position, self.rotation, &height_fn);
+
+        // Smoothing factor (higher = faster response, lower = smoother)
+        let smoothing = 0.15;
+
+        // Update body adjustments
+        ik.update_root_height(smoothing);
+        ik.update_pelvis_tilt(smoothing);
+    }
+
+    /// Get the IK-adjusted root height for rendering
+    pub fn get_ik_root_height(&self) -> Option<f32> {
+        self.quadruped_ik.as_ref().map(|ik| ik.smoothed_root_height)
+    }
+
+    /// Get the IK-adjusted pelvis tilt for rendering
+    pub fn get_ik_pelvis_tilt(&self) -> Option<Quat> {
+        self.quadruped_ik.as_ref().map(|ik| ik.smoothed_pelvis_tilt)
+    }
+
+    /// Get foot placements for IK solving (used by skeleton system)
+    pub fn get_foot_placements(&self) -> Option<&[super::quadruped_ik::FootPlacement; 4]> {
+        self.quadruped_ik.as_ref().map(|ik| &ik.foot_placements)
+    }
+
+    /// Get the IK blend factor
+    pub fn get_ik_blend(&self) -> f32 {
+        self.quadruped_ik.as_ref().map(|ik| ik.ik_blend).unwrap_or(0.0)
     }
 }

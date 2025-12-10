@@ -1,5 +1,5 @@
 // Animal Model Shader
-// Renders actual 3D animal models with per-instance transforms
+// Renders actual 3D animal models with per-instance transforms and textures
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -14,6 +14,12 @@ struct CameraUniform {
 
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+
+// Texture bindings (group 1)
+@group(1) @binding(0)
+var animal_texture: texture_2d<f32>;
+@group(1) @binding(1)
+var animal_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -83,6 +89,9 @@ fn hash(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Sample texture
+    let tex_color = textureSample(animal_texture, animal_sampler, in.uv);
+
     // Light direction (sun-like, from upper right)
     let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
     let light_color = vec3<f32>(1.0, 0.95, 0.9);
@@ -110,11 +119,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lighting = ambient + diffuse + specular + sss;
 
     // Add subtle fur texture variation using UV
-    let fur_noise = hash(in.uv * 50.0) * 0.1;
+    let fur_noise = hash(in.uv * 50.0) * 0.05;
 
-    // Base color with lighting and variation
-    var final_color = in.color * lighting * light_color;
-    final_color = final_color * (0.95 + fur_noise);
+    // Base color from texture, tinted by instance color, with lighting
+    // If texture is white (default), instance color dominates
+    // If texture has color, it takes priority but can be tinted
+    var base_color = tex_color.rgb * in.color;
+    var final_color = base_color * lighting * light_color;
+    final_color = final_color * (0.97 + fur_noise);
 
     // Add emissive glow (for damage flash, aggressive states)
     if in.emissive > 0.0 {
@@ -133,5 +145,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fog_amount = 1.0 - exp(-fog_factor * camera.fog_density);
     final_color = mix(final_color, camera.fog_color, fog_amount);
 
-    return vec4<f32>(final_color, 1.0);
+    // Use texture alpha for transparency
+    return vec4<f32>(final_color, tex_color.a);
 }

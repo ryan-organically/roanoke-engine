@@ -2,12 +2,13 @@
 //!
 //! Renders actual 3D animal models loaded from GLTF files.
 //! Supports instanced rendering for multiple animals of the same species.
+//! Now with texture support for proper animal appearance.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
-use wgpu::{BindGroup, Buffer, Device, Queue, RenderPipeline};
+use wgpu::{BindGroup, BindGroupLayout, Buffer, Device, Queue, RenderPipeline, Sampler, Texture, TextureView};
 
 use crate::pipeline_validation::{sanitize_float, sanitize_vec3};
 
@@ -65,6 +66,12 @@ pub struct AnimalMeshGpu {
     pub index_buffer: Buffer,
     pub index_count: u32,
     pub vertex_count: u32,
+    /// Optional texture for this species
+    pub texture: Option<Texture>,
+    pub texture_view: Option<TextureView>,
+    pub texture_bind_group: Option<BindGroup>,
+    /// Whether this species has a texture
+    pub has_texture: bool,
 }
 
 /// Pipeline for rendering animal models
@@ -72,6 +79,14 @@ pub struct AnimalModelPipeline {
     pipeline: RenderPipeline,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
+    /// Texture bind group layout (for per-species textures)
+    texture_bind_group_layout: BindGroupLayout,
+    /// Shared texture sampler
+    sampler: Sampler,
+    /// Default white texture for untextured models
+    default_texture: Texture,
+    default_texture_view: TextureView,
+    default_texture_bind_group: BindGroup,
     /// Mesh data per species (keyed by species name)
     species_meshes: HashMap<String, AnimalMeshGpu>,
     /// Instance buffer per species
@@ -81,6 +96,11 @@ pub struct AnimalModelPipeline {
 impl AnimalModelPipeline {
     /// Create a new animal model pipeline
     pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_queue(device, None, surface_format)
+    }
+
+    /// Create a new animal model pipeline with queue for texture initialization
+    pub fn new_with_queue(device: &Device, queue: Option<&Queue>, surface_format: wgpu::TextureFormat) -> Self {
         // Create bind group layout for camera uniforms
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -97,10 +117,105 @@ impl AnimalModelPipeline {
                 }],
             });
 
-        // Create pipeline layout
+        // Create bind group layout for textures (per-species)
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Animal Model Texture Layout"),
+                entries: &[
+                    // Texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create shared sampler
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Animal Model Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Create default white texture (1x1 white pixel)
+        let default_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Animal Default Texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Initialize white texture if queue is available
+        if let Some(q) = queue {
+            q.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &default_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &[255u8, 255, 255, 255], // RGBA white pixel
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let default_texture_view = default_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create default texture bind group
+        let default_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Animal Default Texture Bind Group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&default_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        // Create pipeline layout (now with texture bind group)
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Animal Model Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -241,18 +356,49 @@ impl AnimalModelPipeline {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            texture_bind_group_layout,
+            sampler,
+            default_texture,
+            default_texture_view,
+            default_texture_bind_group,
             species_meshes: HashMap::new(),
             instance_buffers: HashMap::new(),
         }
     }
 
-    /// Upload mesh data for a species
+    /// Upload mesh data for a species (without texture)
     pub fn upload_species_mesh(
         &mut self,
         device: &Device,
         species_name: &str,
         vertices: &[AnimalVertex],
         indices: &[u32],
+    ) {
+        self.upload_species_mesh_with_texture(device, species_name, vertices, indices, None);
+    }
+
+    /// Upload mesh data for a species with optional texture
+    pub fn upload_species_mesh_with_texture(
+        &mut self,
+        device: &Device,
+        species_name: &str,
+        vertices: &[AnimalVertex],
+        indices: &[u32],
+        texture_data: Option<&[u8]>,
+    ) {
+        self.upload_species_mesh_with_texture_dims(device, species_name, vertices, indices, texture_data, 1, 1);
+    }
+
+    /// Upload mesh data for a species with optional texture and dimensions
+    pub fn upload_species_mesh_with_texture_dims(
+        &mut self,
+        device: &Device,
+        species_name: &str,
+        vertices: &[AnimalVertex],
+        indices: &[u32],
+        texture_data: Option<&[u8]>,
+        texture_width: u32,
+        texture_height: u32,
     ) {
         if vertices.is_empty() || indices.is_empty() {
             log::warn!("[AnimalModel] Skipping empty mesh for {}", species_name);
@@ -281,12 +427,71 @@ impl AnimalModelPipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        log::info!(
-            "[AnimalModel] Uploaded mesh for '{}': {} vertices, {} indices",
-            species_name,
-            vertices.len(),
-            indices.len()
-        );
+        // Create texture if provided
+        let (texture, texture_view, texture_bind_group, has_texture) = if let Some(data) = texture_data {
+            if data.len() == (texture_width * texture_height * 4) as usize {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("Animal Texture: {}", species_name)),
+                    size: wgpu::Extent3d {
+                        width: texture_width,
+                        height: texture_height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+
+                // Write texture data using queue (need to get queue somehow)
+                // For now, create with data
+                let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("Animal Texture Bind Group: {}", species_name)),
+                    layout: &self.texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&tex_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+
+                log::info!(
+                    "[AnimalModel] Uploaded mesh for '{}': {} vertices, {} indices, {}x{} texture",
+                    species_name,
+                    vertices.len(),
+                    indices.len(),
+                    texture_width,
+                    texture_height
+                );
+
+                (Some(tex), Some(tex_view), Some(bind_group), true)
+            } else {
+                log::warn!(
+                    "[AnimalModel] Texture data size mismatch for '{}': expected {}, got {}",
+                    species_name,
+                    texture_width * texture_height * 4,
+                    data.len()
+                );
+                (None, None, None, false)
+            }
+        } else {
+            log::info!(
+                "[AnimalModel] Uploaded mesh for '{}': {} vertices, {} indices (no texture)",
+                species_name,
+                vertices.len(),
+                indices.len()
+            );
+            (None, None, None, false)
+        };
 
         self.species_meshes.insert(
             species_name.to_string(),
@@ -295,8 +500,106 @@ impl AnimalModelPipeline {
                 index_buffer,
                 index_count: indices.len() as u32,
                 vertex_count: vertices.len() as u32,
+                texture,
+                texture_view,
+                texture_bind_group,
+                has_texture,
             },
         );
+    }
+
+    /// Upload texture data for an existing species mesh (using queue)
+    pub fn upload_species_texture(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        species_name: &str,
+        texture_data: &[u8],
+        width: u32,
+        height: u32,
+    ) {
+        if texture_data.len() != (width * height * 4) as usize {
+            log::warn!(
+                "[AnimalModel] Texture size mismatch for '{}': expected {}, got {}",
+                species_name,
+                width * height * 4,
+                texture_data.len()
+            );
+            return;
+        }
+
+        // Create texture
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("Animal Texture: {}", species_name)),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Upload texture data
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            texture_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("Animal Texture Bind Group: {}", species_name)),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+
+        // Update existing mesh if present
+        if let Some(mesh) = self.species_meshes.get_mut(species_name) {
+            mesh.texture = Some(texture);
+            mesh.texture_view = Some(texture_view);
+            mesh.texture_bind_group = Some(texture_bind_group);
+            mesh.has_texture = true;
+            log::info!(
+                "[AnimalModel] Uploaded {}x{} texture for '{}'",
+                width,
+                height,
+                species_name
+            );
+        } else {
+            log::warn!(
+                "[AnimalModel] Cannot upload texture for '{}': mesh not found",
+                species_name
+            );
+        }
     }
 
     /// Upload instance data for a species
@@ -387,6 +690,12 @@ impl AnimalModelPipeline {
                 if *instance_count == 0 {
                     continue;
                 }
+
+                // Bind texture (use species texture or default white)
+                let texture_bind_group = mesh.texture_bind_group
+                    .as_ref()
+                    .unwrap_or(&self.default_texture_bind_group);
+                render_pass.set_bind_group(1, texture_bind_group, &[]);
 
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
