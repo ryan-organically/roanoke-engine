@@ -176,9 +176,10 @@ impl LowlandBunch {
             let (th, _) = get_height_at(tx, tz, world_seed);
 
             // Scale increases with biome factor (deeper = taller)
-            let base_scale = 5.0 + self.biome_factor * 3.0;
-            let scale_var = noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32;
-            let tree_scale = base_scale + scale_var;
+            // Large variance: trees range from small saplings (2.0) to massive old-growth (25.0)
+            let base_scale = 8.0 + self.biome_factor * 8.0;
+            let scale_var = noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32 * 10.0;
+            let tree_scale = (base_scale + scale_var).max(2.0);
 
             let tree_angle = noise.get([tx as f64 * 0.5, tz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
 
@@ -381,11 +382,11 @@ pub fn generate_trees_for_chunk(
             }
         }
 
-        // Generate tree
+        // Generate tree with large scale variance
         let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
-        let base_scale = 5.5 + forest_depth * 2.5;
-        let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32;
-        let scale = base_scale + scale_var;
+        let base_scale = 8.0 + forest_depth * 10.0;
+        let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32 * 12.0;
+        let scale = (base_scale + scale_var).max(2.0);
 
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),

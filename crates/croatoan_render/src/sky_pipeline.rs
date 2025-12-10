@@ -14,6 +14,8 @@ pub struct SkyUniforms {
     cloud_density: f32,
     cloud_color_shade: [f32; 3],
     cloud_scale: f32,
+    moon_dir: [f32; 3],
+    _pad1: f32,
     wind_offset: [f32; 2],
     _padding: [f32; 2],
 }
@@ -41,6 +43,8 @@ impl SkyPipeline {
                 cloud_density: 0.5,
                 cloud_color_shade: [0.9, 0.6, 0.6], // Pinkish
                 cloud_scale: 1.0,
+                moon_dir: [0.0, -1.0, 0.0],
+                _pad1: 0.0,
                 wind_offset: [0.0, 0.0],
                 _padding: [0.0; 2],
             }]),
@@ -119,6 +123,7 @@ impl SkyPipeline {
         queue: &wgpu::Queue,
         view_proj: Mat4,
         sun_dir: Vec3,
+        moon_dir: Vec3,
         sun_color: Vec3,
         time: f32,
         cloud_coverage: f32,
@@ -140,6 +145,8 @@ impl SkyPipeline {
             cloud_density,
             cloud_color_shade: cloud_color_shade.to_array(),
             cloud_scale,
+            moon_dir: moon_dir.to_array(),
+            _pad1: 0.0,
             wind_offset,
             _padding: [0.0; 2],
         };

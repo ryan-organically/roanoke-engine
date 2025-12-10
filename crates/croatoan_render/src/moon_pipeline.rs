@@ -110,14 +110,14 @@ impl MoonPipeline {
         camera_right: Vec3,
         camera_up: Vec3,
         phase: f32,
-        time: f32,
     ) {
+        let time = 0.0f32; // Hardcoded for now
         // Position moon far away in opposite direction of moon_dir
         let moon_distance = 800.0;
         let moon_world_pos = camera_pos - moon_dir * moon_distance;
 
-        // Moon size - slightly smaller than sun
-        let moon_size = 35.0;
+        // Moon size - match sun size so corona glow has room to render
+        let moon_size = 45.0;
 
         // Silvery moon color
         let moon_color = [0.9, 0.92, 0.98];
@@ -144,3 +144,4 @@ impl MoonPipeline {
         render_pass.draw(0..6, 0..1);
     }
 }
+// test
