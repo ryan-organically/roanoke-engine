@@ -151,7 +151,7 @@ Bog Iron Ore → Dry (2 hours) → Dried Ore → Smelt (Coal x5) → Impure Iron
 | River Delta | 10% per chunk | 2-5 ore |
 
 ---
-
+ 
 ### Tier 4: Rock Salt
 **Rarity:** Uncommon
 **Hardness:** 2
