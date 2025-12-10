@@ -20,9 +20,11 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
 mod player;
+mod biped_ik;
 mod chunk_manager;
 mod asset_loader;
 use player::Player;
+use biped_ik::{BipedIK, PlayerMoveState};
 use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 // Extend LoadedChunk to include buildings (we can't modify the struct definition in chunk_manager.rs from here easily without replacing the file, 
@@ -89,6 +91,14 @@ enum PauseMenuPage {
     Settings,
     Controls,
     LoadGame,
+    CharacterSheet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharacterSheetTab {
+    Inventory,
+    SkillTree,
+    Commendations,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -374,6 +384,10 @@ struct SharedState {
     systems_manager: systems_manager::SystemsManager,
     // Dialogue UI state
     current_dialogue: Option<npc::interaction::DialogueUIData>,
+    // Character Sheet (Tab menu)
+    character_sheet_tab: CharacterSheetTab,
+    character_preview_rotation: f32,  // Y-axis rotation for 3D model preview
+    character_preview_dragging: bool, // Is user dragging to rotate?
 }
 
 impl SharedState {
@@ -610,6 +624,528 @@ fn list_saves() -> Vec<String> {
     saves
 }
 
+// --- Character Sheet UI (Book Layout) ---
+
+fn render_character_sheet(ui_ctx: &egui::Context, state: &mut SharedState) {
+    // Book-style colors
+    let paper_color = egui::Color32::from_rgb(244, 228, 188);      // Aged paper
+    let leather_color = egui::Color32::from_rgb(101, 67, 33);      // Leather binding
+    let ink_color = egui::Color32::from_rgb(40, 30, 20);           // Dark ink
+    let accent_color = egui::Color32::from_rgb(139, 90, 43);       // Warm brown
+    let tab_active_color = egui::Color32::from_rgb(210, 180, 140); // Active tab
+    let tab_inactive_color = egui::Color32::from_rgb(180, 150, 110); // Inactive tab
+
+    let screen_rect = ui_ctx.screen_rect();
+    let screen_width = screen_rect.width();
+    let screen_height = screen_rect.height();
+
+    // Book dimensions (centered, takes 80% of screen)
+    let book_width = (screen_width * 0.85).min(1200.0);
+    let book_height = (screen_height * 0.85).min(800.0);
+    let book_left = (screen_width - book_width) / 2.0;
+    let book_top = (screen_height - book_height) / 2.0;
+
+    // Draw dark overlay behind book
+    egui::Area::new(egui::Id::new("character_sheet_overlay"))
+        .fixed_pos(egui::pos2(0.0, 0.0))
+        .order(egui::Order::Background)
+        .show(ui_ctx, |ui| {
+            let overlay_rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(screen_width, screen_height),
+            );
+            ui.painter().rect_filled(
+                overlay_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+        });
+
+    // Main book area
+    egui::Area::new(egui::Id::new("character_sheet_book"))
+        .fixed_pos(egui::pos2(book_left, book_top))
+        .order(egui::Order::Foreground)
+        .show(ui_ctx, |ui| {
+            // Book frame (leather binding effect)
+            let book_rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(book_width, book_height),
+            );
+
+            // Outer leather border
+            ui.painter().rect_filled(
+                book_rect,
+                egui::Rounding::same(12.0),
+                leather_color,
+            );
+
+            // Inner paper area (with margin for binding)
+            let paper_margin = 15.0;
+            let paper_rect = book_rect.shrink(paper_margin);
+            ui.painter().rect_filled(
+                paper_rect,
+                egui::Rounding::same(6.0),
+                paper_color,
+            );
+
+            // Center spine line
+            let spine_x = book_width / 2.0;
+            ui.painter().line_segment(
+                [egui::pos2(spine_x, paper_margin + 10.0), egui::pos2(spine_x, book_height - paper_margin - 10.0)],
+                egui::Stroke::new(3.0, leather_color),
+            );
+
+            // === TAB BAR (Top of book) ===
+            let tab_area_top = paper_margin + 10.0;
+            let tab_height = 35.0;
+            let tab_width = 140.0;
+            let tab_spacing = 10.0;
+            let tabs_total_width = 3.0 * tab_width + 2.0 * tab_spacing;
+            let tabs_start_x = (book_width - tabs_total_width) / 2.0;
+
+            let tabs = [
+                (CharacterSheetTab::Inventory, "Inventory"),
+                (CharacterSheetTab::SkillTree, "Skill Tree"),
+                (CharacterSheetTab::Commendations, "Commendations"),
+            ];
+
+            for (i, (tab_type, tab_name)) in tabs.iter().enumerate() {
+                let tab_x = tabs_start_x + (i as f32) * (tab_width + tab_spacing);
+                let tab_rect = egui::Rect::from_min_size(
+                    egui::pos2(tab_x, tab_area_top),
+                    egui::vec2(tab_width, tab_height),
+                );
+
+                let is_active = state.character_sheet_tab == *tab_type;
+                let tab_color = if is_active { tab_active_color } else { tab_inactive_color };
+
+                // Tab button
+                let tab_response = ui.allocate_rect(tab_rect, egui::Sense::click());
+                ui.painter().rect_filled(
+                    tab_rect,
+                    egui::Rounding::same(6.0),
+                    tab_color,
+                );
+                ui.painter().rect_stroke(
+                    tab_rect,
+                    egui::Rounding::same(6.0),
+                    egui::Stroke::new(2.0, leather_color),
+                );
+                ui.painter().text(
+                    tab_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    *tab_name,
+                    egui::FontId::proportional(16.0),
+                    ink_color,
+                );
+
+                if tab_response.clicked() {
+                    state.character_sheet_tab = *tab_type;
+                }
+
+                // Hover effect
+                if tab_response.hovered() && !is_active {
+                    ui.painter().rect_stroke(
+                        tab_rect,
+                        egui::Rounding::same(6.0),
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                }
+            }
+
+            // === CONTENT AREA ===
+            let content_top = tab_area_top + tab_height + 20.0;
+            let content_height = book_height - content_top - paper_margin - 20.0;
+            let left_page_width = (book_width / 2.0) - paper_margin - 15.0;
+            let right_page_width = left_page_width;
+            let left_page_x = paper_margin + 10.0;
+            let right_page_x = book_width / 2.0 + 15.0;
+
+            // === LEFT PAGE: Character Preview ===
+            let left_page_rect = egui::Rect::from_min_size(
+                egui::pos2(left_page_x, content_top),
+                egui::vec2(left_page_width, content_height),
+            );
+
+            // Character preview frame
+            ui.painter().rect_stroke(
+                left_page_rect.shrink(5.0),
+                egui::Rounding::same(4.0),
+                egui::Stroke::new(2.0, accent_color),
+            );
+
+            // "CHARACTER" header
+            ui.painter().text(
+                egui::pos2(left_page_rect.center().x, content_top + 25.0),
+                egui::Align2::CENTER_CENTER,
+                "CHARACTER",
+                egui::FontId::proportional(22.0),
+                ink_color,
+            );
+
+            // Character silhouette placeholder (will be replaced with 3D model)
+            let preview_rect = egui::Rect::from_min_size(
+                egui::pos2(left_page_x + 30.0, content_top + 50.0),
+                egui::vec2(left_page_width - 60.0, content_height - 180.0),
+            );
+            ui.painter().rect_filled(
+                preview_rect,
+                egui::Rounding::same(8.0),
+                egui::Color32::from_rgb(60, 50, 40),
+            );
+
+            // Rotation indicator
+            let rotation_degrees = (state.character_preview_rotation * 180.0 / std::f32::consts::PI) % 360.0;
+            ui.painter().text(
+                egui::pos2(preview_rect.center().x, preview_rect.center().y),
+                egui::Align2::CENTER_CENTER,
+                format!("3D Model\nRotation: {:.0}°\n\nDrag to rotate", rotation_degrees),
+                egui::FontId::proportional(14.0),
+                egui::Color32::GRAY,
+            );
+
+            // Handle rotation drag
+            let preview_response = ui.allocate_rect(preview_rect, egui::Sense::drag());
+            if preview_response.dragged() {
+                state.character_preview_rotation += preview_response.drag_delta().x * 0.01;
+            }
+
+            // Character stats summary at bottom of left page
+            let stats_y = preview_rect.max.y + 15.0;
+            let stats = [
+                ("Level", "1"),
+                ("Health", "100/100"),
+                ("Stamina", "100/100"),
+            ];
+            for (i, (label, value)) in stats.iter().enumerate() {
+                let y = stats_y + (i as f32) * 22.0;
+                ui.painter().text(
+                    egui::pos2(left_page_x + 25.0, y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{}: {}", label, value),
+                    egui::FontId::proportional(14.0),
+                    ink_color,
+                );
+            }
+
+            // === RIGHT PAGE: Tab Content ===
+            let right_page_rect = egui::Rect::from_min_size(
+                egui::pos2(right_page_x, content_top),
+                egui::vec2(right_page_width, content_height),
+            );
+
+            match state.character_sheet_tab {
+                CharacterSheetTab::Inventory => {
+                    render_inventory_tab(ui, right_page_rect, state, ink_color, accent_color);
+                }
+                CharacterSheetTab::SkillTree => {
+                    render_skill_tree_tab(ui, right_page_rect, state, ink_color, accent_color);
+                }
+                CharacterSheetTab::Commendations => {
+                    render_commendations_tab(ui, right_page_rect, state, ink_color, accent_color);
+                }
+            }
+
+            // === CLOSE BUTTON (Top right corner) ===
+            let close_btn_rect = egui::Rect::from_min_size(
+                egui::pos2(book_width - 50.0, 5.0),
+                egui::vec2(40.0, 40.0),
+            );
+            let close_response = ui.allocate_rect(close_btn_rect, egui::Sense::click());
+            ui.painter().text(
+                close_btn_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "X",
+                egui::FontId::proportional(24.0),
+                if close_response.hovered() { egui::Color32::WHITE } else { paper_color },
+            );
+            if close_response.clicked() {
+                state.game_state = GameState::Playing;
+            }
+        });
+}
+
+fn render_inventory_tab(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    state: &SharedState,
+    ink_color: egui::Color32,
+    accent_color: egui::Color32,
+) {
+    // Header
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + 25.0),
+        egui::Align2::CENTER_CENTER,
+        "INVENTORY",
+        egui::FontId::proportional(22.0),
+        ink_color,
+    );
+
+    // Currency display
+    let currency_y = rect.min.y + 55.0;
+    let wampum = state.player_economy.wallet.wampum;
+    let tobacco = state.player_economy.wallet.tobacco;
+    ui.painter().text(
+        egui::pos2(rect.min.x + 20.0, currency_y),
+        egui::Align2::LEFT_CENTER,
+        format!("Wampum: {}    Tobacco: {}", wampum, tobacco),
+        egui::FontId::proportional(14.0),
+        ink_color,
+    );
+
+    // Inventory grid
+    let grid_top = currency_y + 30.0;
+    let grid_left = rect.min.x + 15.0;
+    let slot_size = 50.0;
+    let slot_spacing = 5.0;
+    let cols = 6;
+    let rows = 6;
+
+    for row in 0..rows {
+        for col in 0..cols {
+            let slot_index = row * cols + col;
+            let slot_x = grid_left + (col as f32) * (slot_size + slot_spacing);
+            let slot_y = grid_top + (row as f32) * (slot_size + slot_spacing);
+            let slot_rect = egui::Rect::from_min_size(
+                egui::pos2(slot_x, slot_y),
+                egui::vec2(slot_size, slot_size),
+            );
+
+            // Slot background
+            let slot_color = if slot_index < 10 {
+                // Hotbar slots highlighted
+                egui::Color32::from_rgb(180, 160, 130)
+            } else {
+                egui::Color32::from_rgb(200, 180, 150)
+            };
+            ui.painter().rect_filled(slot_rect, egui::Rounding::same(4.0), slot_color);
+            ui.painter().rect_stroke(
+                slot_rect,
+                egui::Rounding::same(4.0),
+                egui::Stroke::new(1.0, accent_color),
+            );
+
+            // Item in slot (if any)
+            if let Some(item) = state.player_economy.inventory.get_slot(slot_index) {
+                // Rarity color border
+                let rarity_color = match item.rarity {
+                    economy::Rarity::Crude => egui::Color32::GRAY,
+                    economy::Rarity::Common => egui::Color32::WHITE,
+                    economy::Rarity::Uncommon => egui::Color32::from_rgb(30, 255, 30),
+                    economy::Rarity::Rare => egui::Color32::from_rgb(30, 144, 255),
+                    economy::Rarity::Epic => egui::Color32::from_rgb(138, 43, 226),
+                    economy::Rarity::Legendary => egui::Color32::from_rgb(255, 165, 0),
+                    economy::Rarity::Mythic => egui::Color32::from_rgb(255, 20, 147),
+                    economy::Rarity::Primordial => egui::Color32::from_rgb(255, 215, 0),
+                };
+                ui.painter().rect_stroke(
+                    slot_rect.shrink(2.0),
+                    egui::Rounding::same(3.0),
+                    egui::Stroke::new(2.0, rarity_color),
+                );
+
+                // Item name (truncated)
+                let name: String = item.name.chars().take(6).collect();
+                ui.painter().text(
+                    slot_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    egui::FontId::proportional(10.0),
+                    ink_color,
+                );
+
+                // Stack count
+                if item.stack_size > 1 {
+                    ui.painter().text(
+                        egui::pos2(slot_rect.max.x - 5.0, slot_rect.max.y - 5.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        format!("{}", item.stack_size),
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::WHITE,
+                    );
+                }
+            }
+
+            // Hotbar number indicator
+            if slot_index < 10 {
+                ui.painter().text(
+                    egui::pos2(slot_x + 5.0, slot_y + 5.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{}", (slot_index + 1) % 10),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::from_rgb(100, 80, 60),
+                );
+            }
+        }
+    }
+
+    // Equipment slots label
+    let equip_y = grid_top + (rows as f32) * (slot_size + slot_spacing) + 15.0;
+    ui.painter().text(
+        egui::pos2(rect.min.x + 20.0, equip_y),
+        egui::Align2::LEFT_CENTER,
+        "Equipment: Coming Soon",
+        egui::FontId::proportional(12.0),
+        egui::Color32::DARK_GRAY,
+    );
+}
+
+fn render_skill_tree_tab(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    state: &SharedState,
+    ink_color: egui::Color32,
+    accent_color: egui::Color32,
+) {
+    // Header
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + 25.0),
+        egui::Align2::CENTER_CENTER,
+        "SKILL TREES",
+        egui::FontId::proportional(22.0),
+        ink_color,
+    );
+
+    // Skill tree sections
+    let sections = [
+        ("Hunting", vec![
+            ("Basic Tracker", true),
+            ("Boar Hunter", false),
+            ("Deer Stalker", false),
+            ("Wolf Tracker", false),
+            ("Wilderness Scout", false),
+        ]),
+        ("Archaeology", vec![
+            ("Novice Digger", true),
+            ("Field Scholar", false),
+            ("Fossil Expert", false),
+        ]),
+        ("Mining", vec![
+            ("Surface Collector", false),
+            ("Prospector", false),
+            ("Iron Seeker", false),
+        ]),
+        ("Pond Hockey", vec![
+            ("Ice Legs", false),
+            ("Steady Stride", false),
+        ]),
+    ];
+
+    let mut y = rect.min.y + 55.0;
+    for (section_name, skills) in sections.iter() {
+        // Section header
+        ui.painter().text(
+            egui::pos2(rect.min.x + 20.0, y),
+            egui::Align2::LEFT_CENTER,
+            *section_name,
+            egui::FontId::proportional(16.0),
+            accent_color,
+        );
+        y += 22.0;
+
+        // Skills
+        for (skill_name, unlocked) in skills.iter() {
+            let icon = if *unlocked { "[+]" } else { "[ ]" };
+            let color = if *unlocked { ink_color } else { egui::Color32::DARK_GRAY };
+            ui.painter().text(
+                egui::pos2(rect.min.x + 35.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{} {}", icon, skill_name),
+                egui::FontId::proportional(13.0),
+                color,
+            );
+            y += 18.0;
+        }
+        y += 10.0;
+    }
+
+    // Points display
+    ui.painter().text(
+        egui::pos2(rect.min.x + 20.0, rect.max.y - 30.0),
+        egui::Align2::LEFT_CENTER,
+        "Skill Points: 25",
+        egui::FontId::proportional(14.0),
+        ink_color,
+    );
+}
+
+fn render_commendations_tab(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    _state: &SharedState,
+    ink_color: egui::Color32,
+    accent_color: egui::Color32,
+) {
+    // Header
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.min.y + 25.0),
+        egui::Align2::CENTER_CENTER,
+        "COMMENDATIONS",
+        egui::FontId::proportional(22.0),
+        ink_color,
+    );
+
+    // Achievement categories
+    let categories = [
+        ("Exploration", vec![
+            ("First Steps", "Travel 100 meters", true),
+            ("Wanderer", "Discover 10 locations", false),
+            ("Cartographer", "Map every region", false),
+        ]),
+        ("Combat", vec![
+            ("First Blood", "Defeat an enemy", false),
+            ("Hunter's Mark", "Kill 10 animals", false),
+            ("Apex Predator", "Defeat a legendary beast", false),
+        ]),
+        ("Survival", vec![
+            ("Well Fed", "Eat 10 different foods", false),
+            ("Night Owl", "Survive 3 nights", true),
+            ("Weather the Storm", "Survive a hurricane", false),
+        ]),
+        ("Social", vec![
+            ("First Contact", "Talk to an NPC", true),
+            ("Diplomat", "Befriend 5 NPCs", false),
+            ("Blood Bond", "Achieve max faction standing", false),
+        ]),
+    ];
+
+    let mut y = rect.min.y + 55.0;
+    for (category_name, achievements) in categories.iter() {
+        // Category header
+        ui.painter().text(
+            egui::pos2(rect.min.x + 20.0, y),
+            egui::Align2::LEFT_CENTER,
+            *category_name,
+            egui::FontId::proportional(16.0),
+            accent_color,
+        );
+        y += 22.0;
+
+        // Achievements
+        for (name, desc, completed) in achievements.iter() {
+            let icon = if *completed { "[*]" } else { "[ ]" };
+            let color = if *completed { ink_color } else { egui::Color32::DARK_GRAY };
+            ui.painter().text(
+                egui::pos2(rect.min.x + 35.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{} {}", icon, name),
+                egui::FontId::proportional(13.0),
+                color,
+            );
+            y += 16.0;
+            ui.painter().text(
+                egui::pos2(rect.min.x + 55.0, y),
+                egui::Align2::LEFT_CENTER,
+                *desc,
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_rgb(120, 100, 80),
+            );
+            y += 18.0;
+        }
+        y += 8.0;
+    }
+}
+
 // --- Offscreen Render Target for Post-Process Effects ---
 
 struct OffscreenTarget {
@@ -737,6 +1273,10 @@ fn main() {
         systems_manager: systems_manager::SystemsManager::new(12345),
         // Dialogue state
         current_dialogue: None,
+        // Character Sheet (Tab menu)
+        character_sheet_tab: CharacterSheetTab::Inventory,
+        character_preview_rotation: 0.0,
+        character_preview_dragging: false,
     }));
 
     // ... (Channel setup) ...
@@ -860,6 +1400,25 @@ fn main() {
         if let Event::WindowEvent { event: WindowEvent::CloseRequested, .. } = event {
             println!("[EXIT] Window close requested");
             std::process::exit(0);
+        }
+
+        // Handle Tab key BEFORE egui (so it doesn't consume it for focus navigation)
+        if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } = event {
+            if let PhysicalKey::Code(KeyCode::Tab) = key_event.physical_key {
+                if key_event.state == ElementState::Pressed {
+                    if state.game_state == GameState::Playing {
+                        state.game_state = GameState::Paused;
+                        state.pause_menu_page = PauseMenuPage::CharacterSheet;
+                        state.character_sheet_tab = CharacterSheetTab::Inventory;
+                        println!("[MENU] Character sheet opened");
+                        return; // Don't pass Tab to egui or other handlers
+                    } else if state.game_state == GameState::Paused && state.pause_menu_page == PauseMenuPage::CharacterSheet {
+                        state.game_state = GameState::Playing;
+                        println!("[MENU] Character sheet closed");
+                        return; // Don't pass Tab to egui or other handlers
+                    }
+                }
+            }
         }
 
         // Pass event to egui
@@ -1209,22 +1768,57 @@ fn main() {
                         let mut leaf_indices: Vec<u32> = Vec::new();
                         let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
 
+                        // First pass: find the height range of the model
+                        let mut min_y = f32::MAX;
+                        let mut max_y = f32::MIN;
+                        for mesh in &model.meshes {
+                            for pos in &mesh.positions {
+                                min_y = min_y.min(pos[1]);
+                                max_y = max_y.max(pos[1]);
+                            }
+                        }
+                        let height_range = max_y - min_y;
+                        // Leaves below this threshold (50% up from bottom) will be culled - halves leaf density
+                        let leaf_cull_height = min_y + height_range * 0.50;
+
                         for mesh in &model.meshes {
                             let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
 
                             if is_leaves {
-                                // Combine into leaves mesh
+                                // For leaves: filter out triangles near the bottom
                                 let base_idx = leaf_positions.len() as u32;
+
+                                // Add all vertices first
+                                let vert_offset = leaf_positions.len();
                                 leaf_positions.extend_from_slice(&mesh.positions);
                                 leaf_normals.extend_from_slice(&mesh.normals);
                                 leaf_uvs.extend_from_slice(&mesh.uvs);
-                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                                // Filter triangles - only keep those above cull height
+                                for tri in mesh.indices.chunks(3) {
+                                    if tri.len() == 3 {
+                                        let i0 = tri[0] as usize;
+                                        let i1 = tri[1] as usize;
+                                        let i2 = tri[2] as usize;
+
+                                        // Get average Y of triangle
+                                        let avg_y = (mesh.positions[i0][1] + mesh.positions[i1][1] + mesh.positions[i2][1]) / 3.0;
+
+                                        // Keep triangle if it's above the cull threshold
+                                        if avg_y > leaf_cull_height {
+                                            leaf_indices.push(tri[0] + base_idx);
+                                            leaf_indices.push(tri[1] + base_idx);
+                                            leaf_indices.push(tri[2] + base_idx);
+                                        }
+                                    }
+                                }
+
                                 // Use first leaf texture we find
                                 if leaf_texture.is_none() {
                                     leaf_texture = mesh.material.base_color_texture_data.as_ref();
                                 }
                             } else {
-                                // Combine into bark mesh
+                                // Combine into bark mesh (no filtering)
                                 let base_idx = bark_positions.len() as u32;
                                 bark_positions.extend_from_slice(&mesh.positions);
                                 bark_normals.extend_from_slice(&mesh.normals);
@@ -1311,64 +1905,85 @@ fn main() {
                 }
 
                 // Load shrub/bush models from assets/models/shrubs/
+                // Same pattern as trees: separate bark and leaves meshes
                 let shrub_models = ["shrub_0", "bush_0", "grass_0"];
                 let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
                 for name in &shrub_models {
                     if let Some(model) = shrub_cache.load(name) {
+                        // Separate meshes into bark (OPAQUE) and leaves (BLEND)
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
+
                         for mesh in &model.meshes {
-                            // Create texture bind group if mesh has embedded texture
-                            let texture_bind_group = if let Some(ref tex_data) = mesh.material.base_color_texture_data {
-                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                    ctx.device(),
-                                    ctx.queue(),
-                                    tex_data,
-                                    Some(&format!("{}_texture", name)),
-                                );
-                                let bind_group = texture_helper.create_texture_bind_group(
-                                    ctx.device(),
-                                    &tex_view,
-                                    Some(&format!("{}_bind_group", name)),
-                                );
-                                println!("[FOLIAGE] Created texture for {}: {}x{}", name, tex_data.width, tex_data.height);
-                                Some(std::sync::Arc::new(bind_group))
-                            } else if let Some(ref tex_path) = mesh.material.base_color_texture {
-                                match gltf_loader::load_texture(tex_path) {
-                                    Ok(tex_data) => {
-                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                            ctx.device(),
-                                            ctx.queue(),
-                                            &tex_data,
-                                            Some(&format!("{}_texture", name)),
-                                        );
-                                        let bind_group = texture_helper.create_texture_bind_group(
-                                            ctx.device(),
-                                            &tex_view,
-                                            Some(&format!("{}_bind_group", name)),
-                                        );
-                                        println!("[FOLIAGE] Loaded external texture for {}: {}", name, tex_path);
-                                        Some(std::sync::Arc::new(bind_group))
-                                    }
-                                    Err(e) => {
-                                        println!("[FOLIAGE] WARNING: Failed to load texture for {}: {}", name, e);
-                                        None
-                                    }
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
+
+                            if is_leaves {
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
                                 }
                             } else {
-                                println!("[FOLIAGE] No texture found for {}, using procedural colors", name);
-                                None
-                            };
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            }
+                        }
 
+                        // Create bark mesh
+                        if !bark_positions.is_empty() {
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_bark_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", name)),
+                                ))
+                            });
                             let gpu_mesh = TreePipeline::create_mesh(
-                                ctx.device(),
-                                &mesh.positions,
-                                &mesh.normals,
-                                &mesh.uvs,
-                                &mesh.indices,
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
                                 texture_bind_group,
                             );
-                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[FOLIAGE] Registered shrub: {} ({} verts)", name, mesh.positions.len());
-                            break; // Only first mesh per model
+                            state.mesh_registry.insert(format!("{}_bark", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_bark: {} verts", name, bark_positions.len());
+                        }
+
+                        // Create leaves mesh
+                        if !leaf_positions.is_empty() {
+                            let texture_bind_group = leaf_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_leaf_texture", name)),
+                                );
+                                println!("[FOLIAGE] Created leaf texture for {}: {}x{}", name, tex_data.width, tex_data.height);
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_leaves", name), gpu_mesh);
+                            println!("[FOLIAGE] Registered {}_leaves: {} verts", name, leaf_positions.len());
                         }
                     } else {
                         println!("[FOLIAGE] WARNING: Shrub model '{}' not found", name);
@@ -1555,7 +2170,7 @@ fn main() {
         // Animal Model Pipeline (3D models for animals)
         static ANIMAL_MODEL_PIPELINE: OnceLock<Mutex<AnimalModelPipeline>> = OnceLock::new();
         let animal_model_pipeline_mutex = ANIMAL_MODEL_PIPELINE.get_or_init(|| {
-            Mutex::new(AnimalModelPipeline::new(ctx.device(), ctx.surface_format()))
+            Mutex::new(AnimalModelPipeline::new_with_queue(ctx.device(), Some(ctx.queue()), ctx.surface_format()))
         });
 
         // Animal Model Cache (loads GLTF models)
@@ -1752,7 +2367,18 @@ fn main() {
             // Update animal AI and movement
             let player_pos = state.player.position;
             let player_vel = state.player.velocity;
-            state.animal_manager.update(delta, player_pos, player_vel);
+            let terrain_seed = state.seed;
+            state.animal_manager.update(delta, player_pos, player_vel, |x, z| {
+                croatoan_wfc::get_height_at(x, z, terrain_seed).0
+            });
+
+            // Update quadruped IK for ground adaptation (horses, wolves, deer, etc.)
+            let ik_seed = state.seed;
+            state.animal_manager.update_ik(
+                |x, z| croatoan_wfc::get_height_at(x, z, ik_seed).0,
+                player_pos,
+                50.0, // Max IK distance from player
+            );
 
             // === AUDIO EVENTS INTEGRATION ===
             // Collect audio events to avoid borrow conflicts
@@ -2013,10 +2639,20 @@ fn main() {
                     let model_scale = animal.species.model_scale();
                     // Apply Y offset to correct model anchor points (e.g., stag antlers)
                     let y_offset = animal.species.model_y_offset();
+
+                    // Apply IK tilt for slope adaptation (position.y already at ground from manager update)
+                    let ik_tilt = animal.get_ik_pelvis_tilt()
+                        .unwrap_or(glam::Quat::IDENTITY);
+
+                    // Combine base rotation with IK pelvis tilt
+                    let final_rotation = animal.rotation * ik_tilt;
+
+                    // Model position - animal.position.y is already ground height
                     let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
+
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         Vec3::splat(model_scale),
-                        animal.rotation,
+                        final_rotation,
                         model_position,
                     );
                     let instance = AnimalInstance::new(model_matrix, color, emissive);
@@ -2050,6 +2686,9 @@ fn main() {
                             let mut all_vertices: Vec<AnimalVertex> = Vec::new();
                             let mut all_indices: Vec<u32> = Vec::new();
 
+                            // Find the first mesh with a texture
+                            let mut texture_data: Option<&gltf_loader::LoadedTexture> = None;
+
                             for mesh in &loaded_model.meshes {
                                 let vertex_offset = all_vertices.len() as u32;
                                 for i in 0..mesh.positions.len() {
@@ -2062,6 +2701,13 @@ fn main() {
                                 for idx in &mesh.indices {
                                     all_indices.push(*idx + vertex_offset);
                                 }
+
+                                // Get texture from first mesh that has one
+                                if texture_data.is_none() {
+                                    if let Some(ref tex) = mesh.material.base_color_texture_data {
+                                        texture_data = Some(tex);
+                                    }
+                                }
                             }
 
                             model_pipeline.upload_species_mesh(
@@ -2070,6 +2716,18 @@ fn main() {
                                 &all_vertices,
                                 &all_indices,
                             );
+
+                            // Upload texture if available
+                            if let Some(tex) = texture_data {
+                                model_pipeline.upload_species_texture(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    model_name,
+                                    &tex.data,
+                                    tex.width,
+                                    tex.height,
+                                );
+                            }
                         }
                     }
 
@@ -2832,6 +3490,11 @@ fn main() {
                     });
                 }
                 GameState::Paused => {
+                    // Character Sheet uses different layout than normal pause menu
+                    if state.pause_menu_page == PauseMenuPage::CharacterSheet {
+                        // Book-style character sheet UI
+                        render_character_sheet(ui_ctx, &mut *state);
+                    } else {
                     // Pause Menu - Centered Panel
                     egui::CentralPanel::default().show(ui_ctx, |ui| {
                         ui.vertical_centered(|ui| {
@@ -3029,6 +3692,7 @@ fn main() {
 
                                     ui.label(egui::RichText::new("Game Controls:").size(18.0).strong().color(egui::Color32::BLACK));
                                     ui.label("ESC - Pause Menu");
+                                    ui.label("Tab - Character Sheet (Inventory/Skills/Commendations)");
                                     ui.label("T/Y - Change Time of Day (+/- 1 hour)");
                                     ui.label("M - Toggle Audio On/Off");
                                     ui.add_space(10.0);
@@ -3089,6 +3753,9 @@ fn main() {
                                         state.pause_menu_page = PauseMenuPage::Main;
                                     }
                                 }
+                                PauseMenuPage::CharacterSheet => {
+                                    // Handled above, this case won't be reached
+                                }
                             }
                         });
                     });
@@ -3147,6 +3814,7 @@ fn main() {
                                 });
                             });
                     }
+                    } // end else (not CharacterSheet)
                 }
             }
         });
@@ -3257,28 +3925,65 @@ fn main() {
                                 }
                             }
 
-                            // Generate shrubs around trees
+                            // Generate shrubs around trees with randomization
                             let mut shrub_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
-                            for (i, t) in tree_instances.iter().enumerate() {
-                                let name = shrub_model_names[i % shrub_model_names.len()].to_string();
+                            let all_shrub_models = ["shrub_0", "bush_0", "grass_0"];
+
+                            for (_i, t) in tree_instances.iter().enumerate() {
                                 let pos = t.w_axis;
-                                for j in 0..2 {
-                                    let ang = (i + j) as f32 * 2.1;
+
+                                // Create deterministic RNG seeded from tree position
+                                use rand::SeedableRng;
+                                use rand::Rng;
+                                let pos_seed = ((pos.x * 1000.0) as u64)
+                                    .wrapping_add((pos.z * 1000.0) as u64)
+                                    .wrapping_mul(2654435761); // Knuth's multiplicative hash
+                                let mut rng = rand::rngs::StdRng::seed_from_u64(pos_seed);
+
+                                // Random number of shrubs per tree (1-4)
+                                let shrub_count = rng.gen_range(1..=4);
+
+                                for _ in 0..shrub_count {
+                                    // Random angle (full circle)
+                                    let ang = rng.gen_range(0.0..std::f32::consts::TAU);
+                                    // Random distance from tree (10.0 to 100.0 units - MASSIVE spread, 10x scatter)
+                                    let dist = rng.gen_range(10.0..100.0);
+                                    // Random scale variation (0.1 to 6.0 - huge variety from tiny to large)
+                                    let scale = rng.gen_range(0.1..6.0);
+                                    // Random rotation
+                                    let rot_y = rng.gen_range(0.0..std::f32::consts::TAU);
+                                    // Random height offset (-2.0 to 2.0 for terrain variation)
+                                    let height_offset = rng.gen_range(-2.0..2.0);
+                                    // Random model selection
+                                    let model_idx = rng.gen_range(0..all_shrub_models.len());
+                                    let name = all_shrub_models[model_idx].to_string();
+
                                     let shrub_t = Mat4::from_scale_rotation_translation(
-                                        Vec3::splat(1.0),
-                                        glam::Quat::from_rotation_y(ang),
-                                        Vec3::new(pos.x + ang.cos() * 4.0, pos.y + 0.5, pos.z + ang.sin() * 4.0),
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rot_y),
+                                        Vec3::new(pos.x + ang.cos() * dist, pos.y + height_offset, pos.z + ang.sin() * dist),
                                     );
-                                    shrub_groups.entry(name.clone()).or_default().push(shrub_t);
+                                    shrub_groups.entry(name).or_default().push(shrub_t);
                                 }
                             }
-                            for (name, transforms) in shrub_groups {
-                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                            for (name, transforms) in &shrub_groups {
+                                // Render bark mesh
+                                let bark_name = format!("{}_bark", name);
+                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
                                     let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
                                     sp.set_mesh(mesh.clone());
-                                    sp.upload_instances(ctx.device(), &transforms);
+                                    sp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(sp);
-                                    println!("[FOLIAGE] Shrub '{}': {} instances", name, transforms.len());
+                                    println!("[FOLIAGE] Shrub '{}' bark: {} instances", name, transforms.len());
+                                }
+                                // Render leaves mesh
+                                let leaves_name = format!("{}_leaves", name);
+                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                    let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    sp.set_mesh(mesh.clone());
+                                    sp.upload_instances(ctx.device(), transforms);
+                                    foliage_pipelines.push(sp);
+                                    println!("[FOLIAGE] Shrub '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
                             println!("[CHUNK] Foliage: {} pipelines", foliage_pipelines.len());
@@ -3657,6 +4362,7 @@ fn main() {
                     ctx.queue(),
                     sky_view_proj,
                     sun_dir,
+                    moon_dir,
                     Vec3::new(1.0, 1.0, 1.0), // Sun Color (White for now)
                     elapsed,
                     state.weather.cloud_coverage,

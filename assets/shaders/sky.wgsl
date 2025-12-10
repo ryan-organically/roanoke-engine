@@ -9,6 +9,8 @@ struct Uniforms {
     cloud_density: f32,
     cloud_color_shade: vec3<f32>,
     cloud_scale: f32,
+    moon_dir: vec3<f32>,
+    _pad1: f32,
     wind_offset: vec2<f32>,
     padding: vec2<f32>,
 }
@@ -172,14 +174,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             var cloud_rgb = mix(uniforms.cloud_color_base, uniforms.cloud_color_shade, color_mix);
 
             // Darken clouds at night
-            let night_cloud_color = cloud_rgb * 0.2; // Slightly brighter for moonlit effect
+            let night_cloud_color = cloud_rgb * 0.2;
             cloud_rgb = mix(night_cloud_color, cloud_rgb, day_factor);
 
-            // Sun/moon scattering through clouds (light rays effect)
+            // Sun scattering through clouds (light rays effect during day)
             let sun_dot = max(dot(ray_dir, -uniforms.sun_dir), 0.0);
-            let scatter = pow(sun_dot, 4.0) * 0.4; // Soft glow around sun/moon through clouds
-            let scatter_color = mix(vec3<f32>(0.3, 0.35, 0.5), uniforms.sun_color, day_factor);
-            cloud_rgb += scatter_color * scatter * (1.0 - density * 0.5);
+            let sun_scatter = pow(sun_dot, 4.0) * 0.4 * day_factor;
+            cloud_rgb += uniforms.sun_color * sun_scatter * (1.0 - density * 0.5);
+
+            // Moon scattering through clouds (ethereal glow at night)
+            let moon_dot = max(dot(ray_dir, -uniforms.moon_dir), 0.0);
+            let moon_scatter = pow(moon_dot, 3.0) * 0.5 * (1.0 - day_factor);
+            let moon_glow_color = vec3<f32>(0.6, 0.65, 0.8); // Cool silvery-blue
+            cloud_rgb += moon_glow_color * moon_scatter * (1.0 - density * 0.3);
 
             let highlight = smoothstep(0.75, 1.0, n);
             let highlight_color = mix(vec3<f32>(0.25, 0.25, 0.35), vec3<f32>(1.0, 0.95, 0.9), day_factor);

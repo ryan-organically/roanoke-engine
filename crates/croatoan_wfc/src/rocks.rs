@@ -272,7 +272,7 @@ pub fn generate_rocks_for_chunk(
     // Previous density: 0.12, New density: 1.2
     // Uses clustering for natural distribution
 
-    let pebble_density = 1.2; // 10x increase
+    let pebble_density = 0.005; // Minimal - just a few per chunk (was 1.2)
     let potential_pebbles = (chunk_size * chunk_size * pebble_density) as u32;
 
     for i in 0..potential_pebbles {

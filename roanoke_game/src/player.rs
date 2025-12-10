@@ -1,5 +1,6 @@
 use glam::Vec3;
 use croatoan_wfc::mesh_gen::get_height_at;
+use crate::biped_ik::{BipedIK, PlayerMoveState};
 
 pub struct Player {
     pub position: Vec3,
@@ -11,6 +12,9 @@ pub struct Player {
     pub jump_force: f32,
     pub gravity: f32,
     pub height: f32, // Eye height
+
+    /// Inverse kinematics for ground adaptation
+    pub biped_ik: BipedIK,
 }
 
 impl Player {
@@ -25,7 +29,37 @@ impl Player {
             jump_force: 15.0,
             gravity: 30.0,
             height: 1.8, // Standard human height
+            biped_ik: BipedIK::new(position.y),
         }
+    }
+
+    /// Get current movement state for IK blending
+    pub fn move_state(&self) -> PlayerMoveState {
+        let speed = self.velocity.length();
+        if !self.on_ground {
+            PlayerMoveState::Jumping
+        } else if speed > 5.0 {
+            PlayerMoveState::Running
+        } else if speed > 0.5 {
+            PlayerMoveState::Walking
+        } else {
+            PlayerMoveState::Idle
+        }
+    }
+
+    /// Update inverse kinematics for ground adaptation
+    pub fn update_ik(&mut self, seed: u32) {
+        let state = self.move_state();
+        self.biped_ik.update(
+            self.position,
+            self.yaw,
+            state,
+            self.on_ground,
+            |x, z| {
+                let (height, _) = get_height_at(x, z, seed);
+                height
+            },
+        );
     }
 
     pub fn update(&mut self, dt: f32, input_dir: Vec3, seed: u32) {
@@ -56,6 +90,9 @@ impl Player {
         } else {
             self.on_ground = false;
         }
+
+        // Update IK for ground adaptation
+        self.update_ik(seed);
     }
 
     pub fn jump(&mut self) {
