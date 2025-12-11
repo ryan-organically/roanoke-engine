@@ -608,4 +608,21 @@ impl TreePipeline {
     pub fn instance_count(&self) -> u32 {
         self.instance_count
     }
+
+    /// Get buffers for shadow rendering (vertex, index, instance, counts)
+    /// Returns None if pipeline is not ready
+    pub fn get_shadow_buffers(&self) -> Option<(&Buffer, &Buffer, &Buffer, u32, u32)> {
+        let mesh = self.mesh.as_ref()?;
+        let instance_buffer = self.instance_buffer.as_ref()?;
+        if self.instance_count == 0 || mesh.index_count == 0 {
+            return None;
+        }
+        Some((
+            mesh.vertex_buffer.as_ref(),
+            mesh.index_buffer.as_ref(),
+            instance_buffer,
+            mesh.index_count,
+            self.instance_count,
+        ))
+    }
 }

@@ -14,6 +14,11 @@ pub mod quests;
 pub mod reputation;
 pub mod skills;
 
+// Colonial expansion systems
+pub mod colonial_dynamics;
+pub mod settlement;
+pub mod resource_gathering;
+
 pub use events::EventManager;
 pub use player_state::PlayerProgression;
 pub use quests::QuestManager;
@@ -46,4 +51,23 @@ pub use faction_pipeline::{
     UndoManager, UndoEntry,
     // Enhanced metrics
     PipelineMetrics, FactionMetrics, GlobalMetrics, RateMetrics,
+};
+
+// Colonial dynamics exports
+pub use colonial_dynamics::{
+    ColonialPower, NativeNation, NativePolicy, GovernmentType,
+    ColonialDynamicsManager, TerritorialClaim, TerritoryResources,
+    FactionConflict, ConflictType, ConflictIntensity, ConflictCause,
+    DiplomaticAction, PeaceTerms, PowerBalance, HistoricalEvent, HistoricalEventType,
+    Alliance, AllianceType, TradeAgreement,
+};
+pub use settlement::{
+    SettlementStyle, BuildingType, BuildingEffect, ConstructionCost, ResourceType,
+    Settlement, Building, SettlementResources, SettlementManager, ConstructionError,
+    ConstructionProject,
+};
+pub use resource_gathering::{
+    GatherableResource, ResourceCategory, BiomeType, GatheringTool, ToolQuality,
+    ResourceNode, GatherResult, ResourceGatheringManager, GatheringProgress, GatheringStats,
+    GatheringCamp, GatheringCampType,
 };

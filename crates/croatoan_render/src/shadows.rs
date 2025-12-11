@@ -1,4 +1,5 @@
 use glam::Mat4;
+use wgpu::util::DeviceExt;
 
 pub struct ShadowMap {
     pub texture: wgpu::Texture,
@@ -185,4 +186,201 @@ impl ShadowPipeline {
 
     // Note: This pipeline works with both terrain (stride 36) and grass (stride 24)
     // because it only reads position at offset 0, regardless of what comes after
+}
+
+/// Shadow pipeline for instanced geometry (trees, foliage)
+/// This handles the instance transform matrix to render tree shadows
+pub struct InstancedShadowPipeline {
+    render_pipeline: wgpu::RenderPipeline,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+impl InstancedShadowPipeline {
+    pub fn new(device: &wgpu::Device) -> Self {
+        // Instanced Shadow Shader
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Instanced Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(r#"
+                struct Uniforms {
+                    view_proj: mat4x4<f32>,
+                }
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+                struct VertexInput {
+                    @location(0) position: vec3<f32>,
+                    @location(1) normal: vec3<f32>,
+                    @location(2) uv: vec2<f32>,
+                    // Instance matrix (4 vec4s)
+                    @location(5) model_0: vec4<f32>,
+                    @location(6) model_1: vec4<f32>,
+                    @location(7) model_2: vec4<f32>,
+                    @location(8) model_3: vec4<f32>,
+                }
+
+                @vertex
+                fn vs_main(input: VertexInput) -> @builtin(position) vec4<f32> {
+                    let model = mat4x4<f32>(
+                        input.model_0,
+                        input.model_1,
+                        input.model_2,
+                        input.model_3,
+                    );
+                    let world_pos = model * vec4<f32>(input.position, 1.0);
+                    return uniforms.view_proj * world_pos;
+                }
+            "#)),
+        });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instanced Shadow Uniform Buffer"),
+            size: std::mem::size_of::<ShadowUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Instanced Shadow Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Instanced Shadow Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Instanced Shadow Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Instanced Shadow Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[
+                    // Vertex buffer: position (3f), normal (3f), uv (2f) = 32 bytes
+                    wgpu::VertexBufferLayout {
+                        array_stride: 32,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 0,
+                                format: wgpu::VertexFormat::Float32x3, // position
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 12,
+                                shader_location: 1,
+                                format: wgpu::VertexFormat::Float32x3, // normal
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 24,
+                                shader_location: 2,
+                                format: wgpu::VertexFormat::Float32x2, // uv
+                            },
+                        ],
+                    },
+                    // Instance buffer: 4x4 matrix = 64 bytes
+                    wgpu::VertexBufferLayout {
+                        array_stride: 64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                offset: 0,
+                                shader_location: 5,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 16,
+                                shader_location: 6,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 32,
+                                shader_location: 7,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            wgpu::VertexAttribute {
+                                offset: 48,
+                                shader_location: 8,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                        ],
+                    },
+                ],
+            },
+            fragment: None, // Depth-only
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Front), // Cull front for shadow bias
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 4,
+                    slope_scale: 2.5,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        Self {
+            render_pipeline,
+            uniform_buffer,
+            bind_group,
+        }
+    }
+
+    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4) {
+        let uniforms = ShadowUniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
+    /// Render instanced geometry to shadow map
+    /// vertex_buffer: TreeVertex format (pos, normal, uv)
+    /// instance_buffer: Mat4 transforms
+    pub fn render<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        vertex_buffer: &'a wgpu::Buffer,
+        index_buffer: &'a wgpu::Buffer,
+        instance_buffer: &'a wgpu::Buffer,
+        index_count: u32,
+        instance_count: u32,
+    ) {
+        if instance_count == 0 || index_count == 0 {
+            return;
+        }
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
+        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        render_pass.draw_indexed(0..index_count, 0, 0..instance_count);
+    }
 }

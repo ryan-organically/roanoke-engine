@@ -11,6 +11,8 @@ pub struct AnimalSpawner {
     pub max_animals: usize,
     pub min_spawn_distance: f32,
     pub animals_per_chunk: f32,
+    /// Ecology-based spawn modifier (from EcosystemHealth)
+    pub ecology_modifier: f32,
 }
 
 impl AnimalSpawner {
@@ -21,7 +23,14 @@ impl AnimalSpawner {
             max_animals: 50,
             min_spawn_distance: 40.0,
             animals_per_chunk: 0.5, // Average animals per chunk
+            ecology_modifier: 1.0, // Default: no modification
         }
+    }
+
+    /// Set the ecology-based spawn modifier (from EcosystemHealth)
+    /// Values: 0.1 (collapsed) to 1.3 (thriving)
+    pub fn set_ecology_modifier(&mut self, modifier: f32) {
+        self.ecology_modifier = modifier.clamp(0.1, 2.0);
     }
 
     /// Called when a chunk finishes loading - spawns animals appropriate for the area
@@ -212,7 +221,8 @@ impl AnimalSpawner {
             seed as f64 * 0.001 + 50.0,
         ]);
 
-        let density = ((density_noise + 1.0) * 0.5 * self.animals_per_chunk as f64 * 2.0) as usize;
+        // Apply ecology modifier to spawn density
+        let density = ((density_noise + 1.0) * 0.5 * self.animals_per_chunk as f64 * 2.0 * self.ecology_modifier as f64) as usize;
         let num_points = density.min(4); // Max 4 spawn points per chunk
 
         // Generate points using deterministic noise
@@ -235,7 +245,7 @@ impl AnimalSpawner {
         points
     }
 
-    /// Select a species based on spawn rates and difficulty
+    /// Select a species based on spawn rates, difficulty, and ecology
     fn select_species(
         &self,
         eligible: &[AnimalSpecies],
@@ -246,8 +256,8 @@ impl AnimalSpawner {
             return None;
         }
 
-        // Calculate total spawn weight
-        let spawn_modifier = difficulty.spawn_rate_multiplier();
+        // Calculate total spawn weight (incorporating ecology modifier)
+        let spawn_modifier = difficulty.spawn_rate_multiplier() * self.ecology_modifier;
         let total_weight: f32 = eligible
             .iter()
             .map(|s| s.spawn_rate() * spawn_modifier)

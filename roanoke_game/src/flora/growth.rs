@@ -398,6 +398,54 @@ impl FloraManager {
         None
     }
 
+    /// Get the closest harvestable plant to a position
+    /// Returns (plant_id, species, distance, can_harvest) for HUD display
+    pub fn get_closest_harvestable(
+        &self,
+        position: [f32; 3],
+        max_distance: f32,
+    ) -> Option<(u64, super::FloraSpecies, f32, bool)> {
+        let chunk = position_to_chunk(position);
+        let mut closest: Option<(u64, super::FloraSpecies, f32, bool)> = None;
+        let mut min_dist = max_distance;
+
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let check_chunk = (chunk.0 + dx, chunk.1 + dz);
+                if let Some(plants) = self.plants_by_chunk.get(&check_chunk) {
+                    for plant in plants {
+                        // Only consider small plants (herbs, shrubs, fungi, crops)
+                        // Trees are too large for foraging
+                        let cat = plant.species.category();
+                        if cat == crate::encyclopedia::PlantCategory::Tree {
+                            continue;
+                        }
+
+                        let dist = distance(position, plant.position);
+                        if dist < min_dist {
+                            min_dist = dist;
+                            closest = Some((plant.id, plant.species, dist, plant.can_harvest()));
+                        }
+                    }
+                }
+            }
+        }
+
+        closest
+    }
+
+    /// Harvest a plant by ID, returning the harvest result
+    pub fn harvest_plant(&mut self, id: u64) -> Option<(super::FloraSpecies, HarvestResult)> {
+        for plants in self.plants_by_chunk.values_mut() {
+            if let Some(plant) = plants.iter_mut().find(|p| p.id == id) {
+                let species = plant.species;
+                let result = plant.harvest();
+                return Some((species, result));
+            }
+        }
+        None
+    }
+
     /// Set current season
     pub fn set_season(&mut self, season: Season) {
         self.current_season = season;

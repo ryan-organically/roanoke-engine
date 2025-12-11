@@ -81,15 +81,17 @@ pub fn generate_foliage_for_chunk(
     let tree_count = tree_model_count.max(1);
     let shrub_count = shrub_model_count.max(1);
 
-    let bunch_grid_size = 32.0;
+    // Larger grid = fewer trees = better FPS
+    let bunch_grid_size = 64.0;
     let bunches_per_row = (chunk_size / bunch_grid_size).ceil() as i32;
 
     for bz in 0..bunches_per_row {
         for bx in 0..bunches_per_row {
             let grid_x = offset_x + (bx as f32 + 0.5) * bunch_grid_size;
             let grid_z = offset_z + (bz as f32 + 0.5) * bunch_grid_size;
-            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.4;
-            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.4;
+            // MASSIVE jitter to truly scatter trees randomly - no clustering!
+            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.9;
+            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.9;
             let world_x = grid_x + jitter_x;
             let world_z = grid_z + jitter_z;
 
@@ -126,15 +128,14 @@ pub fn generate_foliage_for_chunk(
             let local_seed = seed.wrapping_add((world_x as u32) ^ (world_z as u32).rotate_left(16));
             let local_noise = Perlin::new(local_seed);
 
-            // SHRUBS (understory) - 2-4 per bunch
-            let shrub_local = 2 + ((local_noise.get([local_seed as f64 * 0.1, 60.0]) + 1.0) * 1.5) as u32;
+            // SHRUBS (understory) - 1-3 per area, spread randomly NOT clustered around center
+            let shrub_local = 1 + ((local_noise.get([local_seed as f64 * 0.1, 60.0]) + 1.0) * 1.0) as u32;
             for i in 0..shrub_local {
-                let shrub_angle = (i as f32 * std::f32::consts::PI * 0.7)
-                    + local_noise.get([local_seed as f64, i as f64]) as f32 * 0.8;
-                let shrub_dist = 3.0
-                    + local_noise.get([local_seed as f64 * 0.3, i as f64 * 10.0]).abs() as f32 * 5.0;
-                let sx = world_x + shrub_angle.cos() * shrub_dist;
-                let sz = world_z + shrub_angle.sin() * shrub_dist;
+                // Fully random placement within a wide radius, not orbiting center
+                let shrub_offset_x = local_noise.get([local_seed as f64 * 0.5, i as f64 * 7.3]) as f32 * 20.0;
+                let shrub_offset_z = local_noise.get([local_seed as f64 * 0.7, i as f64 * 11.1]) as f32 * 20.0;
+                let sx = world_x + shrub_offset_x;
+                let sz = world_z + shrub_offset_z;
                 let (sh, _) = get_height_at(sx, sz, seed);
                 if sh < 0.5 {
                     continue;
@@ -160,9 +161,16 @@ pub fn generate_foliage_for_chunk(
 
             // TREE (canopy)
             if has_tree {
-                let tx = world_x + local_noise.get([local_seed as f64 * 0.2, 300.0]) as f32 * 3.0;
-                let tz = world_z + local_noise.get([local_seed as f64 * 0.2, 400.0]) as f32 * 3.0;
+                // Spread tree placement more randomly from center
+                let tx = world_x + local_noise.get([local_seed as f64 * 0.2, 300.0]) as f32 * 15.0;
+                let tz = world_z + local_noise.get([local_seed as f64 * 0.2, 400.0]) as f32 * 15.0;
                 let (th, _) = get_height_at(tx, tz, seed);
+
+                // Skip if terrain is too low (near water) - prevents floating
+                if th < 2.0 {
+                    continue;
+                }
+
                 let base_scale = 5.0 + biome_factor * 3.0;
                 let tree_scale =
                     base_scale + local_noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32;
@@ -172,11 +180,15 @@ pub fn generate_foliage_for_chunk(
                     ^ (tz.abs() as u32).wrapping_mul(41729563)) as usize
                     % tree_count;
 
+                // Y-anchor: Use smaller sink for low terrain to prevent floating
+                // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
+                let sink_amount = ((th - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
+
                 result.trees.push(FoliageInstance {
                     transform: Mat4::from_scale_rotation_translation(
                         Vec3::splat(tree_scale),
                         Quat::from_rotation_y(tree_angle),
-                        Vec3::new(tx, th - 1.0, tz),
+                        Vec3::new(tx, th - sink_amount, tz),
                     ),
                     model_index: model_idx,
                 });
@@ -184,8 +196,8 @@ pub fn generate_foliage_for_chunk(
         }
     }
 
-    // Phase 2: Scattered forest trees
-    let scattered_density = 0.0002;
+    // Phase 2: Scattered forest trees - reduced density for FPS
+    let scattered_density = 0.0001;
     let potential = (chunk_size * chunk_size * scattered_density) as u32;
     for i in 0..potential {
         let rx = noise.get([i as f64 * 0.1, 700.0]) as f32;
@@ -202,6 +214,10 @@ pub fn generate_foliage_for_chunk(
             continue;
         }
         if height > UPPER_TREELINE_END {
+            continue;
+        }
+        // Skip low terrain to prevent floating trees
+        if height < 2.5 {
             continue;
         }
 
@@ -231,11 +247,14 @@ pub fn generate_foliage_for_chunk(
             ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize
             % tree_count;
 
+        // Y-anchor: proportional sink to prevent floating
+        let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
+
         result.trees.push(FoliageInstance {
             transform: Mat4::from_scale_rotation_translation(
                 Vec3::splat(scale),
                 Quat::from_rotation_y(angle),
-                Vec3::new(world_x, height - 1.0, world_z),
+                Vec3::new(world_x, height - sink_amount, world_z),
             ),
             model_index: model_idx,
         });

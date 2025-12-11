@@ -5,7 +5,7 @@
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -58,8 +58,10 @@ mod naval;
 mod weather;
 mod systems_manager;
 mod character_agent;
+mod world_features;
 
 use water_system::WaterSystem;
+use world_features::WorldFeatures;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
 use atmosphere::AtmosphereEngine;
@@ -382,6 +384,14 @@ struct SharedState {
     faction_audio: FactionAudioBridge,
     // Systems Manager (encyclopedia, flora, ecology, weather coordination)
     systems_manager: systems_manager::SystemsManager,
+    // Forageable Plants (world flora instances for harvesting)
+    forageable_plants: flora::growth::FloraManager,
+    // Unified Agent Manager (NPC/Animal coordination, orb visuals, communication)
+    unified_agents: character_agent::unified_manager::UnifiedAgentManager,
+    // Naval System (ships, sailing, water travel)
+    ship_manager: naval::ships::ShipManager,
+    // World Features (rivers, caves)
+    world_features: WorldFeatures,
     // Dialogue UI state
     current_dialogue: Option<npc::interaction::DialogueUIData>,
     // Character Sheet (Tab menu)
@@ -1234,7 +1244,7 @@ fn main() {
         // Game Settings (default values)
         mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
         movement_speed: 10.0,
-        render_distance: 150.0, // Reduced from 250 for better FPS
+        render_distance: 400.0, // Extended for long-distance fidelity testing
         master_volume: 80.0, // 0-100 scale, 80 = default
         swing_animation: SwingAnimation {
             is_swinging: false,
@@ -1271,6 +1281,14 @@ fn main() {
         faction_audio: FactionAudioBridge::new(),
         // Systems Manager (will be re-seeded when game starts)
         systems_manager: systems_manager::SystemsManager::new(12345),
+        // Forageable Plants manager
+        forageable_plants: flora::growth::FloraManager::new(),
+        // Unified Agent Manager for NPC/Animal coordination
+        unified_agents: character_agent::unified_manager::UnifiedAgentManager::new(),
+        // Naval System for ships and water travel
+        ship_manager: naval::ships::ShipManager::new(),
+        // World Features (rivers and caves - will be re-seeded when game starts)
+        world_features: WorldFeatures::new(12345),
         // Dialogue state
         current_dialogue: None,
         // Character Sheet (Tab menu)
@@ -1605,6 +1623,60 @@ fn main() {
                                             log::info!("[DIALOGUE] Started with {} ({})", focused.name, focused.role);
                                         }
                                     }
+                                    // Check if near a harvestable plant
+                                    else if let Some((plant_id, species, dist, can_harvest)) = state.forageable_plants.get_closest_harvestable(
+                                        [state.player.position.x, state.player.position.y, state.player.position.z],
+                                        4.0, // Harvest range
+                                    ) {
+                                        if can_harvest && dist < 4.0 {
+                                            // Harvest the plant
+                                            if let Some((species, result)) = state.forageable_plants.harvest_plant(plant_id) {
+                                                match result {
+                                                    flora::growth::HarvestResult::Success { quality, quantity } => {
+                                                        // Get harvest items
+                                                        let items = flora::harvest::get_harvest_drops(species, quality);
+
+                                                        // Notify systems
+                                                        let player_pos = state.player.position;
+                                                        state.systems_manager.record_harvest(species, player_pos);
+
+                                                        // Add items to inventory
+                                                        for item in &items {
+                                                            let item_type = if item.properties.is_food {
+                                                                economy::ItemType::Food
+                                                            } else if item.properties.is_medicine {
+                                                                economy::ItemType::Medicine
+                                                            } else {
+                                                                economy::ItemType::Material
+                                                            };
+
+                                                            let mut inv_item = economy::Item::new(
+                                                                item.item_id,
+                                                                item.name,
+                                                                item_type,
+                                                                item.properties.value,
+                                                            );
+                                                            inv_item.stack_size = item.quantity;
+                                                            inv_item.max_stack = item.properties.max_stack;
+                                                            inv_item.rarity = match quality {
+                                                                flora::growth::HarvestQuality::Poor => economy::Rarity::Crude,
+                                                                flora::growth::HarvestQuality::Average => economy::Rarity::Common,
+                                                                flora::growth::HarvestQuality::Good => economy::Rarity::Uncommon,
+                                                                flora::growth::HarvestQuality::Prime => economy::Rarity::Rare,
+                                                            };
+                                                            let _ = state.player_economy.inventory.add_item(inv_item);
+                                                        }
+
+                                                        log::info!("[FORAGE] Harvested {} - {} items ({:?} quality)",
+                                                            species.name(), items.len(), quality);
+                                                    }
+                                                    flora::growth::HarvestResult::Failed => {
+                                                        log::info!("[FORAGE] Cannot harvest {} yet", species.name());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     // Otherwise pickup closest item
                                     else {
                                         let pickup_range = 3.0;
@@ -1778,8 +1850,9 @@ fn main() {
                             }
                         }
                         let height_range = max_y - min_y;
-                        // Leaves below this threshold (50% up from bottom) will be culled - halves leaf density
-                        let leaf_cull_height = min_y + height_range * 0.50;
+                        // Leaves below this threshold will be culled
+                        // 0.75 = only top 25% of tree has leaves (cleaner trunk, less furry base)
+                        let leaf_cull_height = min_y + height_range * 0.75;
 
                         for mesh in &model.meshes {
                             let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
@@ -2102,15 +2175,15 @@ fn main() {
         static CHUNK_MANAGER: OnceLock<Mutex<ChunkManager>> = OnceLock::new();
         let chunk_manager = CHUNK_MANAGER.get_or_init(|| {
             let mut manager = ChunkManager::new(256.0, 2, 4);
-            // Initialize radius based on default render_distance (150)
-            manager.update_radius_for_render_distance(150.0);
+            // Initialize radius based on default render_distance (400)
+            manager.update_radius_for_render_distance(400.0);
             Mutex::new(manager)
         });
 
         // Shadow System
         static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
         let (shadow_map_mutex, shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
-            let shadow_map = ShadowMap::new(ctx.device(), 1024); // Reduced from 2048 for FPS
+            let shadow_map = ShadowMap::new(ctx.device(), 2048); // Increased for shadow quality
             let shadow_pipeline = ShadowPipeline::new(ctx.device());
             (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
         });
@@ -2313,6 +2386,12 @@ fn main() {
                                         loot_result.total_wampum
                                     );
                                 }
+
+                                // Notify ecology system of animal kill (affects ecosystem health)
+                                state.systems_manager.record_hunt(
+                                    loot_result.species,
+                                    result.position,
+                                );
 
                                 // Reset combat timer
                                 state.combat_kill_time = 0.0;
@@ -3062,6 +3141,8 @@ fn main() {
                                                     2000.0, // 2km radius
                                                     10,     // max 10 villages
                                                 );
+                                                // Initialize world features (rivers and caves)
+                                                state.world_features = WorldFeatures::new(data.seed);
                                                 // Spawn tame animals (horses, donkeys) in villages
                                                 {
                                                     let village_data = state.village_manager.get_village_spawn_data();
@@ -3105,6 +3186,11 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Initialize world features (rivers and caves)
+                                        state.world_features = WorldFeatures::new(seed);
+                                        let stats = state.world_features.stats();
+                                        println!("[WORLD] Rivers: {}, Caves: {}, Waterfalls: {}",
+                                            stats.river_count, stats.cave_count, stats.waterfall_count);
                                         // Spawn tame animals (horses, donkeys) in villages
                                         {
                                             let village_data = state.village_manager.get_village_spawn_data();
@@ -3198,6 +3284,8 @@ fn main() {
                                             2000.0, // 2km radius
                                             10,     // max 10 villages
                                         );
+                                        // Initialize world features (rivers and caves)
+                                        state.world_features = WorldFeatures::new(data.seed);
                                         // Register village factions
                                         register_village_factions(&mut *state);
                                     }
@@ -3339,6 +3427,138 @@ fn main() {
                                     });
                                 });
                         }
+                    }
+
+                    // === Animal Observation HUD (Encyclopedia integration) ===
+                    // Show info when player is looking at an animal
+                    let look_dir = state.camera.forward();
+                    let player_pos_for_obs = state.player.position;
+                    let mut focused_animal_for_obs: Option<animals::AnimalSpecies> = None;
+
+                    if let Some((_id, distance, species, behavior)) = state.animal_manager.get_focused_animal(
+                        player_pos_for_obs,
+                        look_dir,
+                        50.0, // Max observation distance
+                        0.15, // ~8.5 degree cone (tight focus)
+                    ) {
+                        // Save species for observation update after UI
+                        focused_animal_for_obs = Some(species);
+
+                        // Get encyclopedia info about this species
+                        let discovery_tier = state.systems_manager.encyclopedia.get_fauna_tier(species);
+                        let observation_count = state.systems_manager.encyclopedia.get_observation_count(species);
+
+                        egui::Area::new(egui::Id::new("animal_observation_hud"))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+                            .show(ui_ctx, |ui| {
+                                let bg = egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(20, 40, 30, 200))
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 120, 80)))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::same(10.0));
+                                bg.show(ui, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        // Species name
+                                        let name_color = match discovery_tier {
+                                            encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
+                                            encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(150, 150, 150),
+                                            encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
+                                            encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(100, 200, 100),
+                                            encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
+                                        };
+                                        let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
+                                            "??? Unknown Creature".to_string()
+                                        } else {
+                                            species.name().to_string()
+                                        };
+                                        ui.label(egui::RichText::new(display_name).color(name_color).size(16.0));
+
+                                        // Distance
+                                        ui.label(egui::RichText::new(format!("{:.1}m", distance))
+                                            .color(egui::Color32::GRAY).size(11.0));
+
+                                        // Behavior (if observed enough)
+                                        if discovery_tier >= encyclopedia::DiscoveryTier::Observed {
+                                            let behavior_text = format!("{:?}", behavior);
+                                            ui.label(egui::RichText::new(behavior_text)
+                                                .color(egui::Color32::from_rgb(180, 180, 120)).size(11.0));
+                                        }
+
+                                        // Observation progress
+                                        ui.add_space(4.0);
+                                        let tier_text = format!("{:?} ({} observations)", discovery_tier, observation_count);
+                                        ui.label(egui::RichText::new(tier_text)
+                                            .color(egui::Color32::from_rgb(100, 150, 100)).size(10.0));
+                                    });
+                                });
+                            });
+                    }
+
+                    // Auto-observe focused animal (after UI code to avoid borrow conflict)
+                    if let Some(species) = focused_animal_for_obs {
+                        state.systems_manager.encyclopedia.on_animal_sighted(species, player_pos_for_obs, false);
+                    }
+
+                    // === Flora Foraging HUD ===
+                    // Show prompt when near a harvestable plant
+                    let player_pos_arr = [state.player.position.x, state.player.position.y, state.player.position.z];
+                    let mut focused_flora_for_obs: Option<flora::FloraSpecies> = None;
+
+                    if let Some((_, species, distance, can_harvest)) = state.forageable_plants.get_closest_harvestable(
+                        player_pos_arr,
+                        4.0,
+                    ) {
+                        // Save species for observation update after UI
+                        focused_flora_for_obs = Some(species);
+
+                        // Get encyclopedia knowledge level
+                        let discovery_tier = state.systems_manager.encyclopedia.get_flora_tier(species);
+
+                        egui::Area::new(egui::Id::new("flora_forage_hud"))
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 120.0))
+                            .show(ui_ctx, |ui| {
+                                let bg = egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_unmultiplied(30, 50, 30, 200))
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 100, 60)))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::same(10.0));
+                                bg.show(ui, |ui| {
+                                    ui.vertical_centered(|ui| {
+                                        // Plant name (based on knowledge)
+                                        let name_color = match discovery_tier {
+                                            encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
+                                            encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(150, 180, 150),
+                                            encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
+                                            encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(100, 200, 100),
+                                            encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
+                                        };
+                                        let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
+                                            "??? Unknown Plant".to_string()
+                                        } else {
+                                            species.name().to_string()
+                                        };
+                                        ui.label(egui::RichText::new(display_name).color(name_color).size(14.0));
+
+                                        // Distance
+                                        ui.label(egui::RichText::new(format!("{:.1}m", distance))
+                                            .color(egui::Color32::GRAY).size(10.0));
+
+                                        // Harvest prompt
+                                        if can_harvest {
+                                            ui.label(egui::RichText::new("[E] Harvest")
+                                                .color(egui::Color32::from_rgb(100, 200, 100)).size(12.0));
+                                        } else {
+                                            ui.label(egui::RichText::new("Not ready to harvest")
+                                                .color(egui::Color32::from_rgb(180, 100, 100)).size(11.0));
+                                        }
+                                    });
+                                });
+                            });
+                    }
+
+                    // Auto-observe focused plant (after UI code to avoid borrow conflict)
+                    if let Some(species) = focused_flora_for_obs {
+                        state.systems_manager.encyclopedia.on_plant_sighted(species, player_pos_for_obs, false);
                     }
 
                     // === Dialogue UI ===
@@ -3559,12 +3779,12 @@ fn main() {
                                     });
                                     ui.add_space(15.0);
 
-                                    // Render Distance (minimum 200 to ensure chunks load)
+                                    // Render Distance - extended range for long-distance fidelity
                                     ui.label(egui::RichText::new("Render Distance:").color(egui::Color32::BLACK));
                                     let old_render_dist = state.render_distance;
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 300.0) / 2.0);
-                                        ui.add(egui::Slider::new(&mut state.render_distance, 75.0..=200.0)
+                                        ui.add(egui::Slider::new(&mut state.render_distance, 150.0..=600.0)
                                             .text("Distance")
                                             .custom_formatter(|n, _| format!("{:.0}", n)));
                                     });
@@ -3925,67 +4145,8 @@ fn main() {
                                 }
                             }
 
-                            // Generate shrubs around trees with randomization
-                            let mut shrub_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
-                            let all_shrub_models = ["shrub_0", "bush_0", "grass_0"];
-
-                            for (_i, t) in tree_instances.iter().enumerate() {
-                                let pos = t.w_axis;
-
-                                // Create deterministic RNG seeded from tree position
-                                use rand::SeedableRng;
-                                use rand::Rng;
-                                let pos_seed = ((pos.x * 1000.0) as u64)
-                                    .wrapping_add((pos.z * 1000.0) as u64)
-                                    .wrapping_mul(2654435761); // Knuth's multiplicative hash
-                                let mut rng = rand::rngs::StdRng::seed_from_u64(pos_seed);
-
-                                // Random number of shrubs per tree (1-4)
-                                let shrub_count = rng.gen_range(1..=4);
-
-                                for _ in 0..shrub_count {
-                                    // Random angle (full circle)
-                                    let ang = rng.gen_range(0.0..std::f32::consts::TAU);
-                                    // Random distance from tree (10.0 to 100.0 units - MASSIVE spread, 10x scatter)
-                                    let dist = rng.gen_range(10.0..100.0);
-                                    // Random scale variation (0.1 to 6.0 - huge variety from tiny to large)
-                                    let scale = rng.gen_range(0.1..6.0);
-                                    // Random rotation
-                                    let rot_y = rng.gen_range(0.0..std::f32::consts::TAU);
-                                    // Random height offset (-2.0 to 2.0 for terrain variation)
-                                    let height_offset = rng.gen_range(-2.0..2.0);
-                                    // Random model selection
-                                    let model_idx = rng.gen_range(0..all_shrub_models.len());
-                                    let name = all_shrub_models[model_idx].to_string();
-
-                                    let shrub_t = Mat4::from_scale_rotation_translation(
-                                        Vec3::splat(scale),
-                                        glam::Quat::from_rotation_y(rot_y),
-                                        Vec3::new(pos.x + ang.cos() * dist, pos.y + height_offset, pos.z + ang.sin() * dist),
-                                    );
-                                    shrub_groups.entry(name).or_default().push(shrub_t);
-                                }
-                            }
-                            for (name, transforms) in &shrub_groups {
-                                // Render bark mesh
-                                let bark_name = format!("{}_bark", name);
-                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
-                                    let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
-                                    sp.set_mesh(mesh.clone());
-                                    sp.upload_instances(ctx.device(), transforms);
-                                    foliage_pipelines.push(sp);
-                                    println!("[FOLIAGE] Shrub '{}' bark: {} instances", name, transforms.len());
-                                }
-                                // Render leaves mesh
-                                let leaves_name = format!("{}_leaves", name);
-                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
-                                    let mut sp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
-                                    sp.set_mesh(mesh.clone());
-                                    sp.upload_instances(ctx.device(), transforms);
-                                    foliage_pipelines.push(sp);
-                                    println!("[FOLIAGE] Shrub '{}' leaves: {} instances", name, transforms.len());
-                                }
-                            }
+                            // Shrubs are now generated by foliage_gen.rs with random spread
+                            // No longer generating shrubs around tree bases (was causing bushiness)
                             println!("[CHUNK] Foliage: {} pipelines", foliage_pipelines.len());
 
                             let mut detritus_pipeline = None;
@@ -4113,6 +4274,11 @@ fn main() {
                             // Note: We need to destructure to avoid borrow checker issues
                             let player_pos = state.player.position;
                             let seed = state.seed;
+
+                            // Update ecology modifier from SystemsManager before spawning
+                            let ecology_modifier = state.systems_manager.get_global_ecology_modifier();
+                            state.animal_spawner.set_ecology_modifier(ecology_modifier);
+
                             let SharedState { animal_spawner, animal_manager, .. } = &mut *state;
                             animal_spawner.on_chunk_loaded(
                                 coord.x,
@@ -4290,6 +4456,7 @@ fn main() {
             {
                 let shadow_map = shadow_map_mutex.safe_lock();
                 let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
+
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4308,15 +4475,16 @@ fn main() {
                 });
 
                 for (_coord, chunk) in manager.iter_chunks() {
+                    // Render terrain shadows
                     shadow_pipeline.render(
                         &mut shadow_pass,
                         &chunk.terrain.vertex_buffer,
                         &chunk.terrain.index_buffer,
                         chunk.terrain.index_count,
                     );
-                    // for building in &chunk.buildings {
-                    //     building.render_shadow(&mut shadow_pass, &shadow_pipeline);
-                    // }
+
+                    // TODO: Tree shadows temporarily disabled while debugging crash
+                    // Will re-enable once instanced shadow pipeline is stable
                 }
             }
 
@@ -4474,7 +4642,7 @@ fn main() {
                 // Use render distance setting from pause menu
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
-                let grass_max_distance = 0.0;  // DISABLED - using GLTF foliage instead
+                let grass_max_distance = 150.0;  // Grass visible within 150 units
                 let tree_max_distance = (state.render_distance * 1.5).max(300.0);   // Foliage visible far
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist

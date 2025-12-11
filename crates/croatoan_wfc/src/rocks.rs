@@ -266,13 +266,12 @@ pub fn generate_rocks_for_chunk(
     }
 
     //=========================================================================
-    // PHASE 3: Dense Pebble Fields (10x density)
+    // PHASE 3: Dense Pebble Fields
     //=========================================================================
-    // Hundreds of tiny stones scattered everywhere above water
-    // Previous density: 0.12, New density: 1.2
-    // Uses clustering for natural distribution
+    // Visible pebbles scattered across ground for detail
+    // Moderate density that renders well without tanking FPS
 
-    let pebble_density = 0.005; // Minimal - just a few per chunk (was 1.2)
+    let pebble_density = 0.15; // Restored - visible ground detail
     let potential_pebbles = (chunk_size * chunk_size * pebble_density) as u32;
 
     for i in 0..potential_pebbles {
@@ -370,6 +369,72 @@ pub fn generate_rocks_for_chunk(
             Vec3::splat(scale),
             Quat::from_rotation_y(angle),
             Vec3::new(world_x, height - 0.02, world_z),
+        );
+
+        instances.push((rock_type.mesh_name().to_string(), transform));
+    }
+
+    //=========================================================================
+    // PHASE 5: Large Beach Boulders
+    //=========================================================================
+    // Prominent boulders scattered on the beach for visual interest
+    // These are larger rocks that break up the beach landscape
+
+    let beach_boulder_density = 0.08;
+    let potential_boulders = (chunk_size * chunk_size * beach_boulder_density) as u32;
+
+    for i in 0..potential_boulders {
+        let rand_x = noise.get([i as f64 * 0.31, 850.0]) as f32;
+        let rand_z = noise.get([i as f64 * 0.31, 950.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+        let biome_t = get_biome_t(world_x, world_z, seed);
+
+        // Beach and upper beach zone (t 0.45-0.60) from waterline to scrub edge
+        if biome_t < 0.44 || biome_t > 0.60 {
+            continue;
+        }
+        if height < 0.5 || height > 4.0 {
+            continue;
+        }
+
+        // Clustering - some areas have boulder clusters
+        let boulder_cluster = cluster_noise.get([world_x as f64 * 0.04, world_z as f64 * 0.04]) as f32;
+        let spawn_threshold = if boulder_cluster > 0.2 { 0.6 } else { 0.25 };
+        let roll = (noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) + 1.0) * 0.5;
+        if roll > spawn_threshold as f64 {
+            continue;
+        }
+
+        // Mix of boulder sizes - favor larger on the beach
+        let type_noise = noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) as f32;
+        let rock_type = if type_noise > 0.3 {
+            RockType::LargeBoulder
+        } else if type_noise > -0.2 {
+            RockType::MediumRock
+        } else {
+            RockType::FlatRock
+        };
+
+        let angle = noise.get([world_x as f64 * 0.6, world_z as f64 * 0.6]) as f32 * std::f32::consts::TAU;
+        let (scale_min, scale_max) = rock_type.scale_variation();
+        let scale_t = (noise.get([world_x as f64 * 0.25, world_z as f64 * 0.25]) + 1.0) * 0.5;
+        let scale = rock_type.base_scale() * (scale_min + scale_t as f32 * (scale_max - scale_min));
+
+        // Slight tilt for natural look
+        let tilt_x = noise.get([world_x as f64 * 0.8, 120.0]) as f32 * 0.1;
+        let tilt_z = noise.get([world_z as f64 * 0.8, 170.0]) as f32 * 0.1;
+
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
+            Vec3::new(world_x, height - rock_type.sink_amount(), world_z),
         );
 
         instances.push((rock_type.mesh_name().to_string(), transform));

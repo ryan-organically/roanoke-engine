@@ -703,6 +703,13 @@ impl EcologyManager {
         }
     }
 
+    /// Record a plant harvest
+    pub fn record_harvest(&mut self, species: FloraSpecies, position: Vec3) {
+        if let Some(region) = self.get_region_at_mut([position.x, position.y, position.z]) {
+            region.record_harvest(species, 1);
+        }
+    }
+
     /// Get region at Vec3 position
     pub fn get_region_at_vec3(&self, position: Vec3) -> Option<&EcosystemRegion> {
         self.get_region_at([position.x, position.y, position.z])

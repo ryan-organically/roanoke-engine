@@ -5,7 +5,6 @@
 //! uses Perlin noise for deterministic procedural generation.
 
 use crate::noise_util::{fbm, ridged, turbulence};
-use crate::trees;
 use glam::Vec2;
 
 /// Major biome categories covering square miles of terrain
@@ -465,8 +464,8 @@ impl BiomeGenerator {
         primary: BiomeType,
         _secondary: Option<BiomeType>,
         _blend: f32,
-        is_river: bool,
-        is_waterfall: bool,
+        _is_river: bool,
+        _is_waterfall: bool,
         river_proximity: f32,
     ) -> f32 {
         // Detail noise for micro-terrain

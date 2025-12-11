@@ -1,7 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
-
 //! # Croatoan WFC - Procedural Generation Library
 //!
 //! This crate provides comprehensive procedural generation for terrain, vegetation,

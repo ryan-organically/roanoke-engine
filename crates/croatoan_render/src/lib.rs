@@ -29,7 +29,7 @@ pub use detritus_pipeline::DetritusPipeline;
 pub use sky_pipeline::SkyPipeline;
 pub use sun_pipeline::SunPipeline;
 pub use moon_pipeline::MoonPipeline;
-pub use shadows::{ShadowPipeline, ShadowMap};
+pub use shadows::{ShadowPipeline, ShadowMap, InstancedShadowPipeline};
 pub use camera::Camera;
 pub use frustum::{Frustum, ChunkBounds};
 pub use building_pipeline::{BuildingPipeline, BuildingMesh, BuildingVertex};

@@ -245,7 +245,7 @@ impl MeshBuilder {
 
     fn add_box(&mut self, center: Vec3, size: Vec3, color: [f32; 3]) {
         let half = size * 0.5;
-        let base_idx = self.vertices.len() as u32;
+        let _base_idx = self.vertices.len() as u32;
 
         // 8 corners
         let p = [

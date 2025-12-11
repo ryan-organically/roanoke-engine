@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 pub mod grass;
 pub mod grass_species;
 pub mod tree;

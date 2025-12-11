@@ -568,6 +568,54 @@ impl AnimalManager {
         }
     }
 
+    /// Find the animal the player is looking at (for observation/HUD)
+    /// Returns (AnimalId, distance, species, behavior) if an animal is in the player's view cone
+    pub fn get_focused_animal(
+        &self,
+        player_pos: Vec3,
+        look_dir: Vec3,
+        max_distance: f32,
+        cone_angle: f32, // radians, half-angle of view cone
+    ) -> Option<(AnimalId, f32, super::types::AnimalSpecies, super::behavior::BehaviorState)> {
+        let nearby_ids: Vec<AnimalId> = self.spatial.query_radius(player_pos, max_distance);
+
+        let mut best_candidate: Option<(AnimalId, f32, super::types::AnimalSpecies, super::behavior::BehaviorState)> = None;
+        let mut best_score = f32::MAX;
+
+        for id in nearby_ids {
+            if let Some(animal) = self.animals.get(&id) {
+                if !animal.is_alive() {
+                    continue;
+                }
+
+                let to_animal = animal.position - player_pos;
+                let distance = to_animal.length();
+                if distance < 0.5 || distance > max_distance {
+                    continue;
+                }
+
+                let dir_to_animal = to_animal / distance;
+                let dot = look_dir.dot(dir_to_animal);
+                let angle = dot.acos();
+
+                // Check if within view cone
+                if angle < cone_angle {
+                    // Score: prefer animals that are more centered and closer
+                    let center_score = angle / cone_angle; // 0 = dead center, 1 = edge
+                    let distance_score = distance / max_distance;
+                    let score = center_score * 0.7 + distance_score * 0.3;
+
+                    if score < best_score {
+                        best_score = score;
+                        best_candidate = Some((id, distance, animal.species, animal.behavior_state.clone()));
+                    }
+                }
+            }
+        }
+
+        best_candidate
+    }
+
     /// Update inverse kinematics for all quadruped animals
     ///
     /// Call this after the main update() with terrain height access.

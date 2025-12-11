@@ -551,7 +551,7 @@ impl RiverGenerator {
 
     /// Get river height modifier at a position (for carving river bed)
     pub fn get_river_carve_depth(&self, x: f32, z: f32, rivers: &[RiverSystem]) -> f32 {
-        let (is_river, dist, segment_opt) = self.sample_river_at(x, z, rivers);
+        let (_is_river, dist, segment_opt) = self.sample_river_at(x, z, rivers);
 
         if let Some(segment) = segment_opt {
             let half_width = segment.width * 0.5;

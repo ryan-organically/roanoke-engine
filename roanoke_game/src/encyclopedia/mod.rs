@@ -768,6 +768,99 @@ impl Encyclopedia {
             .filter(|e| e.tier == DiscoveryTier::Mastered)
             .count() as u32;
     }
+
+    // === HUD INTEGRATION HELPERS ===
+
+    /// Get the discovery tier for a fauna species (for HUD display)
+    pub fn get_fauna_tier(&self, species: AnimalSpecies) -> DiscoveryTier {
+        self.fauna
+            .get(&species)
+            .map(|entry| entry.tier)
+            .unwrap_or(DiscoveryTier::Unknown)
+    }
+
+    /// Get the discovery tier for a flora species (for HUD display)
+    pub fn get_flora_tier(&self, species: FloraSpecies) -> DiscoveryTier {
+        self.flora
+            .get(&species)
+            .map(|entry| entry.tier)
+            .unwrap_or(DiscoveryTier::Unknown)
+    }
+
+    /// Get observation count for a fauna species
+    pub fn get_observation_count(&self, species: AnimalSpecies) -> u32 {
+        self.fauna
+            .get(&species)
+            .map(|entry| entry.encounter_count)
+            .unwrap_or(0)
+    }
+
+    /// Get observation count for a flora species
+    pub fn get_flora_observation_count(&self, species: FloraSpecies) -> u32 {
+        self.flora
+            .get(&species)
+            .map(|entry| entry.encounter_count)
+            .unwrap_or(0)
+    }
+
+    /// Record an animal sighting from the HUD system (looking at animal)
+    /// This increments observation time when player looks at an animal
+    pub fn on_animal_sighted(&mut self, species: AnimalSpecies, position: glam::Vec3, was_killed: bool) {
+        let pos_arr = [position.x, position.y, position.z];
+
+        // First ensure the species is at least sighted
+        let entry = self.get_fauna_entry(species);
+        if entry.first_seen.is_none() {
+            entry.first_seen = Some(0.0); // Would use game_time if available
+            entry.first_seen_location = Some(pos_arr);
+        }
+
+        if entry.tier == DiscoveryTier::Unknown {
+            self.advance_fauna_tier(species);
+        }
+
+        // Add small observation time for looking at the animal
+        // (larger bonus for kills since you're studying the carcass)
+        let obs_time = if was_killed { 15.0 } else { 0.5 };
+        let skill_bonus = 1.0 + (self.naturalist_level as f32 - 1.0) * 0.1;
+        let entry = self.get_fauna_entry(species);
+        entry.observation_time += obs_time * skill_bonus;
+        entry.encounter_count += 1;
+
+        // Check for tier advancement
+        if let Some(next_tier) = entry.tier.next() {
+            if entry.observation_time >= next_tier.observation_time_required() {
+                self.advance_fauna_tier(species);
+            }
+        }
+    }
+
+    /// Record a plant sighting from the HUD system
+    pub fn on_plant_sighted(&mut self, species: FloraSpecies, position: glam::Vec3, was_harvested: bool) {
+        let pos_arr = [position.x, position.y, position.z];
+
+        let entry = self.get_flora_entry(species);
+        if entry.first_seen.is_none() {
+            entry.first_seen = Some(0.0);
+            entry.first_seen_location = Some(pos_arr);
+        }
+
+        if entry.tier == DiscoveryTier::Unknown {
+            self.advance_flora_tier(species);
+        }
+
+        let obs_time = if was_harvested { 10.0 } else { 0.5 };
+        let skill_bonus = 1.0 + (self.naturalist_level as f32 - 1.0) * 0.1;
+        let entry = self.get_flora_entry(species);
+        entry.observation_time += obs_time * skill_bonus;
+        entry.encounter_count += 1;
+
+        if let Some(next_tier) = entry.tier.next() {
+            if entry.observation_time >= next_tier.observation_time_required() {
+                self.advance_flora_tier(species);
+            }
+        }
+    }
 }
 
 impl Default for FaunaKnowledge {

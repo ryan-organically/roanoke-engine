@@ -279,7 +279,7 @@ fn alpine_grass_config() -> GrassSpeciesConfig {
 pub fn should_spawn_grass(
     biome: &str,
     height: f32,
-    moisture: f32,
+    _moisture: f32,
     is_water: bool,
     is_rock: bool,
 ) -> bool {

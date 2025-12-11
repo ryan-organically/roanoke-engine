@@ -440,6 +440,30 @@ impl SystemsManager {
         eco_mod * weather_mod
     }
 
+    /// Get ecology spawn modifier for a specific position
+    /// Uses ecosystem health to modify spawn rates
+    pub fn get_ecology_spawn_modifier(&self, position: glam::Vec3) -> f32 {
+        if let Some(region) = self.ecology_manager.get_region_at_vec3(position) {
+            region.health_rating().spawn_modifier()
+        } else {
+            1.0 // Default if no region
+        }
+    }
+
+    /// Get the global ecology modifier (average across world)
+    pub fn get_global_ecology_modifier(&self) -> f32 {
+        let health = self.ecology_manager.world_health();
+        // Map 0.0-1.0 health to 0.4-1.3 spawn modifier
+        0.4 + health * 0.9
+    }
+
+    /// Record plant harvesting (affects ecology)
+    pub fn record_harvest(&mut self, species: crate::flora::FloraSpecies, position: glam::Vec3) {
+        self.ecology_manager.record_harvest(species, position);
+        self.encyclopedia.on_plant_sighted(species, position, true);
+        self.stats.plants_harvested += 1;
+    }
+
     /// Get current season
     pub fn current_season(&self) -> Season {
         self.encyclopedia.current_season

@@ -113,8 +113,6 @@ pub fn find_village_sites(
             // Check if this is a good village site
             if let Some(score) = evaluate_village_site(x, z, world_seed, &noise) {
                 if score > 0.7 { // High quality site threshold
-                    let pos = Vec3::new(x, 0.0, z);
-
                     // Check spacing from existing sites
                     let too_close = sites.iter().any(|s: &Vec3| {
                         let dx = s.x - x;
@@ -144,7 +142,7 @@ fn evaluate_village_site(x: f32, z: f32, seed: u32, noise: &Perlin) -> Option<f3
     let mut score = 0.5;
 
     // Get terrain height
-    let (height, biome) = get_height_at(x, z, seed);
+    let (height, _biome) = get_height_at(x, z, seed);
 
     // Must be above water
     if height < 3.0 {

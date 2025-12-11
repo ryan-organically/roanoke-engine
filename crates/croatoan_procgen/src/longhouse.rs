@@ -274,7 +274,7 @@ fn generate_arch_frame(builder: &mut MeshBuilder, z: f32, width: f32, height: f3
 
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
-        let angle = std::f32::consts::PI * t;
+        let _angle = std::f32::consts::PI * t;
 
         // Parabolic arch shape
         let x = -half_width + width * t;
@@ -429,7 +429,7 @@ fn generate_flat_end(builder: &mut MeshBuilder, z: f32, recipe: &LonghouseRecipe
     );
 }
 
-fn generate_side_doorway(builder: &mut MeshBuilder, pos: Vec3, recipe: &LonghouseRecipe) {
+fn generate_side_doorway(builder: &mut MeshBuilder, pos: Vec3, _recipe: &LonghouseRecipe) {
     let door_width = 0.8;
     let door_height = 1.6;
 

@@ -167,13 +167,18 @@ impl LowlandBunch {
 
         // --- Tree (if beyond treeline) ---
         if self.has_tree {
-            // Offset tree slightly from center for natural look
-            let tree_offset_x = noise.get([self.seed as f64 * 0.2, 300.0]) as f32 * 3.0;
-            let tree_offset_z = noise.get([self.seed as f64 * 0.2, 400.0]) as f32 * 3.0;
+            // Spread tree more randomly - not just slightly offset from center
+            let tree_offset_x = noise.get([self.seed as f64 * 0.2, 300.0]) as f32 * 15.0;
+            let tree_offset_z = noise.get([self.seed as f64 * 0.2, 400.0]) as f32 * 15.0;
 
             let tx = self.center.x + tree_offset_x;
             let tz = self.center.z + tree_offset_z;
             let (th, _) = get_height_at(tx, tz, world_seed);
+
+            // Skip if terrain too low - prevents floating trees near water
+            if th < 2.0 {
+                return instances;
+            }
 
             // Scale increases with biome factor (deeper = taller)
             // Large variance: trees range from small saplings (2.0) to massive old-growth (25.0)
@@ -183,10 +188,14 @@ impl LowlandBunch {
 
             let tree_angle = noise.get([tx as f64 * 0.5, tz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
 
+            // Y-anchor: proportional sink based on terrain height
+            // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
+            let sink_amount = ((th - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
+
             let tree_transform = Mat4::from_scale_rotation_translation(
                 Vec3::splat(tree_scale),
                 Quat::from_rotation_y(tree_angle),
-                Vec3::new(tx, th - 1.0, tz),
+                Vec3::new(tx, th - sink_amount, tz),
             );
             instances.trees.push(tree_transform);
         }
@@ -235,7 +244,7 @@ pub fn generate_trees_for_chunk(
     // Bunches are placed on a jittered grid for even distribution
     // Density: ~1 bunch per 400 sq meters (20m grid with filtering)
 
-    let bunch_grid_size = 32.0; // Increased from 18 for FPS (fewer bunches)
+    let bunch_grid_size = 64.0; // Larger grid = fewer trees = better FPS
     let bunches_per_row = (chunk_size / bunch_grid_size).ceil() as i32;
 
     for bz in 0..bunches_per_row {
@@ -244,9 +253,9 @@ pub fn generate_trees_for_chunk(
             let grid_x = offset_x + (bx as f32 + 0.5) * bunch_grid_size;
             let grid_z = offset_z + (bz as f32 + 0.5) * bunch_grid_size;
 
-            // Add jitter to break up grid pattern
-            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.4;
-            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.4;
+            // MASSIVE jitter to truly scatter trees - no clustering pattern
+            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.9;
+            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.9;
 
             let world_x = grid_x + jitter_x;
             let world_z = grid_z + jitter_z;
@@ -329,18 +338,22 @@ pub fn generate_trees_for_chunk(
     // PHASE 2: Additional Scattered Trees (Forest Zone)
     //=========================================================================
     // Dense forest gets extra trees beyond what bunches provide
-    // These fill in gaps and create denser canopy
+    // Reduced density for better FPS
 
-    let scattered_tree_density = 0.0002; // Reduced from 0.0008 for FPS
+    let scattered_tree_density = 0.0002; // Reduced for FPS
     let potential_scattered = (chunk_size * chunk_size * scattered_tree_density) as u32;
 
     for i in 0..potential_scattered {
-        // Position from noise
-        let rand_x = noise.get([i as f64 * 0.1, 700.0]) as f32;
-        let rand_z = noise.get([i as f64 * 0.1, 800.0]) as f32;
+        // Position from noise - use prime multipliers for better distribution
+        let rand_x = noise.get([i as f64 * 0.137, 700.0]) as f32;
+        let rand_z = noise.get([i as f64 * 0.149, 800.0]) as f32;
 
-        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
-        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+        // Additional jitter noise for truly random feel
+        let jitter_x = noise.get([i as f64 * 0.31, 900.0]) as f32 * 20.0;
+        let jitter_z = noise.get([i as f64 * 0.37, 1000.0]) as f32 * 20.0;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size + jitter_x;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size + jitter_z;
 
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
@@ -361,6 +374,11 @@ pub fn generate_trees_for_chunk(
 
         // Upper treeline check
         if height > UPPER_TREELINE_END {
+            continue;
+        }
+
+        // Skip low terrain to prevent floating
+        if height < 2.5 {
             continue;
         }
 
@@ -388,10 +406,13 @@ pub fn generate_trees_for_chunk(
         let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32 * 12.0;
         let scale = (base_scale + scale_var).max(2.0);
 
+        // Y-anchor: proportional sink to prevent floating
+        let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
+
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
             Quat::from_rotation_y(angle),
-            Vec3::new(world_x, height - 1.0, world_z),
+            Vec3::new(world_x, height - sink_amount, world_z),
         );
 
         all_instances.push(transform);
@@ -423,7 +444,7 @@ pub fn generate_bunches_for_chunk(
     let noise = Perlin::new(seed + 777);
     let mut bunches = Vec::new();
 
-    let bunch_grid_size = 32.0; // Increased from 18 for FPS
+    let bunch_grid_size = 64.0; // Larger grid = fewer bunches = better FPS
     let bunches_per_row = (chunk_size / bunch_grid_size).ceil() as i32;
 
     for bz in 0..bunches_per_row {
@@ -431,8 +452,9 @@ pub fn generate_bunches_for_chunk(
             let grid_x = offset_x + (bx as f32 + 0.5) * bunch_grid_size;
             let grid_z = offset_z + (bz as f32 + 0.5) * bunch_grid_size;
 
-            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.4;
-            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.4;
+            // MASSIVE jitter to truly scatter - no clustering pattern
+            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * bunch_grid_size * 0.9;
+            let jitter_z = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1 + 100.0]) as f32 * bunch_grid_size * 0.9;
 
             let world_x = grid_x + jitter_x;
             let world_z = grid_z + jitter_z;
