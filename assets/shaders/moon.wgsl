@@ -1,4 +1,4 @@
-// Moon Billboard Shader - renders a soft, ethereal moon
+// Moon Billboard Shader - renders a soft, ethereal moon with horizon shimmer
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -7,7 +7,7 @@ struct Uniforms {
     moon_color: vec3<f32>,
     phase: f32,  // 0 = new, 0.5 = full, 1 = new again
     camera_right: vec3<f32>,
-    _padding2: f32,
+    moon_elevation: f32,  // For horizon shimmer effect
     camera_up: vec3<f32>,
     time: f32,
 }
@@ -62,63 +62,83 @@ fn noise2(p: vec2<f32>) -> f32 {
                    hash2(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
 }
 
+// Simple hash for shimmer effect
+fn shimmer_hash(p: vec2<f32>) -> f32 {
+    let p2 = fract(p * 0.3183099 + vec2<f32>(0.71, 0.113));
+    return fract(sin(dot(p2, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Distance from center of quad (same technique as sun shader)
     let center = vec2<f32>(0.5, 0.5);
-    let dist = distance(in.uv, center) * 2.0;
+    let dist = distance(in.uv, center) * 2.0; // 0 at center, 1 at edge
 
-    // Moon disk and glow radii
-    let moon_radius = 0.35;
-    let corona_radius = 1.0;
+    // Moon disk and glow radii (matching sun's structure)
+    let core_radius = 0.3;    // Moon disk
+    let corona_radius = 1.0;  // Glow extends to edge
+
+    // Horizon shimmer effect - stronger when moon is near horizon (elevation 0-0.2)
+    let horizon_factor = 1.0 - smoothstep(0.0, 0.25, uniforms.moon_elevation);
+
+    // Animated shimmer pattern (slower, more ethereal than sun)
+    let shimmer_uv = in.uv * 8.0 + uniforms.time * 0.3;
+    let shimmer = shimmer_hash(shimmer_uv) * 0.12 + shimmer_hash(shimmer_uv * 1.7 + 2.3) * 0.08;
+    let shimmer_intensity = shimmer * horizon_factor;
 
     // Silvery moon colors
-    let moon_bright = vec3<f32>(0.95, 0.95, 1.0);    // Bright silver-white
-    let moon_mid = vec3<f32>(0.85, 0.87, 0.92);      // Slightly blue-grey
-    let moon_dark = vec3<f32>(0.6, 0.62, 0.68);      // Darker maria regions
-    let glow_color = vec3<f32>(0.7, 0.75, 0.9);      // Cool silvery-blue glow
+    let moon_bright = vec3<f32>(0.95, 0.95, 1.0);
+    let moon_mid = vec3<f32>(0.85, 0.87, 0.92);
+    let moon_dark = vec3<f32>(0.6, 0.62, 0.68);
+    let glow_color = vec3<f32>(0.7, 0.75, 0.9);
 
-    if (dist < moon_radius) {
+    if dist < core_radius {
         // Moon surface with subtle texture
         let surface_uv = (in.uv - center) * 8.0;
 
-        // Create subtle surface variation (maria/highlands)
+        // Surface variation (maria/highlands)
         let surface_noise = noise2(surface_uv * 2.0) * 0.5 +
                            noise2(surface_uv * 4.0) * 0.25 +
                            noise2(surface_uv * 8.0) * 0.125;
 
-        // Limb darkening - edges of moon are slightly darker
-        let limb_factor = 1.0 - pow(dist / moon_radius, 2.0) * 0.15;
+        // Limb darkening
+        let core_blend = dist / core_radius;
+        let limb_factor = 1.0 - core_blend * core_blend * 0.15;
 
-        // Mix surface colors based on noise
+        // Mix surface colors
         var surface_color = mix(moon_mid, moon_bright, surface_noise * 0.6);
 
-        // Add some darker "maria" patches
+        // Darker maria patches
         let maria_noise = noise2(surface_uv * 1.5 + vec2<f32>(3.7, 2.1));
-        if (maria_noise > 0.55) {
+        if maria_noise > 0.55 {
             surface_color = mix(surface_color, moon_dark, (maria_noise - 0.55) * 1.5);
         }
 
         surface_color *= limb_factor;
 
-        // Add subtle bright rim at the edge (atmospheric scattering effect)
-        let rim_factor = smoothstep(moon_radius * 0.7, moon_radius, dist);
+        // Bright rim at edge
+        let rim_factor = smoothstep(core_radius * 0.7, core_radius, dist);
         surface_color = mix(surface_color, moon_bright * 1.1, rim_factor * 0.3);
 
+        // Add shimmer near horizon
+        surface_color = surface_color * (1.0 + shimmer_intensity * 0.25);
+
         return vec4<f32>(surface_color, 1.0);
-    } else if (dist < corona_radius) {
-        // Ethereal lunar corona - soft atmospheric glow
-        let corona_blend = (dist - moon_radius) / (corona_radius - moon_radius);
+    } else if dist < corona_radius {
+        // Ethereal lunar corona with shimmer
+        let corona_blend = (dist - core_radius) / (corona_radius - core_radius);
+        var glow = exp(-corona_blend * 4.0);
 
-        // Softer, more gradual falloff than the sun - moon glow is gentler
-        let glow_intensity = exp(-corona_blend * 3.5) * 0.6;
+        // Enhanced glow at horizon with shimmer
+        let horizon_glow_boost = horizon_factor * 0.3;
+        glow = glow * (1.0 + horizon_glow_boost + shimmer_intensity);
 
-        // Add subtle noise to break up the perfect circle
-        let glow_uv = (in.uv - center) * 4.0;
-        let glow_noise = noise2(glow_uv + vec2<f32>(uniforms.time * 0.02, 0.0)) * 0.15;
-        let final_intensity = glow_intensity * (1.0 + glow_noise);
+        // Slightly warmer color shift near horizon (atmospheric effect)
+        let horizon_glow_color = mix(glow_color, vec3<f32>(0.85, 0.75, 0.7), horizon_factor * 0.3);
 
-        return vec4<f32>(glow_color, final_intensity);
+        return vec4<f32>(horizon_glow_color, glow * 0.6);
+    } else {
+        // Outside moon - discard (matching sun shader structure exactly)
+        discard;
     }
-
-    discard;
 }

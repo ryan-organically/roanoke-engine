@@ -15,13 +15,41 @@ use crate::pipeline_validation::{sanitize_float, sanitize_vec3};
 /// Maximum animal instances per species per frame
 const MAX_INSTANCES_PER_SPECIES: usize = 500;
 
-/// Vertex data for animal models
+/// Maximum joints supported for skeletal animation
+pub const MAX_JOINTS: usize = 64;
+
+/// Vertex data for animal models (with skinning support)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct AnimalVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+}
+
+/// Skinned vertex data for animal models with skeletal animation
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SkinnedAnimalVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+    /// Joint indices (up to 4 influencing joints)
+    pub joints: [u32; 4], // Using u32 for shader compatibility
+    /// Joint weights (should sum to 1.0)
+    pub weights: [f32; 4],
+}
+
+impl SkinnedAnimalVertex {
+    pub fn from_unskinned(v: &AnimalVertex) -> Self {
+        Self {
+            position: v.position,
+            normal: v.normal,
+            uv: v.uv,
+            joints: [0, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0], // All weight on first joint
+        }
+    }
 }
 
 /// Instance data for a single animal
@@ -51,13 +79,50 @@ impl AnimalInstance {
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    light_view_proj: [[f32; 4]; 4],  // Shadow mapping
     camera_pos: [f32; 3],
     time: f32,
+    light_dir: [f32; 3],
+    ambient_dimming: f32,
     fog_color: [f32; 3],
     fog_start: f32,
     fog_end: f32,
     fog_density: f32,
-    _padding: [f32; 2],
+    shadow_strength: f32,
+    rain_wetness: f32,
+}
+
+/// Skeleton data stored for GPU animation
+#[derive(Clone)]
+pub struct SkeletonGpu {
+    /// Joint inverse bind matrices (pre-multiplied transforms)
+    pub inverse_bind_matrices: Vec<[[f32; 4]; 4]>,
+    /// Joint parent indices (None for root joints)
+    pub parents: Vec<Option<usize>>,
+    /// Joint local transforms (rest pose)
+    pub local_transforms: Vec<([[f32; 4]; 4], [f32; 4], [f32; 3])>, // (matrix, rotation quat, scale)
+    /// Root joint indices
+    pub roots: Vec<usize>,
+}
+
+/// Animation clip stored for GPU animation
+#[derive(Clone)]
+pub struct AnimationGpu {
+    pub name: String,
+    pub duration: f32,
+    /// Per-joint keyframes: (times, translations, rotations, scales)
+    pub joint_keyframes: Vec<JointKeyframes>,
+}
+
+/// Keyframes for a single joint
+#[derive(Clone, Default)]
+pub struct JointKeyframes {
+    pub translation_times: Vec<f32>,
+    pub translations: Vec<[f32; 3]>,
+    pub rotation_times: Vec<f32>,
+    pub rotations: Vec<[f32; 4]>,
+    pub scale_times: Vec<f32>,
+    pub scales: Vec<[f32; 3]>,
 }
 
 /// GPU mesh data for a single animal species
@@ -72,6 +137,16 @@ pub struct AnimalMeshGpu {
     pub texture_bind_group: Option<BindGroup>,
     /// Whether this species has a texture
     pub has_texture: bool,
+    /// Whether this mesh has skinning data
+    pub is_skinned: bool,
+    /// Skeleton for this species (if animated)
+    pub skeleton: Option<SkeletonGpu>,
+    /// Animation clips for this species
+    pub animations: Vec<AnimationGpu>,
+    /// Joint matrix buffer for GPU skinning
+    pub joint_buffer: Option<Buffer>,
+    /// Joint bind group
+    pub joint_bind_group: Option<BindGroup>,
 }
 
 /// Pipeline for rendering animal models
@@ -81,6 +156,10 @@ pub struct AnimalModelPipeline {
     camera_bind_group: BindGroup,
     /// Texture bind group layout (for per-species textures)
     texture_bind_group_layout: BindGroupLayout,
+    /// Shadow bind group layout
+    shadow_bind_group_layout: BindGroupLayout,
+    /// Shadow bind group (created when shadow map is bound)
+    shadow_bind_group: Option<BindGroup>,
     /// Shared texture sampler
     sampler: Sampler,
     /// Default white texture for untextured models
@@ -138,6 +217,32 @@ impl AnimalModelPipeline {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create bind group layout for shadow map
+        let shadow_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Animal Model Shadow Layout"),
+                entries: &[
+                    // Shadow texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Shadow sampler (comparison)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                         count: None,
                     },
                 ],
@@ -212,10 +317,10 @@ impl AnimalModelPipeline {
             ],
         });
 
-        // Create pipeline layout (now with texture bind group)
+        // Create pipeline layout (camera, texture, shadow)
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Animal Model Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout, &shadow_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -357,6 +462,8 @@ impl AnimalModelPipeline {
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
+            shadow_bind_group_layout,
+            shadow_bind_group: None,  // Created when shadow map is bound
             sampler,
             default_texture,
             default_texture_view,
@@ -364,6 +471,29 @@ impl AnimalModelPipeline {
             species_meshes: HashMap::new(),
             instance_buffers: HashMap::new(),
         }
+    }
+
+    /// Bind the shadow map resources - must be called before rendering
+    pub fn bind_shadow_map(
+        &mut self,
+        device: &Device,
+        shadow_view: &TextureView,
+        shadow_sampler: &Sampler,
+    ) {
+        self.shadow_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Animal Model Shadow Bind Group"),
+            layout: &self.shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
+            ],
+        }));
     }
 
     /// Upload mesh data for a species (without texture)
@@ -504,6 +634,11 @@ impl AnimalModelPipeline {
                 texture_view,
                 texture_bind_group,
                 has_texture,
+                is_skinned: false,
+                skeleton: None,
+                animations: Vec::new(),
+                joint_buffer: None,
+                joint_bind_group: None,
             },
         );
     }
@@ -602,6 +737,85 @@ impl AnimalModelPipeline {
         }
     }
 
+    /// Upload skeleton and animation data for a species
+    /// This stores the animation data for later sampling
+    pub fn upload_species_animation(
+        &mut self,
+        species_name: &str,
+        skeleton: SkeletonGpu,
+        animations: Vec<AnimationGpu>,
+    ) {
+        if let Some(mesh) = self.species_meshes.get_mut(species_name) {
+            let anim_names: Vec<&str> = animations.iter().map(|a| a.name.as_str()).collect();
+            log::info!(
+                "[AnimalModel] Uploaded skeleton ({} joints) and {} animations for '{}': {:?}",
+                skeleton.inverse_bind_matrices.len(),
+                animations.len(),
+                species_name,
+                anim_names
+            );
+            mesh.skeleton = Some(skeleton);
+            mesh.animations = animations;
+            mesh.is_skinned = true;
+        } else {
+            log::warn!(
+                "[AnimalModel] Cannot upload animation for '{}': mesh not found",
+                species_name
+            );
+        }
+    }
+
+    /// Get animation names for a species
+    pub fn get_animation_names(&self, species_name: &str) -> Vec<String> {
+        self.species_meshes
+            .get(species_name)
+            .map(|mesh| mesh.animations.iter().map(|a| a.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Check if a species has animations
+    pub fn has_animations(&self, species_name: &str) -> bool {
+        self.species_meshes
+            .get(species_name)
+            .map(|mesh| !mesh.animations.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Sample an animation for a species and return root joint transform offset
+    /// This is a simplified animation that returns a transform modifier based on the root bone
+    /// For full skeletal animation, GPU skinning would be needed
+    pub fn sample_animation_root_transform(
+        &self,
+        species_name: &str,
+        animation_name: &str,
+        time: f32,
+    ) -> Option<(Vec3, glam::Quat)> {
+        let mesh = self.species_meshes.get(species_name)?;
+        let animation = mesh.animations.iter().find(|a| a.name.eq_ignore_ascii_case(animation_name))?;
+
+        // Get the first root joint's keyframes (usually the main body bone)
+        if animation.joint_keyframes.is_empty() {
+            return None;
+        }
+
+        let t = if animation.duration > 0.001 {
+            time % animation.duration
+        } else {
+            0.0
+        };
+
+        // Sample the root joint (index 0 is typically root/pelvis)
+        let keyframes = &animation.joint_keyframes[0];
+
+        // Sample translation
+        let translation = sample_vec3_keyframes(&keyframes.translation_times, &keyframes.translations, t);
+
+        // Sample rotation
+        let rotation = sample_quat_keyframes(&keyframes.rotation_times, &keyframes.rotations, t);
+
+        Some((translation, rotation))
+    }
+
     /// Upload instance data for a species
     pub fn upload_instances(
         &mut self,
@@ -658,30 +872,49 @@ impl AnimalModelPipeline {
         &self,
         queue: &Queue,
         view_proj: &Mat4,
+        light_view_proj: &Mat4,
         camera_pos: Vec3,
         time: f32,
+        light_dir: Vec3,
         fog_color: Vec3,
         fog_start: f32,
         fog_end: f32,
         fog_density: f32,
+        ambient_dimming: f32,
+        shadow_strength: f32,
+        rain_wetness: f32,
     ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
             camera_pos: camera_pos.to_array(),
             time,
+            light_dir: light_dir.to_array(),
+            ambient_dimming,
             fog_color: fog_color.to_array(),
             fog_start,
             fog_end,
             fog_density,
-            _padding: [0.0; 2],
+            shadow_strength,
+            rain_wetness,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
     /// Render all animal models
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        // Skip rendering if shadow map not bound
+        let shadow_bind_group = match &self.shadow_bind_group {
+            Some(bg) => bg,
+            None => {
+                log::trace!("Animal model render skipped: shadow map not bound");
+                return;
+            }
+        };
+
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        render_pass.set_bind_group(2, shadow_bind_group, &[]);
 
         // Render each species that has both mesh and instances
         for (species_name, mesh) in &self.species_meshes {
@@ -719,4 +952,68 @@ impl AnimalModelPipeline {
     pub fn total_instance_count(&self) -> u32 {
         self.instance_buffers.values().map(|(_, count)| count).sum()
     }
+}
+
+/// Sample Vec3 keyframes at a given time
+fn sample_vec3_keyframes(times: &[f32], values: &[[f32; 3]], t: f32) -> Vec3 {
+    if times.is_empty() || values.is_empty() {
+        return Vec3::ZERO;
+    }
+
+    if times.len() == 1 || t <= times[0] {
+        return Vec3::from_array(values[0]);
+    }
+
+    if t >= *times.last().unwrap() {
+        return Vec3::from_array(*values.last().unwrap());
+    }
+
+    // Find the two keyframes to interpolate between
+    let mut i = 0;
+    while i < times.len() - 1 && times[i + 1] < t {
+        i += 1;
+    }
+
+    let t0 = times[i];
+    let t1 = times[i + 1];
+    let factor = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+
+    let v0 = Vec3::from_array(values[i]);
+    let v1 = Vec3::from_array(values[i + 1]);
+
+    v0.lerp(v1, factor)
+}
+
+/// Sample quaternion keyframes at a given time (spherical interpolation)
+fn sample_quat_keyframes(times: &[f32], values: &[[f32; 4]], t: f32) -> glam::Quat {
+    if times.is_empty() || values.is_empty() {
+        return glam::Quat::IDENTITY;
+    }
+
+    if times.len() == 1 || t <= times[0] {
+        let v = values[0];
+        return glam::Quat::from_xyzw(v[0], v[1], v[2], v[3]);
+    }
+
+    if t >= *times.last().unwrap() {
+        let v = values.last().unwrap();
+        return glam::Quat::from_xyzw(v[0], v[1], v[2], v[3]);
+    }
+
+    // Find the two keyframes to interpolate between
+    let mut i = 0;
+    while i < times.len() - 1 && times[i + 1] < t {
+        i += 1;
+    }
+
+    let t0 = times[i];
+    let t1 = times[i + 1];
+    let factor = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+
+    let v0 = values[i];
+    let v1 = values[i + 1];
+    let q0 = glam::Quat::from_xyzw(v0[0], v0[1], v0[2], v0[3]);
+    let q1 = glam::Quat::from_xyzw(v1[0], v1[1], v1[2], v1[3]);
+
+    q0.slerp(q1, factor)
 }

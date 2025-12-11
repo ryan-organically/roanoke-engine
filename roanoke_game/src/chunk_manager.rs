@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use glam::Vec3;
 use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, DetritusPipeline, BuildingPipeline, ChunkBounds};
+use croatoan_wfc::CornFieldBounds;
 
 /// Coordinates for a chunk in chunk space (not world space)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -38,6 +39,10 @@ pub struct LoadedChunk {
 pub struct ChunkRequest {
     pub coord: ChunkCoord,
     pub seed: u32,
+    /// Village center positions for tree clearing (forest clearing around settlements)
+    pub village_centers: Vec<Vec3>,
+    /// Corn field exclusion zones (no rocks spawn in these areas)
+    pub corn_field_exclusions: Vec<CornFieldBounds>,
 }
 
 /// Manages chunk loading/unloading based on player position
@@ -64,7 +69,9 @@ impl ChunkManager {
 
     /// Update which chunks should be loaded based on player position
     /// Returns chunks to request for generation
-    pub fn update(&mut self, player_pos: Vec3, seed: u32) -> Vec<ChunkRequest> {
+    /// `village_centers` is used for tree clearing around settlements
+    /// `corn_field_exclusions` prevents rocks from spawning in crop fields
+    pub fn update(&mut self, player_pos: Vec3, seed: u32, village_centers: &[Vec3], corn_field_exclusions: &[CornFieldBounds]) -> Vec<ChunkRequest> {
         let new_player_chunk = ChunkCoord::from_world_pos(player_pos, self.chunk_size);
 
         // Only update if player moved to a different chunk
@@ -118,7 +125,12 @@ impl ChunkManager {
         // Mark as loading and create requests
         for (coord, _) in pending_coords {
             self.loading_chunks.insert(coord);
-            requests.push(ChunkRequest { coord, seed });
+            requests.push(ChunkRequest {
+                coord,
+                seed,
+                village_centers: village_centers.to_vec(),
+                corn_field_exclusions: corn_field_exclusions.to_vec(),
+            });
         }
 
         if !requests.is_empty() {

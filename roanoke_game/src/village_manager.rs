@@ -476,6 +476,27 @@ impl VillageManager {
         self.villages.len()
     }
 
+    /// Get all village center positions for tree clearing calculations
+    /// Used by tree generation to create forest clearings around settlements
+    pub fn get_village_centers(&self) -> Vec<Vec3> {
+        self.villages.iter().map(|v| v.center).collect()
+    }
+
+    /// Get all corn field boundaries for rock exclusion
+    /// Rocks won't spawn inside these areas (tilled/cultivated ground)
+    pub fn get_corn_field_bounds(&self) -> Vec<croatoan_wfc::CornFieldBounds> {
+        let mut bounds = Vec::new();
+        for village in &self.villages {
+            for field in &village.layout.corn_fields {
+                bounds.push(croatoan_wfc::CornFieldBounds {
+                    center: glam::Vec2::new(field.position.x, field.position.z),
+                    half_size: glam::Vec2::new(field.size.x * 0.5, field.size.y * 0.5),
+                });
+            }
+        }
+        bounds
+    }
+
     /// Get total NPC count across all villages
     pub fn total_npc_count(&self) -> usize {
         self.npc_orbs.len()
@@ -884,5 +905,7 @@ pub fn structure_type_to_name(structure_type: VillageStructureType) -> &'static 
         VillageStructureType::FirePit => "village_fire_pit",
         VillageStructureType::CornPlant => "village_corn",
         VillageStructureType::PrayerSite => "village_prayer_site",
+        VillageStructureType::TilledGround => "village_tilled_ground",
+        VillageStructureType::FencePost => "village_fence_post",
     }
 }

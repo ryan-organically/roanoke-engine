@@ -73,6 +73,10 @@ pub struct CornField {
     pub size: Vec2,
     pub rows: u32,
     pub mounds: Vec<Vec3>,
+    /// Tilled ground tile positions (centers of tilled patches)
+    pub tilled_ground: Vec<Vec3>,
+    /// Fence post positions at the 4 corners
+    pub fence_posts: Vec<Vec3>,
 }
 
 /// Prayer site location
@@ -270,9 +274,9 @@ pub fn generate_village(center: Vec3, recipe: &VillageRecipe, village_id: Villag
         });
     }
 
-    // 3. Corn fields outside the longhouse ring
+    // 3. Corn fields outside the longhouse ring - GREATLY INCREASED SIZE
     let field_count = ((recipe.population as f32 / 12.0).ceil() as u32).max(2).min(5);
-    let field_radius = oval_radius + 35.0;
+    let field_radius = oval_radius + 50.0; // Pushed further out for larger fields
 
     for i in 0..field_count {
         let angle = (i as f32 / field_count as f32) * std::f32::consts::TAU
@@ -284,16 +288,17 @@ pub fn generate_village(center: Vec3, recipe: &VillageRecipe, village_id: Villag
             field_radius * angle.sin() * 0.8,
         );
 
-        let field_width = 18.0 + rng.next() * 12.0;
-        let field_depth = 12.0 + rng.next() * 8.0;
-        let rows = 6 + rng.next_int(4) as u32;
+        // GREATLY INCREASED FIELD SIZE (was 18-30 x 12-20, now 50-80 x 35-55)
+        let field_width = 50.0 + rng.next() * 30.0;
+        let field_depth = 35.0 + rng.next() * 20.0;
+        let rows = 12 + rng.next_int(8) as u32; // More rows for bigger fields
 
         // Generate mound positions (Three Sisters style)
         let mut mounds = Vec::new();
         let mound_spacing = field_width / rows as f32;
 
         for row in 0..rows {
-            let mounds_in_row = 4 + rng.next_int(3);
+            let mounds_in_row = 8 + rng.next_int(6); // More mounds per row
             for col in 0..mounds_in_row {
                 let mx = -field_width * 0.5 + row as f32 * mound_spacing + rng.next() * 0.5;
                 let mz = -field_depth * 0.5 + col as f32 * (field_depth / mounds_in_row as f32) + rng.next() * 0.5;
@@ -301,11 +306,36 @@ pub fn generate_village(center: Vec3, recipe: &VillageRecipe, village_id: Villag
             }
         }
 
+        // Generate tilled ground tiles covering the field area
+        let mut tilled_ground = Vec::new();
+        let tile_spacing = 2.5; // Tilled ground tiles every 2.5m
+        let tiles_x = (field_width / tile_spacing).ceil() as u32;
+        let tiles_z = (field_depth / tile_spacing).ceil() as u32;
+
+        for tx in 0..tiles_x {
+            for tz in 0..tiles_z {
+                let tile_x = -field_width * 0.5 + tx as f32 * tile_spacing + tile_spacing * 0.5;
+                let tile_z = -field_depth * 0.5 + tz as f32 * tile_spacing + tile_spacing * 0.5;
+                tilled_ground.push(center + offset + Vec3::new(tile_x, 0.0, tile_z));
+            }
+        }
+
+        // Generate wooden fence posts at the 4 corners (with small margin outside field)
+        let margin = 1.5; // Fence posts slightly outside field boundary
+        let fence_posts = vec![
+            center + offset + Vec3::new(-field_width * 0.5 - margin, 0.0, -field_depth * 0.5 - margin),
+            center + offset + Vec3::new( field_width * 0.5 + margin, 0.0, -field_depth * 0.5 - margin),
+            center + offset + Vec3::new( field_width * 0.5 + margin, 0.0,  field_depth * 0.5 + margin),
+            center + offset + Vec3::new(-field_width * 0.5 - margin, 0.0,  field_depth * 0.5 + margin),
+        ];
+
         layout.corn_fields.push(CornField {
             position: center + offset,
             size: Vec2::new(field_width, field_depth),
             rows,
             mounds,
+            tilled_ground,
+            fence_posts,
         });
     }
 
@@ -630,6 +660,141 @@ pub fn generate_corn_plant(stage: CornGrowthStage, seed: u32) -> CornPlantMesh {
     }
 
     CornPlantMesh { vertices, indices }
+}
+
+/// Tilled ground mesh (raised dark soil patch)
+#[derive(Debug, Clone)]
+pub struct TilledGroundMesh {
+    pub vertices: Vec<FirePitVertex>,
+    pub indices: Vec<u32>,
+}
+
+/// Generate tilled ground tile mesh
+pub fn generate_tilled_ground(seed: u32) -> TilledGroundMesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Create a raised, bumpy soil patch
+    let tile_size = 2.0; // 2m x 2m tile
+    let half = tile_size * 0.5;
+
+    // Dark brown tilled soil color
+    let soil_color = [0.28, 0.18, 0.10];
+
+    // Add main ground quad (slightly raised)
+    let base_height = 0.05;
+    let base_idx = vertices.len() as u32;
+
+    // Create a slightly uneven surface with furrows
+    let furrow_count = 4;
+    let furrow_spacing = tile_size / furrow_count as f32;
+
+    for i in 0..=furrow_count {
+        let z = -half + i as f32 * furrow_spacing;
+        let furrow_depth = if i % 2 == 0 { 0.0 } else { 0.06 }; // Alternating furrows
+
+        for j in 0..=furrow_count {
+            let x = -half + j as f32 * furrow_spacing;
+            let height = base_height + furrow_depth;
+
+            // Slight random variation based on seed
+            let rand_offset = ((seed.wrapping_add(i * 17 + j * 31)) % 100) as f32 / 1000.0;
+
+            vertices.push(FirePitVertex {
+                position: [x, height + rand_offset, z],
+                normal: [0.0, 1.0, 0.0],
+                uv: [(x + half) / tile_size, (z + half) / tile_size],
+                color: soil_color,
+            });
+        }
+    }
+
+    // Generate indices for the grid
+    let grid_size = furrow_count + 1;
+    for i in 0..furrow_count {
+        for j in 0..furrow_count {
+            let top_left = base_idx + (i * grid_size + j) as u32;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + grid_size as u32;
+            let bottom_right = bottom_left + 1;
+
+            // Two triangles per quad
+            indices.extend_from_slice(&[top_left, bottom_left, top_right]);
+            indices.extend_from_slice(&[top_right, bottom_left, bottom_right]);
+        }
+    }
+
+    TilledGroundMesh { vertices, indices }
+}
+
+/// Wooden fence post mesh
+#[derive(Debug, Clone)]
+pub struct FencePostMesh {
+    pub vertices: Vec<FirePitVertex>,
+    pub indices: Vec<u32>,
+}
+
+/// Generate wooden fence post mesh
+pub fn generate_fence_post(seed: u32) -> FencePostMesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Wood color with slight variation
+    let base_brown = [0.40, 0.28, 0.15];
+    let seed_var = ((seed % 100) as f32 / 100.0) * 0.08 - 0.04;
+    let wood_color = [
+        base_brown[0] + seed_var,
+        base_brown[1] + seed_var,
+        base_brown[2] + seed_var,
+    ];
+
+    // Main post: 0.15m diameter, 1.2m tall
+    let post_radius = 0.075;
+    let post_height = 1.2;
+
+    // Vertical post using box for simplicity
+    add_box(
+        &mut vertices,
+        &mut indices,
+        Vec3::new(0.0, post_height * 0.5, 0.0),
+        Vec3::new(post_radius * 2.0, post_height, post_radius * 2.0),
+        wood_color,
+    );
+
+    // Pointed top (pyramid)
+    let tip_height = 0.15;
+
+    // 4 triangular faces for pointed top
+    let top_y = post_height + tip_height;
+    let corners = [
+        Vec3::new(-post_radius, post_height, -post_radius),
+        Vec3::new( post_radius, post_height, -post_radius),
+        Vec3::new( post_radius, post_height,  post_radius),
+        Vec3::new(-post_radius, post_height,  post_radius),
+    ];
+    let tip = Vec3::new(0.0, top_y, 0.0);
+
+    for i in 0..4 {
+        let next = (i + 1) % 4;
+        let v0 = corners[i];
+        let v1 = corners[next];
+        let normal = (v1 - v0).cross(tip - v0).normalize();
+
+        let base = vertices.len() as u32;
+        vertices.push(FirePitVertex {
+            position: v0.to_array(), normal: normal.to_array(), uv: [0.0, 0.0], color: wood_color
+        });
+        vertices.push(FirePitVertex {
+            position: v1.to_array(), normal: normal.to_array(), uv: [1.0, 0.0], color: wood_color
+        });
+        vertices.push(FirePitVertex {
+            position: tip.to_array(), normal: normal.to_array(), uv: [0.5, 1.0], color: wood_color
+        });
+
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    FencePostMesh { vertices, indices }
 }
 
 // Helper functions for mesh building

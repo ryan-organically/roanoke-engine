@@ -187,20 +187,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Day factor: 0 = night, 1 = full day
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
 
-    // Night lighting from moon
-    let moon_color = vec3<f32>(0.12, 0.15, 0.2);
+    // Night lighting from moon - subtle, not washing out colors
+    let moon_color = vec3<f32>(0.06, 0.08, 0.12);
 
-    // Daytime sun color
+    // Daytime sun color (cooler for less yellow grass)
     let day_sun_color = mix(
-        vec3<f32>(1.8, 0.6, 0.2),  // Sunrise/sunset
-        vec3<f32>(1.4, 1.3, 1.1),  // Midday
+        vec3<f32>(1.4, 0.7, 0.4),  // Sunrise/sunset (less extreme orange)
+        vec3<f32>(1.1, 1.1, 1.0),  // Midday (more neutral)
         clamp(sun_elevation * 2.0, 0.0, 1.0)
     );
 
     let sun_color = mix(moon_color, day_sun_color, day_factor);
 
-    // Night ambient (very dark)
-    let night_ambient = vec3<f32>(0.02, 0.025, 0.04);
+    // Night ambient - dark with hint of blue, preserves grass color
+    let night_ambient = vec3<f32>(0.015, 0.02, 0.035);
 
     let day_ambient = mix(
         vec3<f32>(0.15, 0.10, 0.08),
@@ -225,8 +225,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow = shadow * 0.8 + 0.2;
     }
 
-    // Apply lighting
-    let diffuse_contribution = sun_color * n_dot_l * 2.0 * shadow;
+    // Apply lighting (reduced multiplier for darker grass)
+    let diffuse_contribution = sun_color * n_dot_l * 1.2 * shadow;
     let lighting = ambient_color + diffuse_contribution;
     var final_color = in.color * lighting;
 

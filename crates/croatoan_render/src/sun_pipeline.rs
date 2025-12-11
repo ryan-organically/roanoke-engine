@@ -7,9 +7,9 @@ struct SunUniforms {
     sun_world_pos: [f32; 3],
     sun_size: f32,
     sun_color: [f32; 3],
-    _padding: f32,
+    time: f32,
     camera_right: [f32; 3],
-    _padding2: f32,
+    sun_elevation: f32,  // For horizon shimmer effect
     camera_up: [f32; 3],
     _padding3: f32,
 }
@@ -101,7 +101,8 @@ impl SunPipeline {
     /// sun_dir: direction FROM sun TO scene (normalized)
     /// camera_pos: viewer position
     /// time_of_day: 0-24 hours (affects color)
-    pub fn update(&self, queue: &wgpu::Queue, view_proj: &Mat4, sun_dir: Vec3, camera_pos: Vec3, camera_right: Vec3, camera_up: Vec3, time_of_day: f32) {
+    /// elapsed_time: total elapsed time for animations
+    pub fn update(&self, queue: &wgpu::Queue, view_proj: &Mat4, sun_dir: Vec3, camera_pos: Vec3, camera_right: Vec3, camera_up: Vec3, time_of_day: f32, elapsed_time: f32) {
         // Position sun far away in opposite direction of sun_dir
         // sun_dir points toward scene, so -sun_dir points toward sun
         let sun_distance = 800.0; // Far enough to be behind everything
@@ -109,6 +110,9 @@ impl SunPipeline {
 
         // Sun size in world units (appears as ~30 degree disk)
         let sun_size = 40.0;
+
+        // Sun elevation (y component of sun direction, negative = below horizon)
+        let sun_elevation = -sun_dir.y;
 
         // Sun color based on time of day
         let hour = time_of_day;
@@ -128,9 +132,9 @@ impl SunPipeline {
             sun_world_pos: sun_world_pos.to_array(),
             sun_size,
             sun_color,
-            _padding: 0.0,
+            time: elapsed_time,
             camera_right: camera_right.to_array(),
-            _padding2: 0.0,
+            sun_elevation,
             camera_up: camera_up.to_array(),
             _padding3: 0.0,
         };

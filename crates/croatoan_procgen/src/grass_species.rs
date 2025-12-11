@@ -171,15 +171,15 @@ pub fn calculate_density(
 fn sea_oats_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.8, 1.4),   // Tall wispy stalks
+            height_range: (0.6, 2.2),   // Extended height variance for visual interest
             blade_segments: 5,
             curve_factor: 0.6,          // Graceful droop
             width_base: 0.04,
             width_tip: 0.01,
-            color_base: [0.65, 0.58, 0.40],  // Sandy tan base
-            color_tip: [0.75, 0.68, 0.50],   // Bleached straw tip
+            color_base: [0.45, 0.40, 0.28],  // Darker sandy tan base
+            color_tip: [0.55, 0.50, 0.35],   // Darker straw tip
         },
-        density_range: (0.08, 0.15),  // Sparse dune colonizer
+        density_range: (0.3, 0.6),    // Sparse but visible dune colonizer
         wind_amplitude: 1.2,
         wind_frequency: 1.3,
         clumping_factor: 0.6,         // Grows in tufts
@@ -197,10 +197,10 @@ fn cordgrass_config() -> GrassSpeciesConfig {
             curve_factor: 0.25,       // More upright growth
             width_base: 0.06,         // Thick robust blades
             width_tip: 0.015,         // Tapers to sturdy point
-            color_base: [0.20, 0.40, 0.15], // Dark marsh green
-            color_tip: [0.35, 0.55, 0.25],  // Lighter green
+            color_base: [0.10, 0.28, 0.08], // Darker marsh green
+            color_tip: [0.18, 0.38, 0.14],  // Darker tip
         },
-        density_range: (0.4, 0.6), // Dense monoculture stands
+        density_range: (3.0, 5.0), // Very dense monoculture stands
         wind_amplitude: 0.4,       // Stiff resistance
         wind_frequency: 0.8,       // Slow heavy sway
         clumping_factor: 0.3,      // Relatively uniform coverage
@@ -218,10 +218,10 @@ fn sawgrass_config() -> GrassSpeciesConfig {
             curve_factor: 0.35,         // Gentle flowing curve
             width_base: 0.04,
             width_tip: 0.01,
-            color_base: [0.25, 0.45, 0.18],  // Rich meadow green
-            color_tip: [0.40, 0.58, 0.28],   // Lighter green tip
+            color_base: [0.12, 0.30, 0.08],  // Darker meadow green
+            color_tip: [0.22, 0.42, 0.15],   // Darker green tip
         },
-        density_range: (0.2, 0.35),   // Moderate density
+        density_range: (2.0, 3.5),    // Dense meadow coverage
         wind_amplitude: 0.8,
         wind_frequency: 1.0,
         clumping_factor: 0.4,
@@ -230,7 +230,7 @@ fn sawgrass_config() -> GrassSpeciesConfig {
 }
 
 /// Forest Floor - Shade-adapted understory grass
-/// Reaches upward for light gaps
+/// Reaches upward for light gaps - very dense at treeline
 fn forest_floor_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
@@ -239,10 +239,10 @@ fn forest_floor_config() -> GrassSpeciesConfig {
             curve_factor: 0.45, // Pronounced droop in low light
             width_base: 0.05,   // Broader for light capture
             width_tip: 0.012,
-            color_base: [0.15, 0.42, 0.12], // Deep forest green
-            color_tip: [0.28, 0.58, 0.22],  // Slightly lighter
+            color_base: [0.08, 0.28, 0.06], // Darker deep forest green
+            color_tip: [0.15, 0.40, 0.12],  // Darker tip
         },
-        density_range: (0.3, 0.5), // Patchy, follows light gaps
+        density_range: (4.0, 6.0), // Very dense - lush forest floor
         wind_amplitude: 0.3,       // Sheltered by canopy
         wind_frequency: 0.7,       // Gentle movement
         clumping_factor: 0.6,      // Grows in patches
@@ -260,10 +260,10 @@ fn alpine_grass_config() -> GrassSpeciesConfig {
             curve_factor: 0.2,        // Wind-trained, mostly upright
             width_base: 0.035,
             width_tip: 0.008,
-            color_base: [0.30, 0.48, 0.20], // Mountain green
-            color_tip: [0.45, 0.60, 0.30],  // Alpine gold-green
+            color_base: [0.18, 0.32, 0.10], // Darker mountain green
+            color_tip: [0.28, 0.42, 0.18],  // Darker alpine green
         },
-        density_range: (0.2, 0.35), // Sparse, rocky soil
+        density_range: (1.5, 2.5),  // Moderate density in meadows
         wind_amplitude: 0.6,        // Constant exposure
         wind_frequency: 1.2,        // Persistent buffeting
         clumping_factor: 0.5,       // Grows in tussocks

@@ -63,6 +63,8 @@ use croatoan_procgen::{
     VillageId, VillageRecipe, VillageLayout, generate_village,
     LonghouseMesh, FirePitMesh, generate_fire_pit,
     CornGrowthStage, generate_corn_plant,
+    TilledGroundMesh, generate_tilled_ground,
+    FencePostMesh, generate_fence_post,
 };
 
 /// Village instance in the world
@@ -90,6 +92,8 @@ pub enum VillageStructureType {
     FirePit,
     CornPlant,
     PrayerSite,
+    TilledGround,
+    FencePost,
 }
 
 /// Find suitable village locations in a region
@@ -314,6 +318,50 @@ pub fn get_village_structures_for_chunk(
                 });
             }
         }
+
+        // Add tilled ground tiles under the corn field
+        for tile_pos in &field.tilled_ground {
+            if tile_pos.x >= chunk_min_x && tile_pos.x <= chunk_max_x &&
+               tile_pos.z >= chunk_min_z && tile_pos.z <= chunk_max_z {
+
+                let (height, _) = get_height_at(tile_pos.x, tile_pos.z, world_seed);
+                let tile_seed = (tile_pos.x as u32).wrapping_mul(17).wrapping_add(tile_pos.z as u32);
+
+                let transform = Mat4::from_translation(Vec3::new(tile_pos.x, height, tile_pos.z));
+
+                let mesh = generate_tilled_ground(tile_seed);
+                let (vertices, indices) = flatten_tilled_ground_mesh(&mesh);
+
+                structures.push(VillageStructure {
+                    structure_type: VillageStructureType::TilledGround,
+                    transform,
+                    mesh_vertices: vertices,
+                    mesh_indices: indices,
+                });
+            }
+        }
+
+        // Add fence posts at corners of the field
+        for (post_idx, post_pos) in field.fence_posts.iter().enumerate() {
+            if post_pos.x >= chunk_min_x - 2.0 && post_pos.x <= chunk_max_x + 2.0 &&
+               post_pos.z >= chunk_min_z - 2.0 && post_pos.z <= chunk_max_z + 2.0 {
+
+                let (height, _) = get_height_at(post_pos.x, post_pos.z, world_seed);
+                let post_seed = (post_pos.x as u32).wrapping_mul(13).wrapping_add(post_idx as u32);
+
+                let transform = Mat4::from_translation(Vec3::new(post_pos.x, height, post_pos.z));
+
+                let mesh = generate_fence_post(post_seed);
+                let (vertices, indices) = flatten_fence_post_mesh(&mesh);
+
+                structures.push(VillageStructure {
+                    structure_type: VillageStructureType::FencePost,
+                    transform,
+                    mesh_vertices: vertices,
+                    mesh_indices: indices,
+                });
+            }
+        }
     }
 
     structures
@@ -360,6 +408,46 @@ fn flatten_fire_pit_mesh(mesh: &FirePitMesh) -> (Vec<f32>, Vec<u32>) {
 }
 
 fn flatten_corn_mesh(mesh: &croatoan_procgen::CornPlantMesh) -> (Vec<f32>, Vec<u32>) {
+    let mut vertices = Vec::with_capacity(mesh.vertices.len() * 11);
+
+    for v in &mesh.vertices {
+        vertices.push(v.position[0]);
+        vertices.push(v.position[1]);
+        vertices.push(v.position[2]);
+        vertices.push(v.normal[0]);
+        vertices.push(v.normal[1]);
+        vertices.push(v.normal[2]);
+        vertices.push(v.uv[0]);
+        vertices.push(v.uv[1]);
+        vertices.push(v.color[0]);
+        vertices.push(v.color[1]);
+        vertices.push(v.color[2]);
+    }
+
+    (vertices, mesh.indices.clone())
+}
+
+fn flatten_tilled_ground_mesh(mesh: &TilledGroundMesh) -> (Vec<f32>, Vec<u32>) {
+    let mut vertices = Vec::with_capacity(mesh.vertices.len() * 11);
+
+    for v in &mesh.vertices {
+        vertices.push(v.position[0]);
+        vertices.push(v.position[1]);
+        vertices.push(v.position[2]);
+        vertices.push(v.normal[0]);
+        vertices.push(v.normal[1]);
+        vertices.push(v.normal[2]);
+        vertices.push(v.uv[0]);
+        vertices.push(v.uv[1]);
+        vertices.push(v.color[0]);
+        vertices.push(v.color[1]);
+        vertices.push(v.color[2]);
+    }
+
+    (vertices, mesh.indices.clone())
+}
+
+fn flatten_fence_post_mesh(mesh: &FencePostMesh) -> (Vec<f32>, Vec<u32>) {
     let mut vertices = Vec::with_capacity(mesh.vertices.len() * 11);
 
     for v in &mesh.vertices {

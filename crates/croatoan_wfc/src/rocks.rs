@@ -34,7 +34,32 @@
 use crate::mesh_gen::{get_height_at, get_biome_t};
 use crate::trees::generate_bunches_for_chunk;
 use noise::{NoiseFn, Perlin};
-use glam::{Mat4, Vec3, Quat};
+use glam::{Mat4, Vec2, Vec3, Quat};
+
+//=============================================================================
+// CORN FIELD EXCLUSION ZONES
+//=============================================================================
+
+/// Exclusion zone for corn fields - rocks won't spawn inside these areas
+#[derive(Debug, Clone, Copy)]
+pub struct CornFieldBounds {
+    pub center: Vec2,
+    pub half_size: Vec2, // Half width and half depth
+}
+
+impl CornFieldBounds {
+    /// Check if a world position is inside this corn field
+    pub fn contains(&self, x: f32, z: f32) -> bool {
+        let dx = (x - self.center.x).abs();
+        let dz = (z - self.center.y).abs(); // Vec2.y represents world Z
+        dx <= self.half_size.x && dz <= self.half_size.y
+    }
+}
+
+/// Check if a position is inside any corn field exclusion zone
+fn is_in_corn_field(x: f32, z: f32, exclusion_zones: &[CornFieldBounds]) -> bool {
+    exclusion_zones.iter().any(|zone| zone.contains(x, z))
+}
 
 //=============================================================================
 // ROCK TYPE DEFINITIONS
@@ -139,6 +164,7 @@ impl RockType {
 /// * `seed` - World seed for deterministic generation
 /// * `chunk_size` - Size of chunk in world units
 /// * `offset_x`, `offset_z` - Chunk position in world coordinates
+/// * `corn_field_exclusions` - Optional list of corn field boundaries to exclude rocks from
 ///
 /// # Returns
 /// Vector of (mesh_name, transform) tuples for all rocks in the chunk.
@@ -148,6 +174,19 @@ pub fn generate_rocks_for_chunk(
     chunk_size: f32,
     offset_x: f32,
     offset_z: f32,
+) -> Vec<(String, Mat4)> {
+    generate_rocks_for_chunk_with_exclusions(seed, chunk_size, offset_x, offset_z, &[])
+}
+
+/// Generate all rocks for a terrain chunk with corn field exclusion zones.
+///
+/// Rocks (pebbles, boulders, etc.) will not spawn inside corn field areas.
+pub fn generate_rocks_for_chunk_with_exclusions(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+    corn_field_exclusions: &[CornFieldBounds],
 ) -> Vec<(String, Mat4)> {
     let noise = Perlin::new(seed + 888);
     let pebble_noise = Perlin::new(seed + 889);
@@ -164,7 +203,7 @@ pub fn generate_rocks_for_chunk(
     let bunches = generate_bunches_for_chunk(seed, chunk_size, offset_x, offset_z);
 
     for bunch in &bunches {
-        let bunch_instances = bunch.generate(seed);
+        let bunch_instances = bunch.generate(seed, &[]); // No village centers needed for rocks
 
         // Add anchor rocks (large boulders)
         for transform in bunch_instances.large_rocks {
@@ -195,6 +234,11 @@ pub fn generate_rocks_for_chunk(
 
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
+
+        // Skip rocks inside corn fields
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
 
         let (height, _color) = get_height_at(world_x, world_z, seed);
         let biome_t = get_biome_t(world_x, world_z, seed);
@@ -285,6 +329,11 @@ pub fn generate_rocks_for_chunk(
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
 
+        // Skip pebbles inside corn fields
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
+
         let (height, _color) = get_height_at(world_x, world_z, seed);
 
         // Skip water (but include beach)
@@ -342,6 +391,11 @@ pub fn generate_rocks_for_chunk(
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
 
+        // Skip beach pebbles inside corn fields
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
+
         let (height, _color) = get_height_at(world_x, world_z, seed);
         let biome_t = get_biome_t(world_x, world_z, seed);
 
@@ -392,6 +446,11 @@ pub fn generate_rocks_for_chunk(
 
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
+
+        // Skip boulders inside corn fields
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
 
         let (height, _color) = get_height_at(world_x, world_z, seed);
         let biome_t = get_biome_t(world_x, world_z, seed);

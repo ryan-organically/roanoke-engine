@@ -15,9 +15,10 @@ pub struct SkyUniforms {
     cloud_color_shade: [f32; 3],
     cloud_scale: f32,
     moon_dir: [f32; 3],
-    _pad1: f32,
+    rain_intensity: f32,  // 0-1 rain amount for stormy sky
     wind_offset: [f32; 2],
-    _padding: [f32; 2],
+    ambient_dimming: f32, // 0-1 overall atmospheric dimming for moody look
+    _pad1: f32,
 }
 
 pub struct SkyPipeline {
@@ -38,15 +39,16 @@ impl SkyPipeline {
                 sun_dir: [0.0, 1.0, 0.0],
                 time: 0.0,
                 sun_color: [1.0, 1.0, 1.0],
-                cloud_coverage: 0.5,
-                cloud_color_base: [0.8, 0.4, 0.3], // Burnt Sienna-ish
-                cloud_density: 0.5,
-                cloud_color_shade: [0.9, 0.6, 0.6], // Pinkish
+                cloud_coverage: 0.6, // Default to slightly overcast for moody feel
+                cloud_color_base: [0.65, 0.68, 0.72], // Grey-blue clouds
+                cloud_density: 0.7,
+                cloud_color_shade: [0.45, 0.48, 0.52], // Darker grey undersides
                 cloud_scale: 1.0,
                 moon_dir: [0.0, -1.0, 0.0],
-                _pad1: 0.0,
+                rain_intensity: 0.0,
                 wind_offset: [0.0, 0.0],
-                _padding: [0.0; 2],
+                ambient_dimming: 0.15, // Slight ambient dim for moody default
+                _pad1: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -132,6 +134,8 @@ impl SkyPipeline {
         cloud_color_shade: Vec3,
         cloud_scale: f32,
         wind_offset: [f32; 2],
+        rain_intensity: f32,
+        ambient_dimming: f32,
     ) {
         let inv_view_proj = view_proj.inverse();
         let uniforms = SkyUniforms {
@@ -146,9 +150,10 @@ impl SkyPipeline {
             cloud_color_shade: cloud_color_shade.to_array(),
             cloud_scale,
             moon_dir: moon_dir.to_array(),
-            _pad1: 0.0,
+            rain_intensity,
             wind_offset,
-            _padding: [0.0; 2],
+            ambient_dimming,
+            _pad1: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

@@ -59,9 +59,9 @@ pub fn generate_vegetation_for_chunk(
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
-    // Moderate density for visible grass without FPS impact
-    // 0.8 * 256 * 256 = ~52K potential blades, filtering reduces to ~10-15K actual
-    let max_density = 0.8;
+    // High density for lush, bushy grass fields
+    // 8.0 * 256 * 256 = ~524K potential blades, filtering reduces based on biome
+    let max_density = 8.0;
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();
@@ -182,7 +182,7 @@ pub fn generate_vegetation_for_chunk_with_biome(
     moisture: f32,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
     let noise = Perlin::new(seed + 999);
-    let max_density = 0.8;  // Same as primary function
+    let max_density = 8.0;  // Same as primary function
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_vegetation_generation() {
-        let (positions, colors, indices) = generate_vegetation_for_chunk(
+        let (positions, colors, _heights, indices) = generate_vegetation_for_chunk(
             1587,
             32.0,
             0.0,

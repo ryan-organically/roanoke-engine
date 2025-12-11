@@ -20,6 +20,7 @@ pub mod light_shaft_pipeline;
 pub mod animal_orb_pipeline;
 pub mod animal_model_pipeline;
 pub mod foliage_pipeline;
+pub mod rain_pipeline;
 
 pub use terrain_pipeline::{TerrainPipeline, TerrainTextures};
 pub use grass_pipeline::GrassPipeline;
@@ -36,7 +37,8 @@ pub use building_pipeline::{BuildingPipeline, BuildingMesh, BuildingVertex};
 pub use viewmodel_pipeline::ViewModelPipeline;
 pub use light_shaft_pipeline::LightShaftPipeline;
 pub use animal_orb_pipeline::{AnimalOrbPipeline, OrbInstance};
-pub use animal_model_pipeline::{AnimalModelPipeline, AnimalVertex, AnimalInstance};
+pub use animal_model_pipeline::{AnimalModelPipeline, AnimalVertex, AnimalInstance, SkeletonGpu, AnimationGpu, JointKeyframes};
+pub use rain_pipeline::RainPipeline;
 pub use pipeline_validation::{PipelineError, PipelineResult, MeshValidator};
 pub use security::{SecurityError, SecurityResult, SecurityStatus, get_security_status};
 

@@ -386,16 +386,30 @@ pub struct ExtendedWeatherManager {
 
 impl ExtendedWeatherManager {
     pub fn new() -> Self {
+        // Default to moody, overcast weather
+        let moody_default = WeatherState {
+            weather_type: ExtendedWeatherType::Overcast,
+            wind_speed: 12.0,
+            wind_direction: PI / 3.0,
+            temperature: 62.0,
+            humidity: 0.75,
+            visibility: 0.7,
+            precipitation_rate: 0.0,
+            barometric_pressure: 29.6,
+            cloud_cover: 0.75,
+            time_in_state: 0.0,
+        };
+
         Self {
-            current_state: WeatherState::default(),
-            current_season: Season::Summer,
-            day_of_year: 180,
-            hour_of_day: 12.0,
+            current_state: moody_default.clone(),
+            current_season: Season::Fall, // Fall for moody atmosphere
+            day_of_year: 280,             // Late October
+            hour_of_day: 14.0,            // Afternoon
             active_storm: None,
             storm_history: Vec::new(),
-            target_state: WeatherState::default(),
+            target_state: moody_default,
             transition_progress: 1.0,
-            transition_duration: 300.0,
+            transition_duration: 1800.0,  // 30 minutes - much slower transitions
             forecasts: Vec::new(),
             forecast_update_timer: 0.0,
             cumulative_rainfall: 0.0,
@@ -530,7 +544,50 @@ impl ExtendedWeatherManager {
     pub fn set_target_weather(&mut self, weather: ExtendedWeatherType) {
         self.target_state = self.create_weather_state(weather);
         self.transition_progress = 0.0;
-        self.transition_duration = 300.0; // 5 minutes
+        // Weather transitions take 20-40 minutes for realistic, gradual change
+        self.transition_duration = 1200.0 + rand_float() * 1200.0;
+    }
+
+    /// Force immediate weather change without transition (for testing/debugging)
+    pub fn set_weather_immediate(&mut self, weather: ExtendedWeatherType) {
+        self.current_state = self.create_weather_state(weather);
+        self.target_state = self.current_state.clone();
+        self.transition_progress = 1.0;
+    }
+
+    /// Get current rain intensity (0-1) for rendering systems
+    pub fn rain_intensity(&self) -> f32 {
+        match self.current_state.weather_type {
+            ExtendedWeatherType::LightRain => 0.3,
+            ExtendedWeatherType::HeavyRain => 0.7,
+            ExtendedWeatherType::Thunderstorm => 0.9,
+            ExtendedWeatherType::TropicalStorm => 0.95,
+            ExtendedWeatherType::Hurricane => 1.0,
+            ExtendedWeatherType::Sleet => 0.4,
+            ExtendedWeatherType::LightSnow => 0.2,
+            ExtendedWeatherType::Mist => 0.1,
+            _ => self.current_state.precipitation_rate.min(1.0),
+        }
+    }
+
+    /// Get ambient dimming factor (0-1) for moody atmosphere
+    pub fn ambient_dimming(&self) -> f32 {
+        let base_dimming = match self.current_state.weather_type {
+            ExtendedWeatherType::Clear => 0.0,
+            ExtendedWeatherType::PartlyCloudy => 0.05,
+            ExtendedWeatherType::Hazy => 0.1,
+            ExtendedWeatherType::Overcast => 0.2,
+            ExtendedWeatherType::LightRain => 0.25,
+            ExtendedWeatherType::HeavyRain => 0.35,
+            ExtendedWeatherType::Thunderstorm => 0.45,
+            ExtendedWeatherType::TropicalStorm => 0.5,
+            ExtendedWeatherType::Hurricane => 0.6,
+            ExtendedWeatherType::Fog | ExtendedWeatherType::DenseFog => 0.3,
+            ExtendedWeatherType::Mist => 0.15,
+            ExtendedWeatherType::Sleet | ExtendedWeatherType::LightSnow => 0.2,
+        };
+        // Additional dimming from cloud cover
+        base_dimming + self.current_state.cloud_cover * 0.1
     }
 
     fn create_weather_state(&self, weather: ExtendedWeatherType) -> WeatherState {

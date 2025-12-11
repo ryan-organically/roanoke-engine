@@ -34,23 +34,24 @@ pub struct AtmosphereState {
 
 impl Default for AtmosphereState {
     fn default() -> Self {
+        // Moody, overcast defaults
         Self {
-            fog_density: 0.0,
-            fog_start: 50.0,
-            fog_end: 500.0,
-            fog_color: Vec3::new(0.7, 0.75, 0.8),
-            fog_height_falloff: 0.02,
+            fog_density: 0.15,
+            fog_start: 30.0,
+            fog_end: 350.0,
+            fog_color: Vec3::new(0.5, 0.52, 0.58), // Desaturated grey-blue
+            fog_height_falloff: 0.025,
 
-            light_shaft_intensity: 0.0,
+            light_shaft_intensity: 0.0,  // No shafts in overcast
             light_shaft_decay: 0.96,
             light_shaft_density: 0.5,
 
-            ambient_intensity: 0.3,
-            ambient_color: Vec3::new(0.6, 0.65, 0.75),
+            ambient_intensity: 0.22,     // Dimmer ambient
+            ambient_color: Vec3::new(0.55, 0.58, 0.65), // Cool grey
 
-            sun_intensity: 1.0,
-            sun_color: Vec3::ONE,
-            sun_direction: Vec3::new(0.5, 0.8, 0.3).normalize(),
+            sun_intensity: 0.7,          // Dimmer sun through clouds
+            sun_color: Vec3::new(0.9, 0.88, 0.85), // Slightly desaturated
+            sun_direction: Vec3::new(0.5, 0.6, 0.3).normalize(),
         }
     }
 }
@@ -149,44 +150,47 @@ impl AtmosphereEngine {
                 self.state.sun_color = Vec3::new(1.0, 0.7, 0.4);
             }
             TimePeriod::Morning => {
-                // ... (Morning settings)
+                // Morning - fog lingers, moody atmosphere
                 let clear_progress = (time_of_day - 7.0) / 3.0;
-                self.state.fog_density = (0.25 - clear_progress * 0.2).max(0.0) + weather_fog * 0.3;
-                self.state.fog_color = Vec3::new(0.8, 0.82, 0.85);
-                self.state.fog_start = 40.0 + clear_progress * 60.0;
-                self.state.fog_end = 250.0 + clear_progress * 150.0;
-                self.state.fog_height_falloff = 0.03;
-                self.state.light_shaft_intensity = (0.5 - clear_progress * 0.3) * (1.0 - cloud_coverage * 0.7);
-                self.state.ambient_intensity = 0.3 + clear_progress * 0.1;
-                self.state.ambient_color = Vec3::new(0.75, 0.72, 0.68);
-                self.state.sun_intensity = 0.8 + clear_progress * 0.2;
-                self.state.sun_color = Vec3::new(1.0, 0.9, 0.8);
+                self.state.fog_density = (0.3 - clear_progress * 0.15).max(0.1) + weather_fog * 0.35;
+                self.state.fog_color = Vec3::new(0.65, 0.68, 0.72);
+                self.state.fog_start = 25.0 + clear_progress * 40.0;
+                self.state.fog_end = 200.0 + clear_progress * 100.0;
+                self.state.fog_height_falloff = 0.035;
+                self.state.light_shaft_intensity = (0.35 - clear_progress * 0.2) * (1.0 - cloud_coverage * 0.85);
+                self.state.ambient_intensity = 0.22 + clear_progress * 0.08;
+                self.state.ambient_color = Vec3::new(0.65, 0.63, 0.6);
+                self.state.sun_intensity = 0.65 + clear_progress * 0.15;
+                self.state.sun_color = Vec3::new(0.95, 0.85, 0.75);
             }
             TimePeriod::Midday => {
-                // ... (Midday settings)
-                self.state.fog_density = 0.02 + weather_fog * 0.2;
-                self.state.fog_color = Vec3::new(0.75, 0.8, 0.88);
-                self.state.fog_start = 100.0;
-                self.state.fog_end = 600.0;
-                self.state.fog_height_falloff = 0.01;
-                self.state.light_shaft_intensity = 0.15 * (1.0 - cloud_coverage * 0.9);
-                self.state.ambient_intensity = 0.4;
-                self.state.ambient_color = Vec3::new(0.8, 0.82, 0.9);
-                self.state.sun_intensity = 1.0;
-                self.state.sun_color = Vec3::new(1.0, 0.98, 0.95);
+                // Midday - still moody with cloud coverage reducing brightness
+                self.state.fog_density = 0.08 + weather_fog * 0.25;
+                self.state.fog_color = Vec3::new(0.6, 0.63, 0.7);
+                self.state.fog_start = 60.0;
+                self.state.fog_end = 450.0;
+                self.state.fog_height_falloff = 0.015;
+                // Reduce light shafts significantly when overcast
+                self.state.light_shaft_intensity = 0.1 * (1.0 - cloud_coverage * 0.95);
+                self.state.ambient_intensity = 0.32 * (1.0 - cloud_coverage * 0.3);
+                self.state.ambient_color = Vec3::new(0.7, 0.72, 0.78);
+                self.state.sun_intensity = 0.85 * (1.0 - cloud_coverage * 0.4);
+                self.state.sun_color = Vec3::new(0.95, 0.92, 0.88);
             }
             TimePeriod::Afternoon => {
-                // ... (Afternoon settings)
+                // Afternoon - moody golden hour, muted by clouds
                 let golden_progress = (time_of_day - 16.0) / 2.0;
-                self.state.fog_density = 0.05 + golden_progress * 0.1 + weather_fog * 0.25;
-                self.state.fog_color = Vec3::new(0.9, 0.8, 0.6).lerp(Vec3::new(0.95, 0.7, 0.5), golden_progress);
-                self.state.fog_start = 80.0;
-                self.state.fog_end = 400.0;
-                self.state.light_shaft_intensity = (0.3 + golden_progress * 0.4) * (1.0 - cloud_coverage * 0.6);
-                self.state.ambient_intensity = 0.35;
-                self.state.ambient_color = Vec3::new(0.85, 0.75, 0.6);
-                self.state.sun_intensity = 0.9;
-                self.state.sun_color = Vec3::new(1.0, 0.85, 0.6);
+                self.state.fog_density = 0.1 + golden_progress * 0.12 + weather_fog * 0.3;
+                let clear_fog = Vec3::new(0.75, 0.68, 0.55);
+                let overcast_fog = Vec3::new(0.55, 0.55, 0.58);
+                self.state.fog_color = clear_fog.lerp(overcast_fog, cloud_coverage);
+                self.state.fog_start = 50.0;
+                self.state.fog_end = 350.0;
+                self.state.light_shaft_intensity = (0.25 + golden_progress * 0.3) * (1.0 - cloud_coverage * 0.8);
+                self.state.ambient_intensity = 0.28 * (1.0 - cloud_coverage * 0.2);
+                self.state.ambient_color = Vec3::new(0.7, 0.65, 0.55);
+                self.state.sun_intensity = 0.75 * (1.0 - cloud_coverage * 0.35);
+                self.state.sun_color = Vec3::new(0.95, 0.8, 0.6);
             }
             TimePeriod::Dusk => {
                 self.state.fog_density = 0.15 + weather_fog * 0.3;

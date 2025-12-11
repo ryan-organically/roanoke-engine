@@ -199,7 +199,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Base surface color
     var surface_color = input.color;
 
-    // Grass tiling disabled - use vertex colors only
+    // Beach: Override with higher contrast sand colors
+    if (is_beach) {
+        // Use noise for sand variation
+        let sand_noise = fract(sin(dot(input.world_pos.xz * 0.3, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        let sand_noise2 = fract(sin(dot(input.world_pos.xz * 0.1, vec2<f32>(39.346, 11.135))) * 43758.5453);
+
+        // Beach sand gradient: wet near water, dry higher up
+        let beach_dryness = clamp((height - 0.5) / 2.0, 0.0, 1.0);
+
+        // Wet sand (darker, more saturated)
+        let wet_sand = vec3<f32>(0.55, 0.45, 0.32);
+        // Dry sand (lighter, more yellow)
+        let dry_sand = vec3<f32>(0.82, 0.72, 0.55);
+        // Mix based on height
+        let base_sand = mix(wet_sand, dry_sand, beach_dryness);
+
+        // Add variation
+        let sand_variation = mix(base_sand * 0.9, base_sand * 1.1, sand_noise * 0.6 + sand_noise2 * 0.4);
+        surface_color = sand_variation;
+    }
 
     // Apply lighting to surface color
     var final_color = surface_color * lighting;

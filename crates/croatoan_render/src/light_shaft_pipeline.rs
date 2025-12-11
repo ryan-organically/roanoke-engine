@@ -23,12 +23,12 @@ impl Default for LightShaftUniforms {
     fn default() -> Self {
         Self {
             sun_screen_pos: [0.5, 0.3],
-            intensity: 0.5,
-            decay: 0.96,
-            density: 0.5,
-            weight: 0.1,
-            exposure: 1.0,
-            num_samples: 24, // Reduced from 64 for FPS
+            intensity: 0.6,
+            decay: 0.97,
+            density: 0.6,
+            weight: 0.12,
+            exposure: 1.2,
+            num_samples: 64, // Higher sample count for quality light beams
         }
     }
 }
@@ -184,9 +184,9 @@ impl LightShaftPipeline {
             intensity,
             decay,
             density,
-            weight: 0.15,
-            exposure: 1.2,
-            num_samples: 24, // Reduced from 64 for FPS
+            weight: 0.12,
+            exposure: 1.3,
+            num_samples: 64, // Higher sample count for quality light beams
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

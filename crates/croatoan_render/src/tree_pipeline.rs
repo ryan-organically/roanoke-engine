@@ -27,17 +27,18 @@ struct TreeVertex {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
-    view_proj: [[f32; 4]; 4],   // 64 bytes (0-64)
-    sun_dir: [f32; 3],          // 12 bytes (64-76)
-    time: f32,                  // 4 bytes (76-80) - packs with sun_dir
-    view_pos: [f32; 3],         // 12 bytes (80-92)
-    fog_density: f32,           // 4 bytes (92-96) - packs with view_pos
-    fog_color: [f32; 3],        // 12 bytes (96-108)
-    fog_start: f32,             // 4 bytes (108-112) - packs with fog_color
-    fog_end: f32,               // 4 bytes (112-116)
-    alpha_cutoff: f32,          // 4 bytes (116-120) - for alpha masked materials
-    use_texture: f32,           // 4 bytes (120-124) - 1.0 = texture, 0.0 = procedural
-    _padding: f32,              // 4 bytes (124-128) - struct alignment to 128
+    view_proj: [[f32; 4]; 4],       // 64 bytes (0-64)
+    light_view_proj: [[f32; 4]; 4], // 64 bytes (64-128) - shadow map transform
+    sun_dir: [f32; 3],              // 12 bytes (128-140)
+    time: f32,                      // 4 bytes (140-144)
+    view_pos: [f32; 3],             // 12 bytes (144-156)
+    fog_density: f32,               // 4 bytes (156-160)
+    fog_color: [f32; 3],            // 12 bytes (160-172)
+    fog_start: f32,                 // 4 bytes (172-176)
+    fog_end: f32,                   // 4 bytes (176-180)
+    alpha_cutoff: f32,              // 4 bytes (180-184)
+    use_texture: f32,               // 4 bytes (184-188)
+    _padding: f32,                  // 4 bytes (188-192) - struct alignment
 }
 
 #[repr(C)]
@@ -61,6 +62,7 @@ pub struct TreePipeline {
     instance_count: u32,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
+    camera_bind_group_layout: BindGroupLayout,
     // We store the texture layout here so we can create bind groups later if needed
     pub texture_bind_group_layout: BindGroupLayout,
     default_bind_group: BindGroup,
@@ -69,11 +71,12 @@ pub struct TreePipeline {
 
 
 impl TreePipeline {
-    pub fn new(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat) -> Self {
-        // Group 0: Camera
+    pub fn new(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat, shadow_map: &crate::shadows::ShadowMap) -> Self {
+        // Group 0: Camera + Shadow Map
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Tree Camera Bind Group Layout"),
             entries: &[
+                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -82,6 +85,24 @@ impl TreePipeline {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                // Shadow Map Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                // Shadow Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
             ],
@@ -282,7 +303,7 @@ impl TreePipeline {
             mapped_at_creation: false,
         });
 
-        // Create camera bind group
+        // Create camera bind group with shadow map
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Tree Camera Bind Group"),
             layout: &camera_bind_group_layout,
@@ -290,6 +311,14 @@ impl TreePipeline {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
                 },
             ],
         });
@@ -301,6 +330,7 @@ impl TreePipeline {
             instance_count: 0,
             camera_buffer,
             camera_bind_group,
+            camera_bind_group_layout,
             texture_bind_group_layout,
             default_bind_group,
         }
@@ -474,6 +504,7 @@ impl TreePipeline {
         &self,
         queue: &Queue,
         view_proj: &Mat4,
+        light_view_proj: &Mat4,
         sun_dir: [f32; 3],
         time: f32,
         view_pos: [f32; 3],
@@ -483,7 +514,7 @@ impl TreePipeline {
         fog_density: f32,
     ) {
         // Default: procedural rendering, no alpha cutoff
-        self.update_camera_full(queue, view_proj, sun_dir, time, view_pos, fog_color, fog_start, fog_end, fog_density, 0.0, 0.0);
+        self.update_camera_full(queue, view_proj, light_view_proj, sun_dir, time, view_pos, fog_color, fog_start, fog_end, fog_density, 0.0, 0.0);
     }
 
     /// Update camera uniform with all parameters including texture/alpha settings
@@ -491,6 +522,7 @@ impl TreePipeline {
         &self,
         queue: &Queue,
         view_proj: &Mat4,
+        light_view_proj: &Mat4,
         sun_dir: [f32; 3],
         time: f32,
         view_pos: [f32; 3],
@@ -503,6 +535,7 @@ impl TreePipeline {
     ) {
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
             sun_dir,
             time,
             view_pos,

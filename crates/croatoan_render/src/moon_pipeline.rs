@@ -9,7 +9,7 @@ struct MoonUniforms {
     moon_color: [f32; 3],
     phase: f32,
     camera_right: [f32; 3],
-    _padding2: f32,
+    moon_elevation: f32,  // For horizon shimmer effect
     camera_up: [f32; 3],
     time: f32,
 }
@@ -100,7 +100,7 @@ impl MoonPipeline {
     /// moon_dir: direction FROM moon TO scene (normalized)
     /// camera_pos: viewer position
     /// phase: moon phase 0.0-1.0 (0/1 = new moon, 0.5 = full moon)
-    /// time: current time for any animations
+    /// elapsed_time: total elapsed time for animations
     pub fn update(
         &self,
         queue: &wgpu::Queue,
@@ -110,14 +110,17 @@ impl MoonPipeline {
         camera_right: Vec3,
         camera_up: Vec3,
         phase: f32,
+        elapsed_time: f32,
     ) {
-        let time = 0.0f32; // Hardcoded for now
         // Position moon far away in opposite direction of moon_dir
         let moon_distance = 800.0;
         let moon_world_pos = camera_pos - moon_dir * moon_distance;
 
         // Moon size - match sun size so corona glow has room to render
         let moon_size = 45.0;
+
+        // Moon elevation (y component of moon direction, negative = below horizon)
+        let moon_elevation = -moon_dir.y;
 
         // Silvery moon color
         let moon_color = [0.9, 0.92, 0.98];
@@ -129,9 +132,9 @@ impl MoonPipeline {
             moon_color,
             phase,
             camera_right: camera_right.to_array(),
-            _padding2: 0.0,
+            moon_elevation,
             camera_up: camera_up.to_array(),
-            time,
+            time: elapsed_time,
         };
 
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));

@@ -32,7 +32,8 @@ pub struct BuildingMesh {
 
 pub struct BuildingPipeline {
     pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,  // Created when shadow map is bound
     uniform_buffer: wgpu::Buffer,
     mesh: Option<Arc<BuildingMesh>>,
     instance_buffer: Option<wgpu::Buffer>,
@@ -43,15 +44,17 @@ pub struct BuildingPipeline {
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
+    light_view_proj: [[f32; 4]; 4],  // Shadow mapping
     light_dir: [f32; 3],
     _padding: f32,
     view_pos: [f32; 3],
-    _padding2: f32,
+    ambient_dimming: f32,            // Moody atmosphere
     fog_color: [f32; 3],
     _padding3: f32,
     fog_start: f32,
     fog_end: f32,
-    _padding4: [f32; 2],
+    shadow_strength: f32,            // Shadow darkness (0-1)
+    rain_wetness: f32,               // Surface wetness (0-1)
 }
 
 impl BuildingPipeline {
@@ -62,15 +65,17 @@ impl BuildingPipeline {
             label: Some("Building Uniform Buffer"),
             contents: bytemuck::cast_slice(&[Uniforms {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                light_dir: [0.5, 1.0, 0.3],
+                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                light_dir: [0.5, 0.7, 0.3],
                 _padding: 0.0,
                 view_pos: [0.0; 3],
-                _padding2: 0.0,
-                fog_color: [0.5, 0.6, 0.7],
+                ambient_dimming: 0.15,  // Moody default
+                fog_color: [0.5, 0.52, 0.58],
                 _padding3: 0.0,
-                fog_start: 100.0,
-                fog_end: 500.0,
-                _padding4: [0.0; 2],
+                fog_start: 30.0,
+                fog_end: 350.0,
+                shadow_strength: 0.8,
+                rain_wetness: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -78,6 +83,7 @@ impl BuildingPipeline {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Building Bind Group Layout"),
             entries: &[
+                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -88,18 +94,25 @@ impl BuildingPipeline {
                     },
                     count: None,
                 },
-            ],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
+                // Shadow map texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Shadow sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
                 },
             ],
-            label: Some("Building Bind Group"),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -170,12 +183,40 @@ impl BuildingPipeline {
 
         Self {
             pipeline,
-            bind_group,
+            bind_group_layout,
+            bind_group: None,  // Created when shadow map is bound
             uniform_buffer,
             mesh: None,
             instance_buffer: None,
             instance_count: 0,
         }
+    }
+
+    /// Bind the shadow map resources - must be called before rendering
+    pub fn bind_shadow_map(
+        &mut self,
+        device: &wgpu::Device,
+        shadow_view: &wgpu::TextureView,
+        shadow_sampler: &wgpu::Sampler,
+    ) {
+        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
+            ],
+            label: Some("Building Bind Group"),
+        }));
     }
 
     pub fn create_mesh(
@@ -246,23 +287,29 @@ impl BuildingPipeline {
         &self,
         queue: &wgpu::Queue,
         view_proj: &Mat4,
+        light_view_proj: &Mat4,
         light_dir: Vec3,
         view_pos: Vec3,
         fog_color: [f32; 3],
         fog_start: f32,
         fog_end: f32,
+        ambient_dimming: f32,
+        shadow_strength: f32,
+        rain_wetness: f32,
     ) {
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
             light_dir: light_dir.to_array(),
             _padding: 0.0,
             view_pos: view_pos.to_array(),
-            _padding2: 0.0,
+            ambient_dimming,
             fog_color,
             _padding3: 0.0,
             fog_start,
             fog_end,
-            _padding4: [0.0; 2],
+            shadow_strength,
+            rain_wetness,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
@@ -272,7 +319,7 @@ impl BuildingPipeline {
     /// # Safety
     /// This method uses defensive checks to avoid panics even with invalid state.
     pub fn render<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>) {
-        // Defensive: require mesh, instances, and buffers
+        // Defensive: require mesh, instances, buffers, and bind_group
         let mesh = match &self.mesh {
             Some(m) if m.index_count > 0 => m,
             _ => {
@@ -293,8 +340,16 @@ impl BuildingPipeline {
             }
         };
 
+        let bind_group = match &self.bind_group {
+            Some(bg) => bg,
+            None => {
+                log::trace!("Building render skipped: shadow map not bound");
+                return;
+            }
+        };
+
         rpass.set_pipeline(&self.pipeline);
-        rpass.set_bind_group(0, &self.bind_group, &[]);
+        rpass.set_bind_group(0, bind_group, &[]);
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_vertex_buffer(1, instance_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -307,6 +362,7 @@ impl BuildingPipeline {
         self.mesh.as_ref().map(|m| m.index_count > 0).unwrap_or(false)
             && self.instance_buffer.is_some()
             && self.instance_count > 0
+            && self.bind_group.is_some()
     }
 
     /// Get the current instance count

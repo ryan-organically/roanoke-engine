@@ -179,6 +179,8 @@ pub use foliage_gen::FoliageInstances;
 
 // Rocks
 pub use rocks::generate_rocks_for_chunk;
+pub use rocks::generate_rocks_for_chunk_with_exclusions;
+pub use rocks::CornFieldBounds;
 pub use rocks::RockType;
 
 // Buildings

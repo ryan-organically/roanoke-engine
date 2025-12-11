@@ -4,8 +4,8 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
 use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
@@ -1341,12 +1341,13 @@ fn main() {
                 offset_z as f32,
             );
 
-            // Generate trees
+            // Generate trees (with forest clearing around villages)
             let tree_instances = generate_trees_for_chunk(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
+                &req.village_centers,
             );
 
             // Generate detritus
@@ -1357,12 +1358,13 @@ fn main() {
                 offset_z as f32,
             );
 
-            // Generate rocks
-            let rock_instances = generate_rocks_for_chunk(
+            // Generate rocks (excluding corn field areas)
+            let rock_instances = generate_rocks_for_chunk_with_exclusions(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
+                &req.corn_field_exclusions,
             );
 
             // Generate buildings
@@ -1792,6 +1794,15 @@ fn main() {
     let render_rx = Arc::clone(&chunk_rx);
     
     app.set_render_callback(move |ctx| {
+        // Shadow System (initialized early so it's available for asset loading)
+        static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>, Mutex<InstancedShadowPipeline>)> = OnceLock::new();
+        let (shadow_map_mutex, _shadow_pipeline_mutex_early, instanced_shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
+            let shadow_map = ShadowMap::new(ctx.device(), 2048);
+            let shadow_pipeline = ShadowPipeline::new(ctx.device());
+            let instanced_shadow_pipeline = InstancedShadowPipeline::new(ctx.device());
+            (Mutex::new(shadow_map), Mutex::new(shadow_pipeline), Mutex::new(instanced_shadow_pipeline))
+        });
+
         // Initialize Asset Registry if empty
         {
             let mut state = render_state.safe_lock();
@@ -1818,7 +1829,9 @@ fn main() {
                 // - tree_instances from generate_trees_for_chunk() for placement
                 // ========================================================================
                 // Create a temporary TreePipeline to get access to texture_bind_group_layout
-                let texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                let shadow_map = shadow_map_mutex.safe_lock();
+                let texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                drop(shadow_map);
 
                 // Load tree models from assets/models/trees/
                 // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
@@ -2180,13 +2193,8 @@ fn main() {
             Mutex::new(manager)
         });
 
-        // Shadow System
-        static SHADOW_SYSTEM: OnceLock<(Mutex<ShadowMap>, Mutex<ShadowPipeline>)> = OnceLock::new();
-        let (shadow_map_mutex, shadow_pipeline_mutex) = SHADOW_SYSTEM.get_or_init(|| {
-            let shadow_map = ShadowMap::new(ctx.device(), 2048); // Increased for shadow quality
-            let shadow_pipeline = ShadowPipeline::new(ctx.device());
-            (Mutex::new(shadow_map), Mutex::new(shadow_pipeline))
-        });
+        // Get shadow pipeline reference (SHADOW_SYSTEM was initialized at start of render callback)
+        let shadow_pipeline_mutex = &SHADOW_SYSTEM.get().expect("SHADOW_SYSTEM should be initialized").1;
 
         // Grass System (requires shadow map)
         static GRASS_PIPELINE: OnceLock<Mutex<GrassPipeline>> = OnceLock::new();
@@ -2200,7 +2208,9 @@ fn main() {
         // Tree System
         static TREE_PIPELINE: OnceLock<Mutex<TreePipeline>> = OnceLock::new();
         let _tree_pipeline_mutex = TREE_PIPELINE.get_or_init(|| {
-            let tree_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+            let shadow_map = shadow_map_mutex.safe_lock();
+            let tree_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+            drop(shadow_map);
             Mutex::new(tree_pipeline)
         });
 
@@ -2242,8 +2252,26 @@ fn main() {
 
         // Animal Model Pipeline (3D models for animals)
         static ANIMAL_MODEL_PIPELINE: OnceLock<Mutex<AnimalModelPipeline>> = OnceLock::new();
+        static ANIMAL_MODEL_SHADOW_BOUND: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
         let animal_model_pipeline_mutex = ANIMAL_MODEL_PIPELINE.get_or_init(|| {
             Mutex::new(AnimalModelPipeline::new_with_queue(ctx.device(), Some(ctx.queue()), ctx.surface_format()))
+        });
+        let shadow_bound_flag = ANIMAL_MODEL_SHADOW_BOUND.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+
+        // Bind shadow map to animal model pipeline once
+        if !shadow_bound_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let shadow_map = shadow_map_mutex.safe_lock();
+            let mut model_pipeline = animal_model_pipeline_mutex.safe_lock();
+            model_pipeline.bind_shadow_map(ctx.device(), &shadow_map.view, &shadow_map.sampler);
+            drop(model_pipeline);
+            drop(shadow_map);
+            shadow_bound_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Rain Particle Pipeline
+        static RAIN_PIPELINE: OnceLock<Mutex<RainPipeline>> = OnceLock::new();
+        let rain_pipeline_mutex = RAIN_PIPELINE.get_or_init(|| {
+            Mutex::new(RainPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
         // Animal Model Cache (loads GLTF models)
@@ -2723,14 +2751,41 @@ fn main() {
                     let ik_tilt = animal.get_ik_pelvis_tilt()
                         .unwrap_or(glam::Quat::IDENTITY);
 
-                    // Combine base rotation with IK pelvis tilt
-                    let final_rotation = animal.rotation * ik_tilt;
+                    // Idle animation for horses (breathing, subtle sway)
+                    let (anim_scale, anim_rotation) = if model_name == "Horse" &&
+                        matches!(animal.behavior_state, animals::BehaviorState::Idle)
+                    {
+                        let t = animal.animation_time;
+                        // Breathing: subtle Y scale oscillation (0.5% variance)
+                        let breath = 1.0 + (t * 1.2).sin() * 0.005;
+                        // Subtle body sway on Y axis
+                        let sway = (t * 0.8).sin() * 0.015;
+                        // Gentle head bob (pitch)
+                        let bob = (t * 1.5).sin() * 0.01;
+
+                        let anim_scale = Vec3::new(1.0, breath, 1.0);
+                        let anim_rot = glam::Quat::from_euler(
+                            glam::EulerRot::YXZ,
+                            sway,  // yaw sway
+                            bob,   // pitch bob
+                            0.0,   // no roll
+                        );
+                        (anim_scale, anim_rot)
+                    } else {
+                        (Vec3::ONE, glam::Quat::IDENTITY)
+                    };
+
+                    // Combine base rotation with IK pelvis tilt and animation
+                    let final_rotation = animal.rotation * ik_tilt * anim_rotation;
 
                     // Model position - animal.position.y is already ground height
                     let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
 
+                    // Apply animation scale to model scale
+                    let final_scale = Vec3::splat(model_scale) * anim_scale;
+
                     let model_matrix = Mat4::from_scale_rotation_translation(
-                        Vec3::splat(model_scale),
+                        final_scale,
                         final_rotation,
                         model_position,
                     );
@@ -2765,8 +2820,8 @@ fn main() {
                             let mut all_vertices: Vec<AnimalVertex> = Vec::new();
                             let mut all_indices: Vec<u32> = Vec::new();
 
-                            // Find the first mesh with a texture
-                            let mut texture_data: Option<&gltf_loader::LoadedTexture> = None;
+                            // Find texture: first try embedded, then create from baseColorFactor
+                            let mut texture_data: Option<gltf_loader::LoadedTexture> = None;
 
                             for mesh in &loaded_model.meshes {
                                 let vertex_offset = all_vertices.len() as u32;
@@ -2782,10 +2837,10 @@ fn main() {
                                 }
 
                                 // Get texture from first mesh that has one
+                                // Uses get_or_create_texture() which creates synthetic texture
+                                // from baseColorFactor if no embedded texture exists
                                 if texture_data.is_none() {
-                                    if let Some(ref tex) = mesh.material.base_color_texture_data {
-                                        texture_data = Some(tex);
-                                    }
+                                    texture_data = mesh.material.get_or_create_texture();
                                 }
                             }
 
@@ -2796,8 +2851,8 @@ fn main() {
                                 &all_indices,
                             );
 
-                            // Upload texture if available
-                            if let Some(tex) = texture_data {
+                            // Upload texture if available (embedded or from baseColorFactor)
+                            if let Some(ref tex) = texture_data {
                                 model_pipeline.upload_species_texture(
                                     ctx.device(),
                                     ctx.queue(),
@@ -2806,6 +2861,78 @@ fn main() {
                                     tex.width,
                                     tex.height,
                                 );
+                            }
+
+                            // Upload skeleton and animations if available
+                            if loaded_model.is_animated() {
+                                if let Some(ref skeleton) = loaded_model.skeleton {
+                                    // Convert gltf_loader skeleton to pipeline format
+                                    let skeleton_gpu = croatoan_render::SkeletonGpu {
+                                        inverse_bind_matrices: skeleton.inverse_bind_matrices.clone(),
+                                        parents: skeleton.joints.iter().map(|j| j.parent).collect(),
+                                        local_transforms: skeleton.joints.iter().map(|j| {
+                                            // Build local transform matrix from components
+                                            let t = j.local_translation;
+                                            let r = j.local_rotation;
+                                            let s = j.local_scale;
+                                            let mat = glam::Mat4::from_scale_rotation_translation(
+                                                Vec3::from_array(s),
+                                                glam::Quat::from_xyzw(r[0], r[1], r[2], r[3]),
+                                                Vec3::from_array(t),
+                                            );
+                                            (mat.to_cols_array_2d(), r, s)
+                                        }).collect(),
+                                        roots: skeleton.roots.clone(),
+                                    };
+
+                                    // Convert animations
+                                    let animations_gpu: Vec<croatoan_render::AnimationGpu> = loaded_model.animations.iter().map(|anim| {
+                                        let joint_count = skeleton.joints.len();
+                                        let mut joint_keyframes = vec![croatoan_render::JointKeyframes::default(); joint_count];
+
+                                        for channel in &anim.channels {
+                                            if channel.joint_index < joint_count {
+                                                let kf = &mut joint_keyframes[channel.joint_index];
+                                                match channel.property {
+                                                    gltf_loader::AnimationProperty::Translation => {
+                                                        kf.translation_times = channel.times.clone();
+                                                        kf.translations = channel.values.iter()
+                                                            .map(|v| [v[0], v[1], v[2]])
+                                                            .collect();
+                                                    }
+                                                    gltf_loader::AnimationProperty::Rotation => {
+                                                        kf.rotation_times = channel.times.clone();
+                                                        kf.rotations = channel.values.clone();
+                                                    }
+                                                    gltf_loader::AnimationProperty::Scale => {
+                                                        kf.scale_times = channel.times.clone();
+                                                        kf.scales = channel.values.iter()
+                                                            .map(|v| [v[0], v[1], v[2]])
+                                                            .collect();
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        croatoan_render::AnimationGpu {
+                                            name: anim.name.clone(),
+                                            duration: anim.duration,
+                                            joint_keyframes,
+                                        }
+                                    }).collect();
+
+                                    model_pipeline.upload_species_animation(
+                                        model_name,
+                                        skeleton_gpu,
+                                        animations_gpu,
+                                    );
+
+                                    println!("[Animal] Uploaded {} animations for {}: {:?}",
+                                        loaded_model.animations.len(),
+                                        model_name,
+                                        loaded_model.animation_names()
+                                    );
+                                }
                             }
                         }
                     }
@@ -4045,7 +4172,9 @@ fn main() {
 
             // Update Chunk Streaming (Request new chunks / Unload old ones)
             if state.game_state == GameState::Loading || state.game_state == GameState::Playing {
-                let requests = manager.update(state.player.position, state.seed);
+                let village_centers = state.village_manager.get_village_centers();
+                let corn_field_exclusions = state.village_manager.get_corn_field_bounds();
+                let requests = manager.update(state.player.position, state.seed, &village_centers, &corn_field_exclusions);
                 for req in requests {
                     let _ = request_tx.send(req);
                 }
@@ -4124,11 +4253,13 @@ fn main() {
                                 let name = tree_model_names[i % tree_model_names.len()].to_string();
                                 tree_groups.entry(name).or_default().push(*transform);
                             }
+                            // Acquire shadow map once for all tree pipelines
+                            let shadow_map = shadow_map_mutex.safe_lock();
                             for (name, transforms) in &tree_groups {
                                 // Render bark mesh (OPAQUE)
                                 let bark_name = format!("{}_bark", name);
                                 if let Some(mesh) = state.mesh_registry.get(&bark_name) {
-                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
@@ -4137,13 +4268,14 @@ fn main() {
                                 // Render leaves mesh (BLEND) with same transforms
                                 let leaves_name = format!("{}_leaves", name);
                                 if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
-                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
                                     println!("[FOLIAGE] Tree '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
+                            drop(shadow_map);
 
                             // Shrubs are now generated by foliage_gen.rs with random spread
                             // No longer generating shrubs around tree bases (was causing bushiness)
@@ -4169,9 +4301,10 @@ fn main() {
                             }
 
                             let mut rock_pipelines = Vec::new();
+                            let shadow_map = shadow_map_mutex.safe_lock();
                             for (name, transforms) in rock_groups {
                                 if let Some(mesh) = state.mesh_registry.get(&name) {
-                                    let mut rp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format());
+                                    let mut rp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
                                     rp.set_mesh(mesh.clone());
                                     rp.upload_instances(ctx.device(), &transforms);
                                     rock_pipelines.push(rp);
@@ -4181,6 +4314,7 @@ fn main() {
                                     println!("[WARN] Available meshes: {:?}", state.mesh_registry.keys().collect::<Vec<_>>());
                                 }
                             }
+                            drop(shadow_map);
 
                             // Process Buildings
                             let mut building_pipelines = Vec::new();
@@ -4189,16 +4323,21 @@ fn main() {
                                 buildings_by_type.entry(name).or_default().push(transform);
                             }
 
+                            // Get shadow map for binding to building pipelines
+                            let shadow_map_for_buildings = shadow_map_mutex.safe_lock();
                             for (name, transforms) in buildings_by_type {
                                 if let Some(mesh) = state.building_registry.get(&name) {
                                     let mut pipeline = BuildingPipeline::new(ctx.device(), ctx.surface_format());
                                     pipeline.set_mesh(mesh.clone());
                                     pipeline.upload_instances(ctx.device(), &transforms);
+                                    // Bind shadow map for shadow rendering
+                                    pipeline.bind_shadow_map(ctx.device(), &shadow_map_for_buildings.view, &shadow_map_for_buildings.sampler);
                                     building_pipelines.push(pipeline);
                                 } else {
                                     println!("[WARN] Building mesh '{}' not found in registry", name);
                                 }
                             }
+                            drop(shadow_map_for_buildings);
 
                             // Process Village Structures
                             let village_structures = state.village_manager.get_structures_for_chunk(
@@ -4253,6 +4392,10 @@ fn main() {
                                 let mut pipeline = BuildingPipeline::new(ctx.device(), ctx.surface_format());
                                 pipeline.set_mesh(mesh);
                                 pipeline.upload_instances(ctx.device(), &[structure.transform]);
+                                // Bind shadow map for village structures
+                                let shadow_map_village = shadow_map_mutex.safe_lock();
+                                pipeline.bind_shadow_map(ctx.device(), &shadow_map_village.view, &shadow_map_village.sampler);
+                                drop(shadow_map_village);
                                 building_pipelines.push(pipeline);
                             }
 
@@ -4402,6 +4545,7 @@ fn main() {
                         trees.update_camera_full(
                             ctx.queue(),
                             &view_proj,
+                            &light_view_proj,
                             sun_dir.to_array(),
                             elapsed,
                             state.camera.position.to_array(),
@@ -4429,6 +4573,7 @@ fn main() {
                         rock.update_camera(
                             ctx.queue(),
                             &view_proj,
+                            &light_view_proj,
                             sun_dir.to_array(),
                             elapsed,
                             state.camera.position.to_array(),
@@ -4456,8 +4601,10 @@ fn main() {
             {
                 let shadow_map = shadow_map_mutex.safe_lock();
                 let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
+                let instanced_shadow_pipeline = instanced_shadow_pipeline_mutex.safe_lock();
 
                 shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
+                instanced_shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
                 let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Shadow Pass"),
@@ -4483,8 +4630,33 @@ fn main() {
                         chunk.terrain.index_count,
                     );
 
-                    // TODO: Tree shadows temporarily disabled while debugging crash
-                    // Will re-enable once instanced shadow pipeline is stable
+                    // Render tree shadows (instanced)
+                    for tree_pipeline in &chunk.trees {
+                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = tree_pipeline.get_shadow_buffers() {
+                            instanced_shadow_pipeline.render(
+                                &mut shadow_pass,
+                                vb,
+                                ib,
+                                inst_buf,
+                                idx_count,
+                                inst_count,
+                            );
+                        }
+                    }
+
+                    // Render rock shadows (instanced - same format as trees)
+                    for rock_pipeline in &chunk.rocks {
+                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = rock_pipeline.get_shadow_buffers() {
+                            instanced_shadow_pipeline.render(
+                                &mut shadow_pass,
+                                vb,
+                                ib,
+                                inst_buf,
+                                idx_count,
+                                inst_count,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -4539,6 +4711,8 @@ fn main() {
                     state.weather.cloud_color_shade,
                     state.weather.cloud_scale,
                     state.weather.wind_offset,
+                    state.weather.rain_intensity(),
+                    state.weather.ambient_dimming(),
                 );
 
                 let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4583,16 +4757,15 @@ fn main() {
 
                 // Render Sun
                 if sun_pos_y > -0.2 { // Visible until slightly below horizon
-                    sun_pipeline.update(ctx.queue(), &view_proj, sun_dir, state.camera.position, state.camera.right(), state.camera.up, state.time_of_day);
+                    sun_pipeline.update(ctx.queue(), &view_proj, sun_dir, state.camera.position, state.camera.right(), state.camera.up, state.time_of_day, elapsed);
                     sun_pipeline.render(&mut sun_pass);
                 }
 
                 // Render Moon
                 if sun_pos_y < 0.2 { // Visible when sun is low or set
-                    // Hack: Pass a fixed "midday" time (12.0) to get white color from sun logic, 
-                    // or we could modify sun pipeline to take explicit color.
-                    // For now, let's rely on the fact that 12.0 gives white.
-                    moon_pipeline.update(ctx.queue(), &view_proj, moon_dir, state.camera.position, state.camera.right(), state.camera.up, 12.0);
+                    // Moon phase cycles roughly every 29.5 days, map to 0-1 range
+                    let moon_phase = 0.5; // Full moon for now (TODO: calculate from game days)
+                    moon_pipeline.update(ctx.queue(), &view_proj, moon_dir, state.camera.position, state.camera.right(), state.camera.up, moon_phase, elapsed);
                     moon_pipeline.render(&mut sun_pass);
                 }
             }
@@ -4603,6 +4776,8 @@ fn main() {
                 let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
                 // Lock model_pipeline early so it outlives render_pass
                 let model_pipeline = animal_model_pipeline_mutex.safe_lock();
+                // Lock rain_pipeline early so it outlives render_pass
+                let mut rain_pipeline = rain_pipeline_mutex.safe_lock();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -4712,11 +4887,15 @@ fn main() {
                             building.update_uniforms(
                                 ctx.queue(),
                                 &view_proj,
+                                &light_view_proj,
                                 sun_dir,
                                 state.camera.position,
                                 fog_color,
                                 fog_start,
                                 fog_end,
+                                state.weather.ambient_dimming(),
+                                0.8, // shadow_strength - strong shadows for contrast
+                                state.weather.rain_intensity(),
                             );
                             building.render(&mut render_pass);
                         }
@@ -4727,12 +4906,17 @@ fn main() {
                 model_pipeline.update_camera(
                     ctx.queue(),
                     &view_proj,
+                    &light_view_proj,
                     state.camera.position,
                     state.time_of_day,
+                    sun_dir,
                     Vec3::from_array(fog_color),
                     fog_start,
                     fog_end,
                     1.5, // fog_density
+                    state.weather.ambient_dimming(),
+                    0.8, // shadow_strength - strong shadows for contrast
+                    state.weather.rain_intensity(),
                 );
                 model_pipeline.render(&mut render_pass);
 
@@ -4742,6 +4926,22 @@ fn main() {
 
                 // Render Water
                 // water_system_guard.draw(&mut render_pass);
+
+                // Render Rain Particles (when stormy)
+                rain_pipeline.update(
+                    ctx.queue(),
+                    &view_proj,
+                    state.camera.position,
+                    state.camera.right(),
+                    state.camera.up,
+                    elapsed,
+                    state.weather.rain_intensity(),
+                    state.weather.wind_strength(),
+                    Vec3::from_array(fog_color),
+                    fog_start,
+                    fog_end,
+                );
+                rain_pipeline.render(&mut render_pass);
 
                 // Log culling stats occasionally (every ~60 frames)
                 let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, buildings_rendered);

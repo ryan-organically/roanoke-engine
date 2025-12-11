@@ -1,5 +1,6 @@
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    light_view_proj: mat4x4<f32>,  // Shadow map transform
     sun_dir: vec3<f32>,
     time: f32,           // For wind animation
     view_pos: vec3<f32>, // Camera position for fog distance
@@ -14,6 +15,10 @@ struct CameraUniform {
 
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+@group(0) @binding(1)
+var t_shadow: texture_depth_2d;
+@group(0) @binding(2)
+var s_shadow: sampler_comparison;
 
 @group(1) @binding(0)
 var t_diffuse: texture_2d<f32>;
@@ -39,6 +44,7 @@ struct VertexOutput {
     @location(1) uv: vec2<f32>,
     @location(2) world_position: vec3<f32>,
     @location(3) local_height: f32, // Height in local space for bark gradient
+    @location(4) shadow_pos: vec3<f32>, // Shadow map position
 }
 
 // Tree wind animation - slower and more subtle than grass
@@ -92,6 +98,15 @@ fn vs_main(input: VertexInput, instance: InstanceInput) -> VertexOutput {
     output.world_normal = (model_matrix * vec4<f32>(input.normal, 0.0)).xyz;
     output.uv = input.uv;
 
+    // Calculate shadow position
+    let pos_from_light = camera.light_view_proj * vec4<f32>(animated_position, 1.0);
+    let shadow_ndc = pos_from_light.xyz / pos_from_light.w;
+    output.shadow_pos = vec3<f32>(
+        shadow_ndc.x * 0.5 + 0.5,
+        -shadow_ndc.y * 0.5 + 0.5,
+        shadow_ndc.z
+    );
+
     return output;
 }
 
@@ -116,32 +131,56 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         base_color = tex_color.rgb;
     } else {
         // Procedural fallback for L-system trees
-        // Noise for variation
+        // Multi-octave noise for organic variation
         let noise = fract(sin(dot(in.world_position.xz, vec2<f32>(12.9898, 78.233))) * 43758.5453);
         let noise2 = fract(sin(dot(in.world_position.xy * 0.5, vec2<f32>(39.346, 11.135))) * 43758.5453);
+        let noise3 = fract(sin(dot(in.world_position.yz * 0.3, vec2<f32>(71.231, 28.947))) * 43758.5453);
+        let detail_noise = noise * 0.5 + noise2 * 0.3 + noise3 * 0.2;
 
         if (is_canopy) {
-            // CANOPY: Green foliage with variation
-            let leaf_dark = vec3<f32>(0.15, 0.35, 0.12);   // Dark forest green
-            let leaf_light = vec3<f32>(0.25, 0.55, 0.18);  // Brighter green
-            let leaf_yellow = vec3<f32>(0.45, 0.55, 0.15); // Yellow-green highlights
+            // CANOPY: Rich forest greens with seasonal variation
+            let leaf_deep = vec3<f32>(0.08, 0.22, 0.06);    // Deep shadow green
+            let leaf_dark = vec3<f32>(0.12, 0.32, 0.10);    // Dark forest green
+            let leaf_mid = vec3<f32>(0.18, 0.42, 0.14);     // Mid green
+            let leaf_light = vec3<f32>(0.28, 0.52, 0.20);   // Sunlit green
+            let leaf_highlight = vec3<f32>(0.35, 0.58, 0.22); // Bright highlight
 
-            // Mix greens based on noise for natural variation
-            let green_mix = mix(leaf_dark, leaf_light, noise * 0.7 + 0.15);
-            base_color = mix(green_mix, leaf_yellow, noise2 * 0.25);
+            // Create layered color mixing for depth
+            let base_green = mix(leaf_dark, leaf_mid, detail_noise);
+            let varied_green = mix(base_green, leaf_light, noise2 * 0.4);
 
-            // Add slight variation based on normal direction (top vs underside)
+            // Add subtle highlight clusters
+            let highlight_factor = smoothstep(0.7, 0.9, noise3);
+            base_color = mix(varied_green, leaf_highlight, highlight_factor * 0.3);
+
+            // Normal-based shading: undersides darker, tops brighter
             let top_factor = saturate(in.world_normal.y * 0.5 + 0.5);
-            base_color = mix(base_color * 0.8, base_color * 1.1, top_factor);
-        } else {
-            // TRUNK: Bark brown with variation
-            let bark_dark = vec3<f32>(0.25, 0.15, 0.08);  // Dark bark
-            let bark_light = vec3<f32>(0.45, 0.30, 0.18); // Light bark
-            let bark_color = mix(bark_dark, bark_light, noise * 0.6 + noise2 * 0.4);
+            let underside_dark = mix(leaf_deep, base_color, 0.6);
+            base_color = mix(underside_dark, base_color * 1.15, top_factor);
 
-            // Height-based variation (darker at base, lighter higher up)
+            // Subtle color temperature shift based on position
+            let warm_shift = vec3<f32>(0.02, -0.01, -0.02) * (noise - 0.5);
+            base_color = base_color + warm_shift;
+        } else {
+            // TRUNK: Rich bark with texture-like variation
+            let bark_deep = vec3<f32>(0.15, 0.08, 0.04);   // Deep bark shadow
+            let bark_dark = vec3<f32>(0.28, 0.18, 0.10);   // Dark bark
+            let bark_mid = vec3<f32>(0.38, 0.26, 0.15);    // Mid bark
+            let bark_light = vec3<f32>(0.48, 0.34, 0.20);  // Light bark
+
+            // Vertical streaking for bark texture effect
+            let streak = fract(sin(in.world_position.x * 5.0 + in.world_position.z * 3.0) * 43758.5453);
+            let bark_base = mix(bark_dark, bark_mid, detail_noise * 0.7);
+            let bark_varied = mix(bark_base, bark_light, streak * 0.35);
+
+            // Height-based variation (moss/lichen at base, drier higher up)
             let height_factor = saturate(in.local_height / 8.0);
-            base_color = mix(bark_color * 0.8, bark_color * 1.1, height_factor);
+            let base_tint = vec3<f32>(0.22, 0.20, 0.12); // Slight green-brown at base
+            base_color = mix(mix(bark_varied, base_tint, 0.15), bark_varied, height_factor);
+
+            // Add depth in crevices based on normal
+            let facing_factor = abs(in.world_normal.x) + abs(in.world_normal.z);
+            base_color = mix(base_color, bark_deep, facing_factor * 0.2 * (1.0 - height_factor));
         }
     }
 
@@ -150,12 +189,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_elevation = -light_dir.y;
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
 
+    // Shadow calculation
+    let shadow_uv = in.shadow_pos.xy;
+    let shadow_depth = in.shadow_pos.z;
+
+    var shadow = 1.0;
+    if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 &&
+        shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0 &&
+        shadow_depth >= 0.0 && shadow_depth <= 1.0) {
+        shadow = textureSampleCompare(t_shadow, s_shadow, shadow_uv, shadow_depth);
+        // Softer shadows for trees: 1.0 = lit, 0.25 = shadow
+        shadow = shadow * 0.75 + 0.25;
+    }
+
     // Diffuse with half-lambert for softer shadows
     let n_dot_l = dot(normalize(in.world_normal), -light_dir);
     let diffuse = pow(n_dot_l * 0.5 + 0.5, 2.0);
 
-    // Ambient - slightly greener for canopy
-    let night_ambient = vec3<f32>(0.03, 0.04, 0.06);
+    // Ambient - moonlit night, greener for canopy
+    let night_ambient = vec3<f32>(0.05, 0.07, 0.10); // Soft moonlit blue
     var day_ambient = vec3<f32>(0.20, 0.18, 0.15);
     if (is_canopy) {
         day_ambient = vec3<f32>(0.15, 0.22, 0.12); // Greener ambient for foliage
@@ -168,7 +220,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_color = mix(sunrise_color, midday_color, saturate(sun_elevation * 2.0));
 
     let diffuse_strength = mix(0.1, 0.7, day_factor);
-    let lighting = ambient + sun_color * diffuse * diffuse_strength;
+    let lighting = ambient + sun_color * diffuse * diffuse_strength * shadow;
 
     var final_color = base_color * lighting;
 

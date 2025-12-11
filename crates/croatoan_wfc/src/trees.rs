@@ -34,6 +34,13 @@ use glam::{Mat4, Vec3, Quat};
 /// TEMPORARILY REDUCED FOR DEBUGGING - should be 36.6
 pub const TREELINE_DISTANCE: f32 = 5.0;
 
+/// Distance from village centers where large trees are excluded (forest clearing effect)
+pub const VILLAGE_CLEARING_RADIUS: f32 = 100.0;
+
+/// Tree scale threshold - trees above this scale are considered "large"
+/// and will be excluded from village clearings
+pub const LARGE_TREE_SCALE_THRESHOLD: f32 = 6.0;
+
 /// Upper elevation limit where trees fade out (alpine treeline)
 pub const UPPER_TREELINE_START: f32 = 40.0;
 pub const UPPER_TREELINE_END: f32 = 55.0;
@@ -85,13 +92,17 @@ pub struct BunchInstances {
 impl LowlandBunch {
     /// Generate all instances within this bunch
     ///
+    /// # Arguments
+    /// * `world_seed` - Seed for terrain height lookups
+    /// * `village_centers` - Village positions; large trees near villages are excluded
+    ///
     /// # Returns
     /// A `BunchInstances` struct containing transforms for all elements:
     /// - 1 large anchor rock
     /// - 8-15 pebbles
     /// - 2 bushes
-    /// - 0-1 tree (based on treeline)
-    pub fn generate(&self, world_seed: u32) -> BunchInstances {
+    /// - 0-1 tree (based on treeline and village proximity)
+    pub fn generate(&self, world_seed: u32, village_centers: &[Vec3]) -> BunchInstances {
         let noise = Perlin::new(self.seed);
         let mut instances = BunchInstances::default();
 
@@ -186,6 +197,11 @@ impl LowlandBunch {
             let scale_var = noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32 * 10.0;
             let tree_scale = (base_scale + scale_var).max(2.0);
 
+            // Skip large trees near villages (forest clearing effect)
+            if tree_scale > LARGE_TREE_SCALE_THRESHOLD && is_near_village(tx, tz, village_centers) {
+                return instances;
+            }
+
             let tree_angle = noise.get([tx as f64 * 0.5, tz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
 
             // Y-anchor: proportional sink based on terrain height
@@ -205,6 +221,25 @@ impl LowlandBunch {
 }
 
 //=============================================================================
+// VILLAGE CLEARING HELPERS
+//=============================================================================
+
+/// Check if a position is within the clearing radius of any village.
+/// Returns true if the position is too close to a village for large trees.
+#[inline]
+fn is_near_village(x: f32, z: f32, village_centers: &[Vec3]) -> bool {
+    for village in village_centers {
+        let dx = x - village.x;
+        let dz = z - village.z;
+        let dist_sq = dx * dx + dz * dz;
+        if dist_sq < VILLAGE_CLEARING_RADIUS * VILLAGE_CLEARING_RADIUS {
+            return true;
+        }
+    }
+    false
+}
+
+//=============================================================================
 // CHUNK-LEVEL GENERATION
 //=============================================================================
 
@@ -219,6 +254,9 @@ impl LowlandBunch {
 /// * `seed` - World seed for deterministic generation
 /// * `chunk_size` - Size of chunk in world units
 /// * `offset_x`, `offset_z` - Chunk position in world coordinates
+/// * `village_centers` - Optional slice of village center positions; large trees
+///   will be excluded within `VILLAGE_CLEARING_RADIUS` of any village to create
+///   forest clearing effects around settlements
 ///
 /// # Returns
 /// Vec of tree instance transforms (trees and bushes use same mesh currently)
@@ -227,6 +265,7 @@ pub fn generate_trees_for_chunk(
     chunk_size: f32,
     offset_x: f32,
     offset_z: f32,
+    village_centers: &[Vec3],
 ) -> Vec<Mat4> {
     let noise = Perlin::new(seed + 777);
     let mut all_instances = Vec::new();
@@ -320,7 +359,7 @@ pub fn generate_trees_for_chunk(
                 biome_factor,
             };
 
-            let bunch_instances = bunch.generate(seed);
+            let bunch_instances = bunch.generate(seed, village_centers);
             debug_trees_added += bunch_instances.trees.len();
             all_instances.extend(bunch_instances.trees);
             all_instances.extend(bunch_instances.bushes);
@@ -405,6 +444,11 @@ pub fn generate_trees_for_chunk(
         let base_scale = 8.0 + forest_depth * 10.0;
         let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32 * 12.0;
         let scale = (base_scale + scale_var).max(2.0);
+
+        // Skip large trees near villages (forest clearing effect)
+        if scale > LARGE_TREE_SCALE_THRESHOLD && is_near_village(world_x, world_z, village_centers) {
+            continue;
+        }
 
         // Y-anchor: proportional sink to prevent floating
         let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
@@ -528,11 +572,33 @@ mod tests {
 
     #[test]
     fn test_tree_generation() {
-        let instances = generate_trees_for_chunk(12345, 256.0, 0.0, 0.0);
+        // Test with no villages (empty clearing list)
+        let instances = generate_trees_for_chunk(12345, 256.0, 0.0, 0.0, &[]);
         println!("Generated {} tree/bush instances", instances.len());
 
         for instance in &instances {
             assert!(instance.w_axis.w == 1.0, "Invalid transform matrix");
+        }
+    }
+
+    #[test]
+    fn test_tree_generation_with_village_clearing() {
+        // Test with a village at the center - large trees should be excluded
+        let village_center = Vec3::new(128.0, 10.0, 128.0);
+        let instances = generate_trees_for_chunk(12345, 256.0, 0.0, 0.0, &[village_center]);
+        println!("Generated {} tree/bush instances with village clearing", instances.len());
+
+        // Verify no large trees near the village center
+        for instance in &instances {
+            let pos = instance.w_axis.truncate(); // Extract position from transform
+            let scale = instance.x_axis.length(); // Extract scale (uniform scaling)
+            let dist_to_village = ((pos.x - village_center.x).powi(2) + (pos.z - village_center.z).powi(2)).sqrt();
+
+            if dist_to_village < VILLAGE_CLEARING_RADIUS {
+                assert!(scale <= LARGE_TREE_SCALE_THRESHOLD,
+                    "Large tree (scale={:.1}) found within village clearing at distance {:.1}",
+                    scale, dist_to_village);
+            }
         }
     }
 
@@ -543,7 +609,7 @@ mod tests {
 
         for bunch in &bunches {
             assert!(bunch.radius > 0.0, "Bunch must have positive radius");
-            let instances = bunch.generate(12345);
+            let instances = bunch.generate(12345, &[]); // No village clearing for basic test
             println!(
                 "  Bunch at ({:.1}, {:.1}): {} pebbles, {} bushes, {} trees",
                 bunch.center.x, bunch.center.z,

@@ -45,36 +45,37 @@ pub struct WeatherSystem {
 
 impl WeatherSystem {
     pub fn new() -> Self {
+        // Default to moody, overcast weather
         let mut system = Self {
-            current_weather: WeatherType::PartlyCloudy,
-            target_weather: WeatherType::PartlyCloudy,
+            current_weather: WeatherType::Overcast,
+            target_weather: WeatherType::Overcast,
             transition_progress: 1.0, // Start fully transitioned
-            transition_duration: 10.0,
+            transition_duration: 60.0,
             time_since_last_change: 0.0,
 
-            cloud_coverage: 0.45,
-            cloud_density: 0.55,
-            cloud_scale: 1.2,
-            cloud_color_base: Vec3::new(0.92, 0.90, 0.88), // Warm cream
-            cloud_color_shade: Vec3::new(0.78, 0.75, 0.82), // Soft lavender gray
+            cloud_coverage: 0.75,
+            cloud_density: 0.7,
+            cloud_scale: 0.9,
+            cloud_color_base: Vec3::new(0.6, 0.62, 0.65), // Cool grey
+            cloud_color_shade: Vec3::new(0.45, 0.47, 0.52), // Darker grey
             wind_offset: [0.0, 0.0],
 
             // Start values (same as current initially)
-            start_coverage: 0.45,
-            start_density: 0.55,
-            start_scale: 1.2,
-            start_color_base: Vec3::new(0.92, 0.90, 0.88),
-            start_color_shade: Vec3::new(0.78, 0.75, 0.82),
+            start_coverage: 0.75,
+            start_density: 0.7,
+            start_scale: 0.9,
+            start_color_base: Vec3::new(0.6, 0.62, 0.65),
+            start_color_shade: Vec3::new(0.45, 0.47, 0.52),
 
-            target_coverage: 0.45,
-            target_density: 0.55,
-            target_scale: 1.2,
-            target_color_base: Vec3::new(0.92, 0.90, 0.88),
-            target_color_shade: Vec3::new(0.78, 0.75, 0.82),
+            target_coverage: 0.75,
+            target_density: 0.7,
+            target_scale: 0.9,
+            target_color_base: Vec3::new(0.6, 0.62, 0.65),
+            target_color_shade: Vec3::new(0.45, 0.47, 0.52),
 
             auto_weather_enabled: true, // Enable auto weather by default
         };
-        system.set_weather(WeatherType::PartlyCloudy, true);
+        system.set_weather(WeatherType::Overcast, true);
         system
     }
 
@@ -136,8 +137,8 @@ impl WeatherSystem {
         self.start_color_base = self.cloud_color_base;
         self.start_color_shade = self.cloud_color_shade;
 
-        // 1s transition for quick dev testing (was 5s)
-        self.transition_duration = if instant { 0.0 } else { 1.0 };
+        // 60-90s transition for gradual, realistic weather changes
+        self.transition_duration = if instant { 0.0 } else { 60.0 + rand::thread_rng().gen_range(0.0..30.0) };
         self.transition_progress = 0.0; // Reset progress
 
         match weather {
@@ -191,6 +192,39 @@ impl WeatherSystem {
 
         println!("[WEATHER] Transitioning to {:?} (coverage: {:.2} -> {:.2})",
                  weather, self.start_coverage, self.target_coverage);
+    }
+
+    /// Get rain intensity (0-1) for rendering systems
+    pub fn rain_intensity(&self) -> f32 {
+        match self.current_weather {
+            WeatherType::Stormy => 0.8,
+            WeatherType::Overcast => 0.0, // Overcast but not raining
+            _ => 0.0,
+        }
+    }
+
+    /// Get ambient dimming factor (0-1) for moody atmosphere
+    pub fn ambient_dimming(&self) -> f32 {
+        // Use interpolated cloud coverage to determine dimming
+        let base_dimming = match self.current_weather {
+            WeatherType::Clear => 0.0,
+            WeatherType::PartlyCloudy => 0.05,
+            WeatherType::Overcast => 0.2,
+            WeatherType::Stormy => 0.4,
+            WeatherType::Foggy => 0.15,
+        };
+        // Additional dimming from cloud coverage
+        base_dimming + self.cloud_coverage * 0.1
+    }
+
+    /// Get wind strength for rain angle
+    pub fn wind_strength(&self) -> f32 {
+        match self.current_weather {
+            WeatherType::Stormy => 2.5,
+            WeatherType::Overcast => 0.8,
+            WeatherType::PartlyCloudy => 0.5,
+            _ => 0.3,
+        }
     }
 }
 
