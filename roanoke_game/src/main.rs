@@ -59,6 +59,7 @@ mod weather;
 mod systems_manager;
 mod character_agent;
 mod world_features;
+mod ui;
 
 use water_system::WaterSystem;
 use world_features::WorldFeatures;
@@ -398,6 +399,9 @@ struct SharedState {
     character_sheet_tab: CharacterSheetTab,
     character_preview_rotation: f32,  // Y-axis rotation for 3D model preview
     character_preview_dragging: bool, // Is user dragging to rotate?
+    // Perks Journal
+    perks_journal: ui::PerksJournalState,
+    journal_textures: ui::JournalTextures,
 }
 
 impl SharedState {
@@ -1295,6 +1299,9 @@ fn main() {
         character_sheet_tab: CharacterSheetTab::Inventory,
         character_preview_rotation: 0.0,
         character_preview_dragging: false,
+        // Perks Journal
+        perks_journal: ui::PerksJournalState::default(),
+        journal_textures: ui::JournalTextures::new(),
     }));
 
     // ... (Channel setup) ...
@@ -1439,6 +1446,22 @@ fn main() {
                     }
                 }
             }
+            // Handle J key for Perks Journal
+            if let PhysicalKey::Code(KeyCode::KeyJ) = key_event.physical_key {
+                if key_event.state == ElementState::Pressed {
+                    if state.game_state == GameState::Playing && !state.perks_journal.is_open {
+                        state.perks_journal.is_open = true;
+                        state.game_state = GameState::Paused;
+                        println!("[MENU] Perks journal opened");
+                        return;
+                    } else if state.perks_journal.is_open {
+                        state.perks_journal.is_open = false;
+                        state.game_state = GameState::Playing;
+                        println!("[MENU] Perks journal closed");
+                        return;
+                    }
+                }
+            }
         }
 
         // Pass event to egui
@@ -1515,7 +1538,7 @@ fn main() {
                                         WeatherType::Stormy => WeatherType::Overcast,
                                         WeatherType::Foggy => WeatherType::Stormy,
                                     };
-                                    state.weather.set_weather(prev, false);
+                                    state.weather.set_weather(prev, true); // Instant transition for manual control
                                     state.weather.auto_weather_enabled = false; // Disable auto when manual
                                     println!("[WEATHER] << Set to {:?} (auto disabled)", prev);
                                 }
@@ -1528,7 +1551,7 @@ fn main() {
                                         WeatherType::Stormy => WeatherType::Foggy,
                                         WeatherType::Foggy => WeatherType::Clear,
                                     };
-                                    state.weather.set_weather(next, false);
+                                    state.weather.set_weather(next, true); // Instant transition for manual control
                                     state.weather.auto_weather_enabled = false; // Disable auto when manual
                                     println!("[WEATHER] >> Set to {:?} (auto disabled)", next);
                                 }
@@ -2751,38 +2774,17 @@ fn main() {
                     let ik_tilt = animal.get_ik_pelvis_tilt()
                         .unwrap_or(glam::Quat::IDENTITY);
 
-                    // Idle animation for horses (breathing, subtle sway)
-                    let (anim_scale, anim_rotation) = if model_name == "Horse" &&
-                        matches!(animal.behavior_state, animals::BehaviorState::Idle)
-                    {
-                        let t = animal.animation_time;
-                        // Breathing: subtle Y scale oscillation (0.5% variance)
-                        let breath = 1.0 + (t * 1.2).sin() * 0.005;
-                        // Subtle body sway on Y axis
-                        let sway = (t * 0.8).sin() * 0.015;
-                        // Gentle head bob (pitch)
-                        let bob = (t * 1.5).sin() * 0.01;
+                    // Animation is now handled via GPU skeletal animation (joint matrices)
+                    // No procedural transform modifications needed - shader handles it
 
-                        let anim_scale = Vec3::new(1.0, breath, 1.0);
-                        let anim_rot = glam::Quat::from_euler(
-                            glam::EulerRot::YXZ,
-                            sway,  // yaw sway
-                            bob,   // pitch bob
-                            0.0,   // no roll
-                        );
-                        (anim_scale, anim_rot)
-                    } else {
-                        (Vec3::ONE, glam::Quat::IDENTITY)
-                    };
-
-                    // Combine base rotation with IK pelvis tilt and animation
-                    let final_rotation = animal.rotation * ik_tilt * anim_rotation;
+                    // Combine base rotation with IK pelvis tilt
+                    let final_rotation = animal.rotation * ik_tilt;
 
                     // Model position - animal.position.y is already ground height
                     let model_position = animal.position + Vec3::new(0.0, y_offset, 0.0);
 
-                    // Apply animation scale to model scale
-                    let final_scale = Vec3::splat(model_scale) * anim_scale;
+                    // Model scale (animation via GPU skinning, not transform scale)
+                    let final_scale = Vec3::splat(model_scale);
 
                     let model_matrix = Mat4::from_scale_rotation_translation(
                         final_scale,
@@ -2826,10 +2828,20 @@ fn main() {
                             for mesh in &loaded_model.meshes {
                                 let vertex_offset = all_vertices.len() as u32;
                                 for i in 0..mesh.positions.len() {
+                                    // Get joint indices and weights if available (for skinned meshes)
+                                    let joint_indices = mesh.joint_indices.get(i)
+                                        .map(|j| [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32])
+                                        .unwrap_or([0, 0, 0, 0]);
+                                    let joint_weights = mesh.joint_weights.get(i)
+                                        .copied()
+                                        .unwrap_or([0.0, 0.0, 0.0, 0.0]);
+
                                     all_vertices.push(AnimalVertex {
                                         position: mesh.positions[i],
                                         normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
                                         uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                                        joints: joint_indices,
+                                        weights: joint_weights,
                                     });
                                 }
                                 for idx in &mesh.indices {
@@ -2922,6 +2934,7 @@ fn main() {
                                     }).collect();
 
                                     model_pipeline.upload_species_animation(
+                                        ctx.device(),
                                         model_name,
                                         skeleton_gpu,
                                         animations_gpu,
@@ -2939,6 +2952,24 @@ fn main() {
 
                     // Upload instances for this species
                     model_pipeline.upload_instances(ctx.device(), model_name, instances);
+
+                    // Update skeletal animation for this species (if animated and has idle horses)
+                    if *model_name == "Horse" && model_pipeline.has_animations(model_name) {
+                        // Use time_of_day as animation time (cycles every 24 hours = 86400 secs)
+                        // Scale to get reasonable animation speed
+                        let anim_time = state.time_of_day * 150.0; // ~1 animation cycle per minute of game time
+                        if let Some(joint_matrices) = model_pipeline.compute_animation_matrices(
+                            model_name,
+                            "Idle",  // Use Idle animation for idle horses
+                            anim_time,
+                        ) {
+                            model_pipeline.update_joint_matrices(
+                                ctx.queue(),
+                                model_name,
+                                &joint_matrices,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -3182,7 +3213,7 @@ fn main() {
                         ui.painter().text(
                             egui::pos2(menu_x + menu_width - 10.0, menu_y - 45.0),
                             egui::Align2::RIGHT_CENTER,
-                            "v0.0.1",
+                            "v0.0.2",
                             egui::FontId::new(28.0, egui::FontFamily::Proportional),
                             egui::Color32::from_rgb(120, 90, 60),
                         );
@@ -3837,8 +3868,13 @@ fn main() {
                     });
                 }
                 GameState::Paused => {
+                    // Perks Journal (takes priority when open)
+                    if state.perks_journal.is_open {
+                        let SharedState { perks_journal, journal_textures, .. } = &mut *state;
+                        ui::render_perks_journal(ui_ctx, perks_journal, journal_textures);
+                    }
                     // Character Sheet uses different layout than normal pause menu
-                    if state.pause_menu_page == PauseMenuPage::CharacterSheet {
+                    else if state.pause_menu_page == PauseMenuPage::CharacterSheet {
                         // Book-style character sheet UI
                         render_character_sheet(ui_ctx, &mut *state);
                     } else {
@@ -3900,9 +3936,10 @@ fn main() {
                                     ui.label(egui::RichText::new("Movement Speed:").color(egui::Color32::BLACK));
                                     ui.horizontal(|ui| {
                                         ui.add_space((ui.available_width() - 300.0) / 2.0);
-                                        ui.add(egui::Slider::new(&mut state.movement_speed, 1.0..=30.0)
+                                        ui.add(egui::Slider::new(&mut state.movement_speed, 1.0..=1000.0)
                                             .text("Speed")
-                                            .custom_formatter(|n, _| format!("{:.0}", n)));
+                                            .logarithmic(true)
+                                            .custom_formatter(|n, _| format!("{:.0}x", n / 10.0)));
                                     });
                                     ui.add_space(15.0);
 

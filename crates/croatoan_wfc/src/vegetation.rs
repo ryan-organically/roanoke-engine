@@ -13,20 +13,21 @@ use noise::{NoiseFn, Perlin};
 
 /// Derive biome name from terrain height
 /// This maps height to biome strings for species selection
+/// Heights matched to actual terrain generation in mesh_gen.rs
 fn height_to_biome(height: f32) -> &'static str {
     if height < 0.0 {
         "Ocean"
     } else if height < 0.8 {
         "Beach" // Wet sand - no grass
-    } else if height < 3.0 {
+    } else if height < 2.5 {
         "Beach" // Dunes - Sea Oats territory
-    } else if height < 6.0 {
+    } else if height < 5.0 {
         "CoastalScrub"
-    } else if height < 15.0 {
+    } else if height < 8.0 {
         "Grassland"
-    } else if height < 50.0 {
-        "DeciduousForest"
-    } else if height < 80.0 {
+    } else if height < 40.0 {
+        "DeciduousForest" // Forest starts at height 8+ (matches terrain gen)
+    } else if height < 70.0 {
         "Foothills"
     } else {
         "AlpineMeadow"
@@ -59,9 +60,9 @@ pub fn generate_vegetation_for_chunk(
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
-    // High density for lush, bushy grass fields
-    // 8.0 * 256 * 256 = ~524K potential blades, filtering reduces based on biome
-    let max_density = 8.0;
+    // Higher density for bushier grass - must stay under 500K vertex limit
+    // 2.5 * 256 * 256 = ~164K potential blades × 10 verts = ~1.6M, filtered to ~400K
+    let max_density = 2.5;
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();
@@ -182,7 +183,7 @@ pub fn generate_vegetation_for_chunk_with_biome(
     moisture: f32,
 ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>) {
     let noise = Perlin::new(seed + 999);
-    let max_density = 8.0;  // Same as primary function
+    let max_density = 2.5;  // Same as primary function
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();

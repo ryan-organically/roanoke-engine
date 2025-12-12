@@ -1,5 +1,8 @@
 // Animal Model Shader
-// Renders 3D animal models with shadows and moody lighting
+// Renders 3D animal models with skeletal animation, shadows and moody lighting
+
+// Maximum joints for skeletal animation
+const MAX_JOINTS: u32 = 64u;
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
@@ -16,6 +19,11 @@ struct CameraUniform {
     rain_wetness: f32,
 }
 
+// Joint matrices for skeletal animation
+struct JointMatrices {
+    matrices: array<mat4x4<f32>, 64>,  // MAX_JOINTS
+}
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
@@ -29,10 +37,18 @@ var animal_sampler: sampler;
 @group(2) @binding(0) var t_shadow: texture_depth_2d;
 @group(2) @binding(1) var s_shadow: sampler_comparison;
 
+// Joint matrices binding (group 3) - for skinned models
+@group(3) @binding(0)
+var<storage, read> joints: JointMatrices;
+
+// Vertex input with optional skinning data
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    // Skinning attributes (joint indices and weights)
+    @location(3) joint_indices: vec4<u32>,
+    @location(4) joint_weights: vec4<f32>,
 }
 
 struct InstanceInput {
@@ -55,6 +71,64 @@ struct VertexOutput {
     @location(6) shadow_pos: vec3<f32>,
 }
 
+// Apply skeletal skinning to position and normal
+fn apply_skinning(
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    joint_indices: vec4<u32>,
+    joint_weights: vec4<f32>
+) -> array<vec3<f32>, 2> {
+    // Check if this vertex has skinning (weight sum > 0)
+    let weight_sum = joint_weights.x + joint_weights.y + joint_weights.z + joint_weights.w;
+
+    if (weight_sum < 0.001) {
+        // No skinning, return original position/normal
+        return array<vec3<f32>, 2>(position, normal);
+    }
+
+    var skinned_pos = vec3<f32>(0.0);
+    var skinned_normal = vec3<f32>(0.0);
+
+    // Apply influence from each joint
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        var weight: f32;
+        var joint_idx: u32;
+
+        // Extract weight and index for this influence
+        if (i == 0u) {
+            weight = joint_weights.x;
+            joint_idx = joint_indices.x;
+        } else if (i == 1u) {
+            weight = joint_weights.y;
+            joint_idx = joint_indices.y;
+        } else if (i == 2u) {
+            weight = joint_weights.z;
+            joint_idx = joint_indices.z;
+        } else {
+            weight = joint_weights.w;
+            joint_idx = joint_indices.w;
+        }
+
+        if (weight > 0.001 && joint_idx < MAX_JOINTS) {
+            let joint_mat = joints.matrices[joint_idx];
+
+            // Transform position by joint matrix
+            skinned_pos += weight * (joint_mat * vec4<f32>(position, 1.0)).xyz;
+
+            // Transform normal by joint matrix (using upper 3x3)
+            let normal_mat = mat3x3<f32>(
+                joint_mat[0].xyz,
+                joint_mat[1].xyz,
+                joint_mat[2].xyz
+            );
+            skinned_normal += weight * (normal_mat * normal);
+        }
+    }
+
+    // Normalize the result
+    return array<vec3<f32>, 2>(skinned_pos, normalize(skinned_normal));
+}
+
 @vertex
 fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     // Reconstruct model matrix from instance data
@@ -65,16 +139,26 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
         instance.model_matrix_3,
     );
 
-    // Transform position to world space
-    let world_pos = model_matrix * vec4<f32>(vertex.position, 1.0);
+    // Apply skeletal skinning if this vertex has joint weights
+    let skinned = apply_skinning(
+        vertex.position,
+        vertex.normal,
+        vertex.joint_indices,
+        vertex.joint_weights
+    );
+    let local_pos = skinned[0];
+    let local_normal = skinned[1];
 
-    // Transform normal to world space (using upper 3x3 of model matrix)
+    // Transform skinned position to world space
+    let world_pos = model_matrix * vec4<f32>(local_pos, 1.0);
+
+    // Transform skinned normal to world space (using upper 3x3 of model matrix)
     let normal_matrix = mat3x3<f32>(
         instance.model_matrix_0.xyz,
         instance.model_matrix_1.xyz,
         instance.model_matrix_2.xyz,
     );
-    let world_normal = normalize(normal_matrix * vertex.normal);
+    let world_normal = normalize(normal_matrix * local_normal);
 
     // Calculate view distance for fog
     let view_distance = length(camera.camera_pos - world_pos.xyz);

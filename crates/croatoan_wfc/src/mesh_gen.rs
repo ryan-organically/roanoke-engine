@@ -114,22 +114,16 @@ fn calculate_smooth_normals(positions: &[[f32; 3]], indices: &[u32], _grid_size:
 /// Calculate height and color at a specific global position
 pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
     // 1. Biome Noise (Low Frequency)
-    let biome_scale = 0.002; // Slower transitions
+    let biome_scale = 0.002;
     let biome_noise = noise_util::fbm(
         Vec2::new(x * biome_scale, z * biome_scale),
         3, 2.0, 0.5, seed + 100
     );
     let noise_norm = (biome_noise + 1.0) * 0.5;
 
-    // 2. Eastern Sea Gradient (Global X based)
-    // We want a gentle curve.
-    // Positive X -> Ocean. Negative X -> Inland.
-    // Transition zone ~1000 units.
-    let gradient = -x * 0.001; 
-    
-    // Combined 't' value determines "Land vs Sea"
-    let t = noise_norm * 0.3 + gradient + 0.5; // Bias to 0.5 at x=0
-    let t = t.clamp(0.0, 1.0);
+    // 2. Eastern Sea Gradient
+    let gradient = -x * 0.001;
+    let t = (noise_norm * 0.3 + gradient + 0.5).clamp(0.0, 1.0);
 
     // 3. Detail Noise
     let detail_noise = noise_util::fbm(
@@ -137,48 +131,190 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         4, 2.0, 0.5, seed
     );
 
-    // 4. Biome Definitions (Roanoke Spec) - Adjusted to reduce beige
-    let (base_height, height_mult, base_color) = if t < 0.45 {
+    // 4. River system - carves channels through terrain
+    let river_depth = calculate_river_depth(x, z, seed);
+
+    // 5. Pond system - small water bodies
+    let pond_depth = calculate_pond_depth(x, z, seed);
+
+    // 6. Rolling hills for inland areas (increases with -X distance)
+    let inland_dist = (-x - 200.0).max(0.0); // Hills start 200 units inland
+    let hill_strength = (inland_dist / 500.0).min(1.0); // Full strength at 700 units
+    let hill_noise = noise_util::fbm(
+        Vec2::new(x * 0.008, z * 0.008),
+        3, 2.0, 0.5, seed + 500
+    );
+    let rolling_hills = hill_noise * 25.0 * hill_strength; // Up to 25m hills
+
+    // 7. Biome Definitions
+    let (mut base_height, height_mult, mut base_color) = if t < 0.45 {
         // Ocean / Shallow Water
-        // Add sandbars using detail noise
         let sandbar = if detail_noise > 0.5 { 0.5 } else { 0.0 };
         let water_depth = lerp(-5.0, -0.5, t / 0.45);
         let h = water_depth + sandbar;
-        
-        // Color: Turquoise at shore, Teal deep
         let depth_factor = (t / 0.45).clamp(0.0, 1.0);
         let c = lerp_color([0.05, 0.3, 0.4], [0.2, 0.8, 0.8], depth_factor);
         (h, 0.1, c)
     } else if t < 0.48 {
-        // Beach / Dunes (Narrowed from 0.55 to 0.48)
+        // Beach / Dunes
         let blend = (t - 0.45) / 0.03;
         let h = lerp(0.0, 2.0, blend);
-        let m = 0.2; // Soft dunes
-        // Darker Wet Sand - less beige/white
         let c = [0.60, 0.50, 0.40];
-        (h, m, c)
-    } else if t < 0.58 {
-        // Subtropical Scrub (Narrowed)
-        let blend = (t - 0.48) / 0.10; 
-        let h = lerp(2.0, 6.0, blend);
-        let m = 1.0; 
-        // Vibrant Dark Scrub - remove grey/beige tones
-        let c = lerp_color([0.35, 0.45, 0.25], [0.20, 0.30, 0.10], blend);
-        (h, m, c)
+        (h, 0.2, c)
+    } else if t < 0.55 {
+        // Subtropical Scrub / Grassland transition
+        let blend = (t - 0.48) / 0.07;
+        let h = lerp(2.0, 5.0, blend);
+        let c = lerp_color([0.35, 0.45, 0.25], [0.25, 0.38, 0.15], blend);
+        (h, 0.8, c)
     } else {
-        // Coastal Forest
-        let blend = (t - 0.58) / 0.42; 
-        let h = lerp(6.0, 15.0, blend);
-        let m = 2.0;
-        // Deep Green Forest
-        let c = lerp_color([0.25, 0.40, 0.15], [0.1, 0.25, 0.1], blend);
+        // Coastal Forest - flatter near coast, rolling hills inland
+        let blend = (t - 0.55) / 0.45;
+        let h = lerp(5.0, 12.0, blend) + rolling_hills;
+        let m = 1.5 * (1.0 - hill_strength * 0.5); // Less detail noise where hills are
+        let c = lerp_color([0.22, 0.38, 0.12], [0.08, 0.22, 0.06], blend);
         (h, m, c)
     };
 
-    // Apply height
-    let height = base_height + detail_noise * height_mult;
+    // Apply detail noise
+    let mut height = base_height + detail_noise * height_mult;
+
+    // Apply river carving (cuts into terrain)
+    if river_depth > 0.0 && height > -1.0 {
+        let river_bottom = -1.5; // Rivers are shallow
+        height = lerp(height, river_bottom, river_depth);
+        // River bed color
+        if river_depth > 0.3 {
+            base_color = lerp_color(base_color, [0.15, 0.25, 0.30], river_depth);
+        }
+    }
+
+    // Apply pond carving
+    if pond_depth > 0.0 && height > -0.5 {
+        let pond_bottom = -1.0;
+        height = lerp(height, pond_bottom, pond_depth);
+        if pond_depth > 0.3 {
+            base_color = lerp_color(base_color, [0.12, 0.28, 0.35], pond_depth);
+        }
+    }
+
+    // Cave entrance near spawn (around -50, 0 to -100, 50)
+    let cave_entrance = calculate_cave_entrance(x, z);
+    if cave_entrance > 0.0 {
+        height = lerp(height, -3.0, cave_entrance);
+        base_color = lerp_color(base_color, [0.15, 0.12, 0.10], cave_entrance);
+    }
+
+    // Mine entrance on beach (around 150, -30)
+    let mine_entrance = calculate_mine_entrance(x, z);
+    if mine_entrance > 0.0 {
+        height = lerp(height, -4.0, mine_entrance);
+        base_color = lerp_color(base_color, [0.25, 0.20, 0.15], mine_entrance);
+    }
 
     (height, base_color)
+}
+
+/// Calculate river depth at a position (0.0 = no river, 1.0 = center of river)
+fn calculate_river_depth(x: f32, z: f32, seed: u32) -> f32 {
+    // Multiple river channels using sine waves with noise perturbation
+    let mut max_depth = 0.0f32;
+
+    // River 1: Flows roughly north-south near spawn, curves with noise
+    let river1_center_x = -80.0 + noise_util::fbm(Vec2::new(z * 0.003, 0.0), 2, 2.0, 0.5, seed + 200) * 60.0;
+    let river1_width = 8.0;
+    let dist1 = (x - river1_center_x).abs();
+    if dist1 < river1_width {
+        let depth1 = 1.0 - (dist1 / river1_width);
+        max_depth = max_depth.max(depth1 * depth1); // Quadratic falloff
+    }
+
+    // River 2: Flows diagonally, joins river 1
+    let river2_base_x = -150.0 + z * 0.4;
+    let river2_center_x = river2_base_x + noise_util::fbm(Vec2::new(z * 0.005, 1.0), 2, 2.0, 0.5, seed + 201) * 40.0;
+    let river2_width = 6.0;
+    let dist2 = (x - river2_center_x).abs();
+    // Only active for z < 100
+    if dist2 < river2_width && z < 100.0 && z > -200.0 {
+        let depth2 = 1.0 - (dist2 / river2_width);
+        max_depth = max_depth.max(depth2 * depth2);
+    }
+
+    // River 3: Smaller stream near spawn
+    let river3_center_z = 40.0 + noise_util::fbm(Vec2::new(x * 0.004, 2.0), 2, 2.0, 0.5, seed + 202) * 30.0;
+    let river3_width = 4.0;
+    let dist3 = (z - river3_center_z).abs();
+    if dist3 < river3_width && x > -150.0 && x < 50.0 {
+        let depth3 = 1.0 - (dist3 / river3_width);
+        max_depth = max_depth.max(depth3 * depth3);
+    }
+
+    max_depth
+}
+
+/// Calculate pond depth at a position
+fn calculate_pond_depth(x: f32, z: f32, seed: u32) -> f32 {
+    let mut max_depth = 0.0f32;
+
+    // Fixed pond locations near spawn for visibility
+    let ponds = [
+        (Vec2::new(-40.0, 80.0), 12.0),   // Pond near spawn
+        (Vec2::new(-120.0, -50.0), 15.0), // Forest pond
+        (Vec2::new(30.0, 120.0), 10.0),   // Coastal pond
+        (Vec2::new(-200.0, 30.0), 18.0),  // Large inland pond
+    ];
+
+    for (center, radius) in ponds {
+        let dist = Vec2::new(x, z).distance(center);
+        if dist < radius {
+            // Smooth edges with noise
+            let edge_noise = noise_util::fbm(Vec2::new(x * 0.1, z * 0.1), 2, 2.0, 0.5, seed + 300) * 3.0;
+            let effective_radius = radius + edge_noise;
+            if dist < effective_radius {
+                let depth = 1.0 - (dist / effective_radius);
+                max_depth = max_depth.max(depth * depth);
+            }
+        }
+    }
+
+    // Additional procedural ponds based on noise
+    let pond_noise = noise_util::fbm(Vec2::new(x * 0.02, z * 0.02), 3, 2.0, 0.5, seed + 301);
+    if pond_noise > 0.6 {
+        let pond_strength = (pond_noise - 0.6) / 0.4; // 0 to 1
+        max_depth = max_depth.max(pond_strength * 0.7);
+    }
+
+    max_depth
+}
+
+/// Calculate cave entrance depression
+fn calculate_cave_entrance(x: f32, z: f32) -> f32 {
+    // Cave entrance at approximately (-70, 25)
+    let cave_center = Vec2::new(-70.0, 25.0);
+    let cave_radius = 8.0;
+    let dist = Vec2::new(x, z).distance(cave_center);
+
+    if dist < cave_radius {
+        let depth = 1.0 - (dist / cave_radius);
+        depth * depth // Quadratic for bowl shape
+    } else {
+        0.0
+    }
+}
+
+/// Calculate mine entrance on beach
+fn calculate_mine_entrance(x: f32, z: f32) -> f32 {
+    // Mine entrance at approximately (120, -20) on the beach
+    let mine_center = Vec2::new(120.0, -20.0);
+    let mine_radius = 5.0;
+    let dist = Vec2::new(x, z).distance(mine_center);
+
+    if dist < mine_radius {
+        let depth = 1.0 - (dist / mine_radius);
+        depth * depth
+    } else {
+        0.0
+    }
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {

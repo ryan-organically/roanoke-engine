@@ -18,36 +18,46 @@ const MAX_INSTANCES_PER_SPECIES: usize = 500;
 /// Maximum joints supported for skeletal animation
 pub const MAX_JOINTS: usize = 64;
 
-/// Vertex data for animal models (with skinning support)
+/// Vertex data for animal models with skeletal skinning support
+/// All animals use this format - non-skinned models have default joint/weight values
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct AnimalVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
-}
-
-/// Skinned vertex data for animal models with skeletal animation
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct SkinnedAnimalVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
     /// Joint indices (up to 4 influencing joints)
-    pub joints: [u32; 4], // Using u32 for shader compatibility
+    pub joints: [u32; 4],
     /// Joint weights (should sum to 1.0)
     pub weights: [f32; 4],
 }
 
-impl SkinnedAnimalVertex {
-    pub fn from_unskinned(v: &AnimalVertex) -> Self {
+impl AnimalVertex {
+    /// Create a non-skinned vertex (default joint weights)
+    pub fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
         Self {
-            position: v.position,
-            normal: v.normal,
-            uv: v.uv,
+            position,
+            normal,
+            uv,
             joints: [0, 0, 0, 0],
-            weights: [1.0, 0.0, 0.0, 0.0], // All weight on first joint
+            weights: [0.0, 0.0, 0.0, 0.0], // No skinning - shader will skip
+        }
+    }
+
+    /// Create a skinned vertex with joint weights
+    pub fn skinned(
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        joints: [u32; 4],
+        weights: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            joints,
+            weights,
         }
     }
 }
@@ -160,6 +170,12 @@ pub struct AnimalModelPipeline {
     shadow_bind_group_layout: BindGroupLayout,
     /// Shadow bind group (created when shadow map is bound)
     shadow_bind_group: Option<BindGroup>,
+    /// Joint matrices bind group layout (for skeletal animation)
+    joint_bind_group_layout: BindGroupLayout,
+    /// Default joint matrices buffer (identity matrices for non-animated models)
+    default_joint_buffer: Buffer,
+    /// Default joint bind group
+    default_joint_bind_group: BindGroup,
     /// Shared texture sampler
     sampler: Sampler,
     /// Default white texture for untextured models
@@ -248,6 +264,32 @@ impl AnimalModelPipeline {
                 ],
             });
 
+        // Create bind group layout for joint matrices (skeletal animation)
+        let joint_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Animal Model Joint Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        // Create default joint buffer with identity matrices
+        let identity_matrices: Vec<[[f32; 4]; 4]> = (0..MAX_JOINTS)
+            .map(|_| Mat4::IDENTITY.to_cols_array_2d())
+            .collect();
+        let default_joint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Animal Default Joint Buffer"),
+            contents: bytemuck::cast_slice(&identity_matrices),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
         // Create shared sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Animal Model Sampler"),
@@ -317,10 +359,25 @@ impl AnimalModelPipeline {
             ],
         });
 
-        // Create pipeline layout (camera, texture, shadow)
+        // Create default joint bind group
+        let default_joint_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Animal Default Joint Bind Group"),
+            layout: &joint_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: default_joint_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Create pipeline layout (camera, texture, shadow, joints)
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Animal Model Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout, &shadow_bind_group_layout],
+            bind_group_layouts: &[
+                &camera_bind_group_layout,
+                &texture_bind_group_layout,
+                &shadow_bind_group_layout,
+                &joint_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -340,7 +397,7 @@ impl AnimalModelPipeline {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[
-                    // Vertex buffer layout
+                    // Vertex buffer layout (with skeletal skinning attributes)
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<AnimalVertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
@@ -362,6 +419,18 @@ impl AnimalModelPipeline {
                                 offset: 24,
                                 shader_location: 2,
                                 format: wgpu::VertexFormat::Float32x2,
+                            },
+                            // Joint indices (vec4<u32>)
+                            wgpu::VertexAttribute {
+                                offset: 32,
+                                shader_location: 3,
+                                format: wgpu::VertexFormat::Uint32x4,
+                            },
+                            // Joint weights (vec4<f32>)
+                            wgpu::VertexAttribute {
+                                offset: 48,
+                                shader_location: 4,
+                                format: wgpu::VertexFormat::Float32x4,
                             },
                         ],
                     },
@@ -464,6 +533,9 @@ impl AnimalModelPipeline {
             texture_bind_group_layout,
             shadow_bind_group_layout,
             shadow_bind_group: None,  // Created when shadow map is bound
+            joint_bind_group_layout,
+            default_joint_buffer,
+            default_joint_bind_group,
             sampler,
             default_texture,
             default_texture_view,
@@ -535,13 +607,20 @@ impl AnimalModelPipeline {
             return;
         }
 
-        // Sanitize vertex data
+        // Sanitize vertex data (preserve joints/weights for skinning)
         let sanitized_vertices: Vec<AnimalVertex> = vertices
             .iter()
             .map(|v| AnimalVertex {
                 position: sanitize_vec3(v.position),
                 normal: sanitize_vec3(v.normal),
                 uv: [sanitize_float(v.uv[0]), sanitize_float(v.uv[1])],
+                joints: v.joints,
+                weights: [
+                    sanitize_float(v.weights[0]),
+                    sanitize_float(v.weights[1]),
+                    sanitize_float(v.weights[2]),
+                    sanitize_float(v.weights[3]),
+                ],
             })
             .collect();
 
@@ -738,31 +817,144 @@ impl AnimalModelPipeline {
     }
 
     /// Upload skeleton and animation data for a species
-    /// This stores the animation data for later sampling
+    /// This stores the animation data for later sampling and creates GPU resources
     pub fn upload_species_animation(
         &mut self,
+        device: &Device,
         species_name: &str,
         skeleton: SkeletonGpu,
         animations: Vec<AnimationGpu>,
     ) {
         if let Some(mesh) = self.species_meshes.get_mut(species_name) {
             let anim_names: Vec<&str> = animations.iter().map(|a| a.name.as_str()).collect();
+            let joint_count = skeleton.inverse_bind_matrices.len();
+
+            // Create joint buffer for this species
+            let identity_matrices: Vec<[[f32; 4]; 4]> = (0..MAX_JOINTS)
+                .map(|_| Mat4::IDENTITY.to_cols_array_2d())
+                .collect();
+            let joint_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("Animal Joint Buffer: {}", species_name)),
+                contents: bytemuck::cast_slice(&identity_matrices),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+
+            // Create joint bind group for this species
+            let joint_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("Animal Joint Bind Group: {}", species_name)),
+                layout: &self.joint_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: joint_buffer.as_entire_binding(),
+                }],
+            });
+
             log::info!(
                 "[AnimalModel] Uploaded skeleton ({} joints) and {} animations for '{}': {:?}",
-                skeleton.inverse_bind_matrices.len(),
+                joint_count,
                 animations.len(),
                 species_name,
                 anim_names
             );
+
             mesh.skeleton = Some(skeleton);
             mesh.animations = animations;
             mesh.is_skinned = true;
+            mesh.joint_buffer = Some(joint_buffer);
+            mesh.joint_bind_group = Some(joint_bind_group);
         } else {
             log::warn!(
                 "[AnimalModel] Cannot upload animation for '{}': mesh not found",
                 species_name
             );
         }
+    }
+
+    /// Update joint matrices for a species (call every frame for animated species)
+    pub fn update_joint_matrices(
+        &self,
+        queue: &Queue,
+        species_name: &str,
+        joint_matrices: &[[[f32; 4]; 4]],
+    ) {
+        if let Some(mesh) = self.species_meshes.get(species_name) {
+            if let Some(joint_buffer) = &mesh.joint_buffer {
+                // Pad to MAX_JOINTS if necessary
+                let mut padded = vec![Mat4::IDENTITY.to_cols_array_2d(); MAX_JOINTS];
+                for (i, mat) in joint_matrices.iter().enumerate().take(MAX_JOINTS) {
+                    padded[i] = *mat;
+                }
+                queue.write_buffer(joint_buffer, 0, bytemuck::cast_slice(&padded));
+            }
+        }
+    }
+
+    /// Sample animation and compute joint matrices for a species
+    /// Returns the computed joint matrices ready for GPU upload
+    pub fn compute_animation_matrices(
+        &self,
+        species_name: &str,
+        animation_name: &str,
+        time: f32,
+    ) -> Option<Vec<[[f32; 4]; 4]>> {
+        let mesh = self.species_meshes.get(species_name)?;
+        let skeleton = mesh.skeleton.as_ref()?;
+        let animation = mesh.animations.iter().find(|a| a.name.eq_ignore_ascii_case(animation_name))?;
+
+        let t = if animation.duration > 0.001 {
+            time % animation.duration
+        } else {
+            0.0
+        };
+
+        let joint_count = skeleton.inverse_bind_matrices.len();
+        let mut local_transforms: Vec<Mat4> = Vec::with_capacity(joint_count);
+        let mut world_transforms: Vec<Mat4> = Vec::with_capacity(joint_count);
+
+        // Sample animation for each joint
+        for joint_idx in 0..joint_count {
+            let keyframes = animation.joint_keyframes.get(joint_idx).cloned().unwrap_or_default();
+
+            // Sample translation, rotation, scale
+            let translation = sample_vec3_keyframes(&keyframes.translation_times, &keyframes.translations, t);
+            let rotation = sample_quat_keyframes(&keyframes.rotation_times, &keyframes.rotations, t);
+            let scale = if keyframes.scale_times.is_empty() {
+                Vec3::ONE
+            } else {
+                sample_vec3_keyframes(&keyframes.scale_times, &keyframes.scales, t)
+            };
+
+            // Build local transform matrix
+            let local = Mat4::from_scale_rotation_translation(scale, rotation, translation);
+            local_transforms.push(local);
+        }
+
+        // Compute world transforms (parent chain)
+        for joint_idx in 0..joint_count {
+            let local = local_transforms[joint_idx];
+            let world = if let Some(parent_idx) = skeleton.parents[joint_idx] {
+                if parent_idx < world_transforms.len() {
+                    world_transforms[parent_idx] * local
+                } else {
+                    local
+                }
+            } else {
+                local
+            };
+            world_transforms.push(world);
+        }
+
+        // Compute final joint matrices (world * inverse_bind)
+        let joint_matrices: Vec<[[f32; 4]; 4]> = world_transforms
+            .iter()
+            .enumerate()
+            .map(|(i, world)| {
+                let inv_bind = Mat4::from_cols_array_2d(&skeleton.inverse_bind_matrices[i]);
+                (*world * inv_bind).to_cols_array_2d()
+            })
+            .collect();
+
+        Some(joint_matrices)
     }
 
     /// Get animation names for a species
@@ -929,6 +1121,12 @@ impl AnimalModelPipeline {
                     .as_ref()
                     .unwrap_or(&self.default_texture_bind_group);
                 render_pass.set_bind_group(1, texture_bind_group, &[]);
+
+                // Bind joint matrices (use species joint buffer or default identity matrices)
+                let joint_bind_group = mesh.joint_bind_group
+                    .as_ref()
+                    .unwrap_or(&self.default_joint_bind_group);
+                render_pass.set_bind_group(3, joint_bind_group, &[]);
 
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 render_pass.set_vertex_buffer(1, instance_buffer.slice(..));

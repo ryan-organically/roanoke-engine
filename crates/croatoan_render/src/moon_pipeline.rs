@@ -116,8 +116,8 @@ impl MoonPipeline {
         let moon_distance = 800.0;
         let moon_world_pos = camera_pos - moon_dir * moon_distance;
 
-        // Moon size - match sun size so corona glow has room to render
-        let moon_size = 45.0;
+        // Moon size - smaller than sun, more subtle presence
+        let moon_size = 25.0;
 
         // Moon elevation (y component of moon direction, negative = below horizon)
         let moon_elevation = -moon_dir.y;
