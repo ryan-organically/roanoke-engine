@@ -70,6 +70,14 @@ pub fn generate_vegetation_for_chunk(
     let mut all_local_heights = Vec::new();
     let mut all_indices = Vec::new();
 
+    // Debug counters
+    let mut skip_spawn = 0u32;
+    let mut skip_density = 0u32;
+    let mut skip_clump = 0u32;
+    let mut spawned = 0u32;
+    let mut sample_height = 0.0f32;
+    let mut sample_biome = "";
+
     // Create chunk-specific seed from chunk coordinates
     let chunk_hash = ((offset_x as i32).wrapping_mul(73856093) ^ (offset_z as i32).wrapping_mul(19349663)) as u32;
 
@@ -96,10 +104,17 @@ pub fn generate_vegetation_for_chunk(
         let moisture_noise = noise.get([world_x as f64 * 0.05, world_z as f64 * 0.05]) as f32;
         let moisture = estimate_moisture(height, moisture_noise);
 
+        // Sample first point for debug
+        if i == 0 {
+            sample_height = height;
+            sample_biome = biome;
+        }
+
         // Check if grass should spawn at this location
         let is_water = height < 0.0;
         let is_rock = false; // TODO: integrate with rock spawning system
         if !should_spawn_grass(biome, height, moisture, is_water, is_rock) {
+            skip_spawn += 1;
             continue;
         }
 
@@ -119,6 +134,7 @@ pub fn generate_vegetation_for_chunk(
         // Compare against effective density (normalized to max_density)
         let density_threshold = effective_density / max_density;
         if normalized_roll > density_threshold.clamp(0.1, 1.0) {
+            skip_density += 1;
             continue; // Skip this blade based on density
         }
 
@@ -129,9 +145,12 @@ pub fn generate_vegetation_for_chunk(
                 world_z as f64 * 0.3 * (1.0 + species_config.clumping_factor as f64),
             ]) as f32;
             if clump_noise < -0.3 * species_config.clumping_factor {
+                skip_clump += 1;
                 continue; // Skip - in a gap between clumps
             }
         }
+
+        spawned += 1;
 
         // Patch Noise: Create patches of different sizes/heights
         let patch_noise = noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) as f32;
@@ -166,8 +185,11 @@ pub fn generate_vegetation_for_chunk(
         all_indices.extend(blade.indices.iter().map(|idx| idx + vertex_offset));
     }
 
-    println!("[GRASS] Chunk ({}, {}): {} verts, {} indices",
-        offset_x, offset_z, all_positions.len(), all_indices.len());
+    // Debug: only print for chunks near spawn
+    if offset_x.abs() < 300.0 && offset_z.abs() < 300.0 {
+        println!("[GRASS] Chunk ({}, {}): h={:.1} biome={} | spawned={} skip_spawn={} skip_density={} skip_clump={}",
+            offset_x, offset_z, sample_height, sample_biome, spawned, skip_spawn, skip_density, skip_clump);
+    }
 
     (all_positions, all_colors, all_local_heights, all_indices)
 }

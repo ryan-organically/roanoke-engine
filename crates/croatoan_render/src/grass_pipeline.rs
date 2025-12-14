@@ -9,9 +9,10 @@ use crate::pipeline_validation::{
 };
 
 /// Maximum vertices per grass mesh (safety limit - grass is highest vertex count)
-const MAX_GRASS_VERTICES: usize = 500_000;
+/// Increased to 1.2M to support dense meadow/forest floor coverage (~100K blades * 10 verts)
+const MAX_GRASS_VERTICES: usize = 1_200_000;
 /// Maximum indices per grass mesh (safety limit)
-const MAX_GRASS_INDICES: usize = 1_500_000;
+const MAX_GRASS_INDICES: usize = 3_600_000;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]

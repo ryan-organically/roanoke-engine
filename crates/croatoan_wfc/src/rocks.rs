@@ -312,123 +312,12 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     }
 
     //=========================================================================
-    // PHASE 3: Dense Pebble Fields
+    // PHASE 3 & 4: DISABLED - Pebble fields removed for performance
     //=========================================================================
-    // Visible pebbles scattered across ground for detail
-    // Moderate density that renders well without tanking FPS
-
-    let pebble_density = 0.15; // Restored - visible ground detail
-    let potential_pebbles = (chunk_size * chunk_size * pebble_density) as u32;
-
-    for i in 0..potential_pebbles {
-        // Use different noise for pebble positions (avoid overlap with large rocks)
-        let rand_x = pebble_noise.get([i as f64 * 0.17, 400.0]) as f32;
-        let rand_z = pebble_noise.get([i as f64 * 0.17, 500.0]) as f32;
-
-        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
-        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
-
-        let world_x = offset_x + local_x;
-        let world_z = offset_z + local_z;
-
-        // Skip pebbles inside corn fields
-        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
-            continue;
-        }
-
-        let (height, _color) = get_height_at(world_x, world_z, seed);
-
-        // Skip water (but include beach)
-        if height < 0.2 {
-            continue;
-        }
-
-        // Clustering: Use low-frequency noise to create pebble-rich and pebble-sparse areas
-        let cluster_val = cluster_noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) as f32;
-
-        // Skip ~40% of pebbles in sparse areas for natural clustering
-        if cluster_val < -0.2 {
-            continue;
-        }
-
-        // Determine pebble vs small rock
-        let type_roll = pebble_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32;
-        let rock_type = if type_roll > 0.7 && cluster_val > 0.3 {
-            RockType::SmallRock // 30% chance of small rock in dense clusters
-        } else {
-            RockType::Pebble
-        };
-
-        // Simplified transform for pebbles (no tilt, faster)
-        let angle = pebble_noise.get([world_x as f64 * 0.8, world_z as f64 * 0.8]) as f32 * std::f32::consts::TAU;
-        let (scale_min, scale_max) = rock_type.scale_variation();
-        let scale_t = (pebble_noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) + 1.0) * 0.5;
-        let scale = rock_type.base_scale() * (scale_min + scale_t as f32 * (scale_max - scale_min));
-
-        let transform = Mat4::from_scale_rotation_translation(
-            Vec3::splat(scale),
-            Quat::from_rotation_y(angle),
-            Vec3::new(world_x, height - rock_type.sink_amount(), world_z),
-        );
-
-        instances.push((rock_type.mesh_name().to_string(), transform));
-    }
-
-    //=========================================================================
-    // PHASE 4: Beach Pebble Strips
-    //=========================================================================
-    // Dense lines of pebbles along the water's edge
-    // Creates natural-looking tide line debris
-
-    let beach_pebble_density = 0.8;
-    let potential_beach = (chunk_size * chunk_size * beach_pebble_density) as u32;
-
-    for i in 0..potential_beach {
-        let rand_x = cluster_noise.get([i as f64 * 0.23, 600.0]) as f32;
-        let rand_z = cluster_noise.get([i as f64 * 0.23, 700.0]) as f32;
-
-        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
-        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
-
-        let world_x = offset_x + local_x;
-        let world_z = offset_z + local_z;
-
-        // Skip beach pebbles inside corn fields
-        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
-            continue;
-        }
-
-        let (height, _color) = get_height_at(world_x, world_z, seed);
-        let biome_t = get_biome_t(world_x, world_z, seed);
-
-        // Only in beach zone (t 0.45-0.55) at tide line (height 0.3-1.5)
-        if biome_t < 0.45 || biome_t > 0.56 {
-            continue;
-        }
-        if height < 0.3 || height > 1.8 {
-            continue;
-        }
-
-        // Dense at tide line (height ~0.5-1.0)
-        let tide_factor = 1.0 - ((height - 0.75).abs() / 0.5).clamp(0.0, 1.0);
-        let roll = (cluster_noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) + 1.0) * 0.5;
-        if roll > (tide_factor * 0.8) as f64 {
-            continue;
-        }
-
-        // Beach pebbles are small
-        let rock_type = RockType::Pebble;
-        let angle = cluster_noise.get([world_x as f64, world_z as f64]) as f32 * std::f32::consts::TAU;
-        let scale = rock_type.base_scale() * (0.6 + roll as f32 * 0.8);
-
-        let transform = Mat4::from_scale_rotation_translation(
-            Vec3::splat(scale),
-            Quat::from_rotation_y(angle),
-            Vec3::new(world_x, height - 0.02, world_z),
-        );
-
-        instances.push((rock_type.mesh_name().to_string(), transform));
-    }
+    // Pebbles now only spawn as part of bunches (PHASE 1) near large boulders
+    // This greatly reduces vertex count while keeping boulders interesting
+    let _ = pebble_noise; // Silence unused warning
+    let _ = cluster_noise;
 
     //=========================================================================
     // PHASE 5: Large Beach Boulders
@@ -528,12 +417,12 @@ mod tests {
             println!("  {}: {}", name, count);
         }
 
-        // Should have significantly more rocks now (10x density)
+        // Pebble fields disabled - now only boulders and bunch-integrated rocks
         // For a 256x256 chunk:
-        // - Large rocks: ~0.2 * 65536 * 0.4 (filter) = ~5200 potential, ~2000 actual
-        // - Pebbles: ~1.2 * 65536 * 0.6 (filter) = ~47000 potential, ~28000 actual
-        // Plus bunch-integrated rocks
-        assert!(instances.len() > 10000, "Expected >10k rocks with 10x density");
+        // - Large/medium rocks from PHASE 2: ~2000-3000
+        // - Beach boulders from PHASE 5: ~100-200
+        // - Bunch rocks + pebbles from PHASE 1: varies by biome
+        assert!(instances.len() > 100, "Expected some rocks to spawn");
     }
 
     #[test]

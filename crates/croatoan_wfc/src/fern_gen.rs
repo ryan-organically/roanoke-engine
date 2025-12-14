@@ -83,14 +83,13 @@ pub fn generate_ferns_for_chunk(
     model_count: usize,
 ) -> FernInstances {
     let noise = Perlin::new(seed + 4242); // Unique seed offset for ferns
-    let moisture_noise = Perlin::new(seed + 4243);
     let mut result = FernInstances::default();
 
     let model_count = model_count.max(1);
 
     // Grid-based placement with jitter for natural distribution
-    // 22m grid = ~2x density vs 32m grid, filtered by conditions
-    let grid_size = 22.0;
+    // 10m grid = 5x density for dense forest floor coverage
+    let grid_size = 10.0;
     let cells_per_row = (chunk_size / grid_size).ceil() as i32;
 
     for gz in 0..cells_per_row {
@@ -100,8 +99,8 @@ pub fn generate_ferns_for_chunk(
             let grid_z = offset_z + (gz as f32 + 0.5) * grid_size;
 
             // Large jitter for natural scatter
-            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * grid_size * 0.8;
-            let jitter_z = noise.get([grid_x as f64 * 0.1 + 50.0, grid_z as f64 * 0.1]) as f32 * grid_size * 0.8;
+            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * grid_size * 0.9;
+            let jitter_z = noise.get([grid_x as f64 * 0.1 + 50.0, grid_z as f64 * 0.1]) as f32 * grid_size * 0.9;
 
             let world_x = grid_x + jitter_x;
             let world_z = grid_z + jitter_z;
@@ -119,33 +118,19 @@ pub fn generate_ferns_for_chunk(
                 continue;
             }
 
-            // === MOISTURE CHECK ===
-            // Ferns prefer moist forest floor
-            let moisture = (moisture_noise.get([world_x as f64 * 0.02, world_z as f64 * 0.02]) as f32 + 1.0) * 0.5;
-            if moisture < 0.35 {
-                continue; // Too dry for ferns
-            }
-
-            // === DENSITY FILTERING ===
-            // Base ~40% chance, increased in moister areas
-            let density_roll = (noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) + 1.0) * 0.5;
-            let density_threshold = 0.55 - moisture * 0.2; // 0.35-0.55 threshold
-            if density_roll < density_threshold as f64 {
-                continue;
-            }
-
-            // === CLUMPING ===
-            // Ferns grow in patches, not uniformly
-            let clump_noise = noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) as f32;
-            if clump_noise < -0.3 {
-                continue; // Gap in fern coverage
+            // === LIGHT CLUMPING ===
+            // Only skip ~15% for natural gaps (reduced from 30%)
+            let clump_noise = noise.get([world_x as f64 * 0.12, world_z as f64 * 0.12]) as f32;
+            if clump_noise < -0.7 {
+                continue; // Small gaps in fern coverage
             }
 
             // === SPAWN FERN ===
-            // 2x scale for visibility - base 1.6-2.4 with variance up to 3.0
-            let scale_base = 1.6 + moisture * 0.8; // Larger in moist areas
-            let scale_var = noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]).abs() as f32 * 0.6;
-            let scale = scale_base + scale_var;
+            // 2x size increase - high variation from 1.5 to 9.0
+            let scale_base = 3.0;
+            let scale_var = noise.get([world_x as f64 * 0.25, world_z as f64 * 0.25]).abs() as f32;
+            let scale_mult = 0.5 + scale_var * 2.5; // 0.5x to 3.0x multiplier
+            let scale = scale_base * scale_mult; // Final: 1.5 to 9.0
 
             let rotation = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
 
