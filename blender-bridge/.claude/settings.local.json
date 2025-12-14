@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(\"/mnt/c/Program Files (x86)/Steam/steamapps/common/Blender/blender.exe\" --background --python-expr \"import bpy; bpy.ops.preferences.addon_enable(module=''blender_bridge_addon''); bpy.ops.wm.save_userpref(); print(''Addon enabled successfully'')\")",
+      "Bash(\"/mnt/c/Program Files (x86)/Steam/steamapps/common/Blender/blender.exe\" --background --python-expr \"\nimport bpy\nimport addon_utils\n\n# Check if addon is in the list\nprint(''Checking addon status...'')\nfor mod in addon_utils.modules():\n    if ''bridge'' in mod.__name__.lower():\n        print(f''Found: {mod.__name__}'')\n\n# Try to enable and catch any errors\ntry:\n    bpy.ops.preferences.addon_enable(module=''blender_bridge_addon'')\n    print(''Addon enabled successfully'')\nexcept Exception as e:\n    print(f''Error enabling: {e}'')\n\n# Check if it''s now enabled\nenabled = [mod.bl_info.get(''name'') for mod in addon_utils.modules() if addon_utils.check(mod.__name__)[0]]\nprint(f''Enabled addons with Bridge in name: {[n for n in enabled if n and \"\"bridge\"\" in n.lower()]}'')\n\")",
+      "Bash(ip route show:*)",
+      "Bash(ss:*)",
+      "Bash(ip route:*)",
+      "Bash(cat:*)",
+      "Bash(python blender_client.py:*)"
+    ]
+  }
+}

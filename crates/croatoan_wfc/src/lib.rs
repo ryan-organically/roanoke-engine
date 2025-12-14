@@ -75,6 +75,7 @@ pub mod biome_spawner;
 pub mod vegetation;
 pub mod trees;
 pub mod foliage_gen;
+pub mod fern_gen;
 pub mod rocks;
 pub mod buildings;
 pub mod villages;
@@ -176,6 +177,11 @@ pub use trees::BunchInstances;
 pub use foliage_gen::generate_foliage_for_chunk;
 pub use foliage_gen::FoliageInstance;
 pub use foliage_gen::FoliageInstances;
+
+// Ferns (forest understory)
+pub use fern_gen::generate_ferns_for_chunk;
+pub use fern_gen::FernInstance;
+pub use fern_gen::FernInstances;
 
 // Rocks
 pub use rocks::generate_rocks_for_chunk;

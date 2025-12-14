@@ -1,0 +1,79 @@
+{
+  "name": "web-gltf",
+  "display_name": "Web Viewer (glTF)",
+  "version": "1.0.0",
+  "description": "Lightweight glTF export for web-based 3D viewers",
+
+  "engine": {
+    "name": "three.js",
+    "version": "compatible"
+  },
+
+  "export": {
+    "format": "gltf",
+    "format_options": {
+      "binary": true,
+      "draco_compression": true,
+      "embed_textures": true
+    }
+  },
+
+  "mesh": {
+    "max_polycount": {
+      "default": 5000,
+      "hero": 15000,
+      "background": 1000
+    },
+    "require_quads": false,
+    "allow_ngons": false
+  },
+
+  "lod": {
+    "enabled": false,
+    "note": "Web viewers typically handle LOD dynamically or not at all"
+  },
+
+  "textures": {
+    "max_resolution": {
+      "default": 1024,
+      "hero": 2048,
+      "background": 512
+    },
+    "format": "webp",
+    "fallback_format": "jpg",
+    "compression_quality": 85,
+    "channels": {
+      "albedo": { "suffix": "_basecolor", "color_space": "sRGB" },
+      "normal": { "suffix": "_normal", "color_space": "linear" },
+      "metallic_roughness": { "suffix": "_mr", "color_space": "linear", "note": "G=Roughness, B=Metallic" }
+    }
+  },
+
+  "animation": {
+    "fps": 30,
+    "root_motion": false,
+    "optimize_keyframes": true,
+    "max_duration_seconds": 30
+  },
+
+  "optimization": {
+    "merge_materials": true,
+    "remove_doubles": true,
+    "decimate_threshold": 0.8,
+    "target_file_size_mb": 5
+  },
+
+  "naming": {
+    "pattern": "{name}",
+    "separator": "_",
+    "lowercase": true,
+    "no_spaces": true
+  },
+
+  "validation": {
+    "require_manifest": false,
+    "check_polycount": true,
+    "check_file_size": true,
+    "max_file_size_mb": 10
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "_template": true,
+  "_instructions": "Copy this file alongside your .blend file, rename to {asset_name}.asset.json, and fill in the fields.",
+
+  "name": "",
+  "display_name": "",
+  "description": "",
+  "category": "",
+  "tags": [],
+
+  "source": {
+    "blend_file": "",
+    "author": "",
+    "created": "",
+    "modified": ""
+  },
+
+  "mesh": {
+    "polycount_lod0": null,
+    "polycount_lod1": null,
+    "polycount_lod2": null,
+    "has_collision": false,
+    "collision_type": ""
+  },
+
+  "materials": {
+    "count": 0,
+    "list": []
+  },
+
+  "textures": {
+    "albedo": "",
+    "normal": "",
+    "orm": "",
+    "additional": []
+  },
+
+  "rigging": {
+    "has_armature": false,
+    "bone_count": null,
+    "rig_type": ""
+  },
+
+  "animations": {
+    "count": 0,
+    "list": []
+  },
+
+  "project_metadata": {
+    "_note": "Add project-specific fields here",
+    "entity_type": "",
+    "custom_properties": {}
+  },
+
+  "export_history": [],
+
+  "notes": ""
+}

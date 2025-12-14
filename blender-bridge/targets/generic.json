@@ -1,0 +1,72 @@
+{
+  "name": "generic",
+  "display_name": "Generic Export",
+  "version": "1.0.0",
+  "description": "Baseline export profile with sensible defaults. Use as template for new targets.",
+
+  "engine": {
+    "name": "any",
+    "version": "any"
+  },
+
+  "export": {
+    "format": "fbx",
+    "format_options": {
+      "scale": 1.0,
+      "apply_transform": true,
+      "forward_axis": "-Y",
+      "up_axis": "Z"
+    },
+    "alternate_formats": ["gltf", "obj"]
+  },
+
+  "mesh": {
+    "max_polycount": {
+      "default": 10000
+    },
+    "require_quads": false,
+    "allow_ngons": false,
+    "max_bone_influences": 4
+  },
+
+  "lod": {
+    "enabled": false
+  },
+
+  "textures": {
+    "max_resolution": {
+      "default": 2048
+    },
+    "format": "png",
+    "channels": {
+      "albedo": { "suffix": "_albedo" },
+      "normal": { "suffix": "_normal" },
+      "roughness": { "suffix": "_roughness" },
+      "metallic": { "suffix": "_metallic" },
+      "ao": { "suffix": "_ao" }
+    }
+  },
+
+  "animation": {
+    "fps": 30,
+    "bake_constraints": true
+  },
+
+  "naming": {
+    "pattern": "{name}",
+    "separator": "_",
+    "lowercase": true,
+    "no_spaces": true
+  },
+
+  "validation": {
+    "require_manifest": false,
+    "check_polycount": false,
+    "check_textures": false
+  },
+
+  "_comments": {
+    "purpose": "This is the fallback profile when no specific target is specified",
+    "customization": "Copy this file and modify for your specific target engine"
+  }
+}

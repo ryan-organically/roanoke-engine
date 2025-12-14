@@ -96,6 +96,19 @@ fn turbulence(p: vec2<f32>) -> f32 {
     return value;
 }
 
+// Rayleigh scattering coefficient (blue scatters more)
+fn rayleigh_phase(cos_theta: f32) -> f32 {
+    return 0.75 * (1.0 + cos_theta * cos_theta);
+}
+
+// Mie scattering phase function (forward scattering around sun)
+fn mie_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let num = (1.0 - g2);
+    let denom = pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5);
+    return (3.0 / (8.0 * 3.14159)) * num / denom;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Reconstruct world-space ray direction from NDC
@@ -110,21 +123,52 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let rain = uniforms.rain_intensity;
     let dimming = uniforms.ambient_dimming;
 
+    // Calculate day factor (0 = night, 1 = day)
+    let day_factor = smoothstep(-0.2, 0.3, sun_elevation);
+
+    //=========================================================================
+    // ATMOSPHERIC SCATTERING
+    //=========================================================================
+    // Angle between view and sun for scattering calculations
+    let cos_theta = dot(ray_dir, -uniforms.sun_dir);
+
+    // Rayleigh scattering (blue sky) - strongest at right angles to sun
+    let rayleigh = rayleigh_phase(cos_theta);
+    let rayleigh_color = vec3<f32>(0.15, 0.35, 0.65); // Blue scattering
+
+    // Mie scattering (sun glow) - forward scattering creates halo around sun
+    let mie = mie_phase(cos_theta, 0.76); // g=0.76 for atmospheric aerosols
+    let mie_color = uniforms.sun_color * 0.8;
+
+    // Optical depth increases at horizon (longer path through atmosphere)
+    let horizon_factor = 1.0 - abs(ray_dir.y);
+    let optical_depth = pow(horizon_factor, 3.0);
+
+    //=========================================================================
+    // BASE SKY COLORS
+    //=========================================================================
     // Day/Night sky colors - desaturated and darker when rainy
-    let day_top_clear = vec3<f32>(0.2, 0.4, 0.8);
+    let day_top_clear = vec3<f32>(0.18, 0.38, 0.75);
     let day_top_rainy = vec3<f32>(0.25, 0.28, 0.35); // Grey overcast
     let day_top = mix(day_top_clear, day_top_rainy, rain) * (1.0 - dimming * 0.4);
 
-    let day_horizon_clear = vec3<f32>(0.6, 0.7, 0.9);
-    let day_horizon_rainy = vec3<f32>(0.4, 0.42, 0.48); // Muted horizon
-    let day_horizon = mix(day_horizon_clear, day_horizon_rainy, rain) * (1.0 - dimming * 0.3);
+    // Horizon color - blend between clear/hazy based on time
+    let day_horizon_clear = vec3<f32>(0.55, 0.65, 0.82);
+    let day_horizon_hazy = vec3<f32>(0.65, 0.68, 0.75); // Atmospheric haze
+    let day_horizon_rainy = vec3<f32>(0.4, 0.42, 0.48);
+    let day_horizon = mix(
+        mix(day_horizon_clear, day_horizon_hazy, 0.4 + optical_depth * 0.3),
+        day_horizon_rainy, rain
+    ) * (1.0 - dimming * 0.3);
 
     let night_top = vec3<f32>(0.002, 0.002, 0.005);
-    let night_horizon = vec3<f32>(0.005, 0.005, 0.01);
-    let sunset_horizon = vec3<f32>(0.9, 0.4, 0.2) * (1.0 - rain * 0.7); // Muted sunset in rain
+    let night_horizon = vec3<f32>(0.008, 0.01, 0.02);
 
-    // Calculate day factor (0 = night, 1 = day)
-    let day_factor = smoothstep(-0.2, 0.3, sun_elevation);
+    // Sunset colors (vary by sun position)
+    let sunset_orange = vec3<f32>(0.95, 0.45, 0.15);
+    let sunset_pink = vec3<f32>(0.85, 0.35, 0.5);
+    let sunset_horizon = mix(sunset_orange, sunset_pink, smoothstep(-0.1, 0.1, sun_elevation))
+        * (1.0 - rain * 0.7);
 
     // Sunset factor (peaks when sun is at horizon) - reduced in rain
     let sunset_factor = smoothstep(-0.3, 0.0, sun_elevation) * smoothstep(0.3, 0.0, sun_elevation) * (1.0 - rain * 0.8);
@@ -136,9 +180,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Add sunset glow to horizon (reduced in overcast)
     horizon_color = mix(horizon_color, sunset_horizon, sunset_factor * 0.7);
 
-    // Sky gradient based on ray direction
+    // Sky gradient based on ray direction - steeper gradient for more dramatic sky
     let y = ray_dir.y * 0.5 + 0.5; // -1..1 to 0..1
-    var sky_color = mix(horizon_color, top_color, pow(clamp(y, 0.0, 1.0), 0.5));
+    let gradient_power = mix(0.35, 0.6, rain); // Steeper gradient when clear
+    var sky_color = mix(horizon_color, top_color, pow(clamp(y, 0.0, 1.0), gradient_power));
+
+    //=========================================================================
+    // APPLY SCATTERING
+    //=========================================================================
+    // Add Rayleigh scattering to sky (blue color enhancement)
+    let rayleigh_strength = day_factor * (1.0 - rain * 0.8) * 0.15;
+    sky_color += rayleigh_color * rayleigh * rayleigh_strength * (1.0 - horizon_factor * 0.5);
+
+    // Add Mie scattering (sun glow) - stronger at horizon
+    let mie_strength = day_factor * (1.0 - rain * 0.9) * optical_depth * 0.4;
+    sky_color += mie_color * mie * mie_strength;
+
+    // Atmospheric haze at horizon (matches fog color)
+    let haze_color_day = vec3<f32>(0.6, 0.63, 0.7); // Match terrain fog color
+    let haze_color_sunset = mix(vec3<f32>(0.7, 0.5, 0.4), vec3<f32>(0.5, 0.4, 0.45), sunset_factor);
+    let haze_color_night = vec3<f32>(0.03, 0.03, 0.05);
+    let haze_color = mix(haze_color_night, mix(haze_color_day, haze_color_sunset, sunset_factor * 0.5), day_factor);
+
+    // Haze strength - stronger at horizon, affected by weather
+    let haze_strength = pow(horizon_factor, 2.5) * (0.3 + rain * 0.4);
+    sky_color = mix(sky_color, haze_color, haze_strength * day_factor);
 
     // Stars at night - fixed on celestial sphere, no parallax
     if (day_factor < 0.4 && ray_dir.y > 0.05) {

@@ -222,11 +222,26 @@ impl AtmosphereEngine {
         // fog_end at render distance to hide chunk pop-in
         let target_fog_end = render_distance * 0.9;
         self.state.fog_end = target_fog_end;
-        // fog_start very close (5% of end) for constant atmospheric haze
-        self.state.fog_start = (target_fog_end * 0.05).max(5.0);
+        // fog_start varies by time of day - closer at dawn/dusk for atmosphere
+        let base_fog_start = match period {
+            TimePeriod::Dawn | TimePeriod::Dusk => target_fog_end * 0.03,
+            TimePeriod::Morning | TimePeriod::Evening => target_fog_end * 0.08,
+            TimePeriod::Night => target_fog_end * 0.05,
+            _ => target_fog_end * 0.12,
+        };
+        self.state.fog_start = base_fog_start.max(5.0);
 
-        // Strong minimum fog density - always visible haze
-        self.state.fog_density = 0.0; // self.state.fog_density.max(0.05);
+        // Ensure minimum fog density for atmospheric feel
+        // Higher baseline + weather contribution
+        let min_fog = match period {
+            TimePeriod::Dawn => 0.35,
+            TimePeriod::Dusk => 0.30,
+            TimePeriod::Morning => 0.20,
+            TimePeriod::Evening => 0.25,
+            TimePeriod::Night => 0.15,
+            TimePeriod::Midday | TimePeriod::Afternoon => 0.12,
+        };
+        self.state.fog_density = self.state.fog_density.max(min_fog);
     }
 
     /// Get fog uniforms for shaders [density, start, end, height_falloff]

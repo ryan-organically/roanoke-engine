@@ -153,6 +153,12 @@ impl VillageManager {
             return;
         }
 
+        // TEMPORARILY DISABLED for fern/grass testing
+        println!("[VILLAGE] Village spawning DISABLED for testing");
+        self.initialized = true;
+        return;
+
+        #[allow(unreachable_code)]
         println!("\n[VILLAGE] ========== VILLAGE DISCOVERY ==========");
 
         // ALWAYS create the main Croatoan village near spawn first

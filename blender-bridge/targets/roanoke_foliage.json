@@ -1,0 +1,161 @@
+{
+  "version": "0.2.0",
+  "last_updated": "2024-12-14",
+  "engine": "roanoke",
+  "spec_type": "foliage_export",
+
+  "global": {
+    "format": "glb",
+    "up_axis": "Y",
+    "forward_axis": "-Z",
+    "scale_unit": "meters",
+    "origin": "base_center",
+    "apply_transforms": true,
+    "notes": "Engine uses wgpu with Y-up coordinate system (standard GL conventions)"
+  },
+
+  "vertex_attributes": {
+    "required": ["POSITION", "NORMAL", "TEXCOORD_0"],
+    "optional": [],
+    "notes": "Engine does NOT read vertex colors. Wind animation uses local Y position."
+  },
+
+  "wind_animation": {
+    "model": "height_based",
+    "description": "Wind intensity is derived from vertex Y position in local/model space",
+    "formula": "wind_weight = (position.y / 5.0)^2",
+    "guidance": [
+      "Model origin at ground level (Y=0)",
+      "Tips/leaves at higher Y values sway more",
+      "Trunk/base at Y~0 stays still",
+      "For fern: frond tips should be at Y > 0.3m for visible sway"
+    ]
+  },
+
+  "textures": {
+    "max_resolution": 4096,
+    "recommended_resolution": {
+      "foliage_small": 512,
+      "foliage_large": 1024,
+      "props": 512,
+      "fauna": 1024
+    },
+    "prefer_power_of_two": true,
+    "format": "png",
+    "embedded": true,
+    "channels": {
+      "albedo": { "required": true, "notes": "RGBA - alpha channel used for leaf cutout" },
+      "normal": { "required": false, "notes": "Not currently sampled by foliage shader" },
+      "roughness": { "required": false },
+      "ao": { "required": false }
+    },
+    "compression_notes": "PNG-8 for simple alpha, PNG-24+alpha for foliage. GLB embeds textures automatically."
+  },
+
+  "materials": {
+    "alpha_mode": "MASK",
+    "alpha_cutoff": 0.5,
+    "double_sided": true,
+    "shadow_mode": "HASHED",
+    "notes": "Engine reads alpha_mode, alpha_cutoff, double_sided from GLTF material"
+  },
+
+  "limits": {
+    "max_vertices_per_mesh": 100000,
+    "max_indices_per_mesh": 500000,
+    "max_meshes_per_model": 50,
+    "max_file_size_bytes": 52428800,
+    "notes": "From gltf_loader.rs - generous limits, but keep foliage lightweight for instancing"
+  },
+
+  "categories": {
+    "foliage": {
+      "fern": {
+        "height_range_meters": [0.3, 0.8],
+        "recommended_verts": 500,
+        "max_verts": 2000,
+        "max_texture_res": 512,
+        "lod_support": false,
+        "lod_notes": "LOD not implemented yet - export single mesh",
+        "placement": {
+          "biomes": ["DeciduousForest"],
+          "height_min": 8,
+          "height_max": 40,
+          "moisture_min": 0.5,
+          "density_per_sqm": 0.3,
+          "notes": "Matches vegetation.rs height_to_biome() - DeciduousForest is 8-40m terrain height"
+        },
+        "wind_guidance": {
+          "frond_base_y": 0.0,
+          "frond_tip_y": "0.3 to 0.8 (matches height)",
+          "sway_expectation": "Tips will sway gently, base stays grounded"
+        }
+      },
+      "grass": {
+        "reference": "croatoan_procgen::grass_species",
+        "notes": "Grass is procedurally generated, not model-based"
+      },
+      "shrub": {
+        "height_range_meters": [0.5, 2.0],
+        "recommended_verts": 1000,
+        "max_verts": 3000,
+        "max_texture_res": 512
+      },
+      "tree": {
+        "height_range_meters": [5.0, 20.0],
+        "recommended_verts": 5000,
+        "max_verts": 10000,
+        "max_texture_res": 1024,
+        "wind_guidance": {
+          "trunk_y": "0 to ~2m (minimal sway)",
+          "canopy_y": "2m+ (visible sway)",
+          "uv_convention": "trunk uv.y <= 1.0, canopy uv.y > 1.0 for procedural coloring fallback"
+        }
+      }
+    },
+
+    "props": {
+      "rock": {
+        "reference": "croatoan_wfc::rocks",
+        "notes": "Static props, no wind animation"
+      }
+    }
+  },
+
+  "export_checklist": [
+    "Apply all transforms (Ctrl+A > All Transforms)",
+    "Set origin to base center (median point at ground level)",
+    "Verify scale in meters (1 Blender unit = 1 meter)",
+    "Check UV mapping - single UV channel, no overlapping for alpha",
+    "Embed textures in GLB (or place alongside for GLTF)",
+    "Set material alpha_mode to MASK, alpha_cutoff to 0.5",
+    "Enable double_sided on material",
+    "Test alpha cutoff visually in Blender",
+    "Name follows convention: {type}_{variant}.glb"
+  ],
+
+  "naming_convention": {
+    "pattern": "{type}_{NN}.glb",
+    "notes": "Ferns use 1-indexed 2-digit numbers (fern_01, fern_02). Other foliage uses 0-indexed single digit.",
+    "examples": [
+      "fern_01.glb",
+      "fern_02.glb",
+      "shrub_0.glb",
+      "bush_0.glb",
+      "tree_0.glb",
+      "tree_1.glb"
+    ],
+    "subdirectories": {
+      "foliage_small": "assets/models/shrubs/",
+      "trees": "assets/models/trees/",
+      "animals": "assets/models/animals/"
+    }
+  },
+
+  "destination": {
+    "models_base": "/mnt/c/dev/roanoke engine/assets/models/",
+    "textures_base": "/mnt/c/dev/roanoke engine/assets/textures/",
+    "foliage_small": "/mnt/c/dev/roanoke engine/assets/models/shrubs/",
+    "trees": "/mnt/c/dev/roanoke engine/assets/models/trees/"
+  }
+}

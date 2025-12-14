@@ -4,9 +4,9 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances, generate_ferns_for_chunk};
 use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
-use croatoan_procgen::{generate_simple_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
+use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
 use image; // Added image crate
@@ -1305,7 +1305,7 @@ fn main() {
     }));
 
     // ... (Channel setup) ...
-    // Response Data: (Terrain, Grass, Trees, Detritus, Rocks, Coord X, Coord Z)
+    // Response Data: (Terrain, Grass, Trees, Detritus, Rocks, Buildings, Ferns, Coord X, Coord Z)
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>, // Grass (pos, col, local_height, idx)
@@ -1313,6 +1313,7 @@ fn main() {
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
         Vec<(String, Mat4)>, // Rocks (Named Instances)
         Vec<(String, Mat4)>, // Buildings (Named Instances)
+        Vec<(String, Mat4)>, // Ferns (Named Instances)
         i32, i32 // Offsets (World Space)
     );
     
@@ -1382,6 +1383,22 @@ fn main() {
                 offset_z as f32,
             );
 
+            // Generate ferns (forest understory)
+            let fern_result = generate_ferns_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+                1, // Currently 1 fern model variant (fern_01)
+            );
+            // Convert to named instances
+            let fern_instances: Vec<(String, Mat4)> = fern_result.by_model(1)
+                .into_iter()
+                .flat_map(|(name, transforms)| {
+                    transforms.into_iter().map(move |t| (name.clone(), t))
+                })
+                .collect();
+
             // Send result
             println!("[GEN] Chunk ({}, {}) generated, sending to main thread...", req.coord.x, req.coord.z);
             if chunk_tx.send((
@@ -1391,6 +1408,7 @@ fn main() {
                 det_pos, det_nrm, det_uv, det_idx,
                 rock_instances,
                 building_instances,
+                fern_instances,
                 offset_x, offset_z
             )).is_err() {
                 println!("[GEN] Receiver dropped, stopping thread.");
@@ -1887,8 +1905,9 @@ fn main() {
                         }
                         let height_range = max_y - min_y;
                         // Leaves below this threshold will be culled
-                        // 0.75 = only top 25% of tree has leaves (cleaner trunk, less furry base)
-                        let leaf_cull_height = min_y + height_range * 0.75;
+                        // 0.25 = leaves start at 25% of tree height (full canopy, clear trunk base)
+                        // Was 0.75 which culled 75% of leaves - way too aggressive!
+                        let leaf_cull_height = min_y + height_range * 0.25;
 
                         for mesh in &model.meshes {
                             let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
@@ -2009,7 +2028,32 @@ fn main() {
                             println!("[FOLIAGE] Registered {} (combined): {} verts", name, all_positions.len());
                         }
                     } else {
-                        println!("[FOLIAGE] WARNING: Tree model '{}' not found", name);
+                        // FALLBACK: Generate procedural tree when GLB not found
+                        println!("[FOLIAGE] Tree model '{}' not found - generating procedural fallback", name);
+
+                        // Choose tree style based on name
+                        let proc_mesh = if name.contains("pine") || name.contains("1") {
+                            generate_conifer_tree(name.as_bytes().iter().map(|&b| b as u64).sum())
+                        } else {
+                            generate_deciduous_tree(name.as_bytes().iter().map(|&b| b as u64).sum())
+                        };
+
+                        let positions: Vec<[f32; 3]> = proc_mesh.vertices.iter().map(|v| v.position).collect();
+                        let normals: Vec<[f32; 3]> = proc_mesh.vertices.iter().map(|v| v.normal).collect();
+                        let uvs: Vec<[f32; 2]> = proc_mesh.vertices.iter().map(|v| v.uv).collect();
+
+                        // Create combined mesh (bark + leaves in one) with no texture (procedural colors)
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &positions,
+                            &normals,
+                            &uvs,
+                            &proc_mesh.indices,
+                            None, // No texture - uses procedural coloring in shader
+                        );
+                        state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                        println!("[FOLIAGE] Registered procedural '{}': {} verts, {} tris",
+                            name, positions.len(), proc_mesh.indices.len() / 3);
                     }
                 }
 
@@ -2096,6 +2140,58 @@ fn main() {
                         }
                     } else {
                         println!("[FOLIAGE] WARNING: Shrub model '{}' not found", name);
+                    }
+                }
+
+                // Load fern models from assets/models/shrubs/
+                // Ferns are single mesh with MASK alpha mode for leaf cutout
+                // NOTE: fern_01.glb was corrupted (empty scene), using fern_02
+                let fern_models = ["fern_02"];
+                let mut fern_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
+                for name in &fern_models {
+                    if let Some(model) = fern_cache.load(name) {
+                        // Ferns are single combined mesh - no bark/leaf separation
+                        let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut all_indices: Vec<u32> = Vec::new();
+                        let mut fern_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = all_positions.len() as u32;
+                            all_positions.extend_from_slice(&mesh.positions);
+                            all_normals.extend_from_slice(&mesh.normals);
+                            all_uvs.extend_from_slice(&mesh.uvs);
+                            all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                            if fern_texture.is_none() {
+                                fern_texture = mesh.material.base_color_texture_data.as_ref();
+                            }
+                        }
+
+                        if !all_positions.is_empty() {
+                            let texture_bind_group = fern_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &all_positions,
+                                &all_normals,
+                                &all_uvs,
+                                &all_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[FERN] Registered '{}': {} verts, {} tris",
+                                name, all_positions.len(), all_indices.len() / 3);
+                        }
+                    } else {
+                        println!("[FERN] WARNING: Model '{}' not found in assets/models/shrubs/", name);
                     }
                 }
 
@@ -2257,9 +2353,9 @@ fn main() {
 
         // Water System
         static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
-        // let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
-        //     Mutex::new(WaterSystem::new(ctx.device(), ctx.surface_format()))
-        // });
+        let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
+            Mutex::new(WaterSystem::new(ctx.device(), ctx.surface_format()))
+        });
 
         // Light Shaft Pipeline (God Rays Post-Process)
         static LIGHT_SHAFT_PIPELINE: OnceLock<Mutex<LightShaftPipeline>> = OnceLock::new();
@@ -4233,11 +4329,15 @@ fn main() {
                             det_pos, det_nrm, det_uv, det_idx,
                             rock_instances,
                             building_instances,
+                            fern_instances,
                             offset_x, offset_z)) => {
 
-                            // Debug: Show generation counts
-                            println!("[CHUNK] Received chunk ({}, {}): trees={}, rocks={}, detritus_verts={}",
-                                offset_x, offset_z, tree_instances.len(), rock_instances.len(), det_pos.len());
+                            // Debug: Show generation counts - ROCK DIAGNOSTIC
+                            println!("========================================");
+                            println!("[ROCK DEBUG] Chunk ({}, {}) received:", offset_x, offset_z);
+                            println!("[ROCK DEBUG]   Total rocks: {}", rock_instances.len());
+                            println!("[ROCK DEBUG]   Trees: {}, Detritus verts: {}", tree_instances.len(), det_pos.len());
+                            println!("========================================");
 
                             // Update status
                             state.loading_progress.current_status = format!(
@@ -4276,7 +4376,11 @@ fn main() {
                                 let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
                                 drop(shadow_map);
                                 gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_heights, &grass_idx);
+                                println!("[GRASS] Chunk ({}, {}): {} blades uploaded (is_ready={})",
+                                    offset_x, offset_z, grass_pos.len() / 10, gp.is_ready());
                                 grass_pipeline = Some(gp);
+                            } else {
+                                println!("[GRASS] Chunk ({}, {}): NO grass generated", offset_x, offset_z);
                             }
 
                             // FOLIAGE: Create pipelines for trees and shrubs
@@ -4331,27 +4435,32 @@ fn main() {
                                 rock_groups.entry(name).or_default().push(transform);
                             }
 
-                            // Debug: Show rock type breakdown
-                            println!("[CHUNK] Rock types: {:?}", rock_groups.keys().collect::<Vec<_>>());
+                            // Debug: Show rock type breakdown - ROCK DIAGNOSTIC
+                            println!("[ROCK DEBUG] Rock types in chunk: {:?}", rock_groups.keys().collect::<Vec<_>>());
+                            let total_rock_instances: usize = rock_groups.values().map(|v| v.len()).sum();
+                            println!("[ROCK DEBUG] Total rock instances to upload: {}", total_rock_instances);
                             for (name, transforms) in &rock_groups {
-                                println!("[CHUNK]   {}: {} instances", name, transforms.len());
+                                println!("[ROCK DEBUG]   {}: {} instances", name, transforms.len());
                             }
 
                             let mut rock_pipelines = Vec::new();
+                            let mut rock_instances_uploaded = 0usize;
                             let shadow_map = shadow_map_mutex.safe_lock();
                             for (name, transforms) in rock_groups {
                                 if let Some(mesh) = state.mesh_registry.get(&name) {
                                     let mut rp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
                                     rp.set_mesh(mesh.clone());
                                     rp.upload_instances(ctx.device(), &transforms);
+                                    rock_instances_uploaded += transforms.len();
                                     rock_pipelines.push(rp);
-                                    println!("[CHUNK] Created rock pipeline '{}' with {} instances", name, transforms.len());
+                                    println!("[ROCK DEBUG] Created pipeline '{}': {} instances", name, transforms.len());
                                 } else {
-                                    println!("[WARN] Unknown rock type '{}' requested - mesh not in registry!", name);
-                                    println!("[WARN] Available meshes: {:?}", state.mesh_registry.keys().collect::<Vec<_>>());
+                                    println!("[ROCK ERROR] Mesh '{}' not in registry! Available: {:?}",
+                                        name, state.mesh_registry.keys().collect::<Vec<_>>());
                                 }
                             }
                             drop(shadow_map);
+                            println!("[ROCK DEBUG] Total pipelines: {}, total instances: {}", rock_pipelines.len(), rock_instances_uploaded);
 
                             // Process Buildings
                             let mut building_pipelines = Vec::new();
@@ -4436,11 +4545,34 @@ fn main() {
                                 building_pipelines.push(pipeline);
                             }
 
+                            // Process Ferns (forest understory)
+                            let mut fern_pipelines = Vec::new();
+                            let mut ferns_by_type: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            for (name, transform) in fern_instances {
+                                ferns_by_type.entry(name).or_default().push(transform);
+                            }
+
+                            let shadow_map_for_ferns = shadow_map_mutex.safe_lock();
+                            for (name, transforms) in ferns_by_type {
+                                if let Some(mesh) = state.mesh_registry.get(&name) {
+                                    let mut fp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_for_ferns);
+                                    fp.set_mesh(mesh.clone());
+                                    fp.upload_instances(ctx.device(), &transforms);
+                                    fern_pipelines.push(fp);
+                                    println!("[FERN] Created pipeline '{}': {} instances", name, transforms.len());
+                                } else {
+                                    println!("[FERN] Mesh '{}' not in registry! Available meshes: {:?}",
+                                        name, state.mesh_registry.keys().take(10).collect::<Vec<_>>());
+                                }
+                            }
+                            drop(shadow_map_for_ferns);
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
                                 grass: grass_pipeline,
                                 trees: foliage_pipelines,
+                                ferns: fern_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
                                 buildings: building_pipelines,
@@ -4594,6 +4726,23 @@ fn main() {
                             1.0,   // use_texture = sample from texture
                         );
                     }
+                    for fern in &chunk.ferns {
+                        // Ferns use textured alpha cutoff for leaf fronds
+                        fern.update_camera_full(
+                            ctx.queue(),
+                            &view_proj,
+                            &light_view_proj,
+                            sun_dir.to_array(),
+                            elapsed,
+                            state.camera.position.to_array(),
+                            fog_color,
+                            fog_start,
+                            fog_end,
+                            fog_density,
+                            0.5,   // alpha_cutoff for leaf edges
+                            1.0,   // use_texture = sample from texture
+                        );
+                    }
                     if let Some(detritus) = &chunk.detritus {
                         detritus.update_camera(
                             ctx.queue(),
@@ -4627,12 +4776,12 @@ fn main() {
             }
 
             // Update Water & Dispatch Compute
-            // {
-            //     let mut water = water_system_mutex.safe_lock();
-            //     water.update(ctx.queue(), elapsed, delta);
-            //     water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
-            //     water.dispatch(&mut encoder);
-            // }
+            {
+                let mut water = water_system_mutex.safe_lock();
+                water.update(ctx.queue(), elapsed, delta);
+                water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
+                water.dispatch(&mut encoder);
+            }
 
             // 0. Shadow Pass
             {
@@ -4684,6 +4833,20 @@ fn main() {
                     // Render rock shadows (instanced - same format as trees)
                     for rock_pipeline in &chunk.rocks {
                         if let Some((vb, ib, inst_buf, idx_count, inst_count)) = rock_pipeline.get_shadow_buffers() {
+                            instanced_shadow_pipeline.render(
+                                &mut shadow_pass,
+                                vb,
+                                ib,
+                                inst_buf,
+                                idx_count,
+                                inst_count,
+                            );
+                        }
+                    }
+
+                    // Render fern shadows (instanced)
+                    for fern_pipeline in &chunk.ferns {
+                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = fern_pipeline.get_shadow_buffers() {
                             instanced_shadow_pipeline.render(
                                 &mut shadow_pass,
                                 vb,
@@ -4809,7 +4972,7 @@ fn main() {
 
             // 2. Main Render Pass
             {
-                // let water_system_guard = water_system_mutex.safe_lock();
+                let water_system_guard = water_system_mutex.safe_lock();
                 let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
                 // Lock model_pipeline early so it outlives render_pass
                 let model_pipeline = animal_model_pipeline_mutex.safe_lock();
@@ -4849,12 +5012,13 @@ fn main() {
                 let mut terrain_culled = 0;
                 let mut grass_rendered = 0;
                 let mut trees_rendered = 0;
+                let mut rocks_rendered: usize = 0;
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
-                let grass_max_distance = 150.0;  // Grass visible within 150 units
+                let grass_max_distance = 250.0;  // Grass visible within 250 units (increased for visibility)
                 let tree_max_distance = (state.render_distance * 1.5).max(300.0);   // Foliage visible far
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
@@ -4913,7 +5077,15 @@ fn main() {
                     // Rocks
                     for rock in &chunk.rocks {
                         if dist <= tree_max_distance {
+                            rocks_rendered += rock.instance_count() as usize;
                             rock.render(&mut render_pass);
+                        }
+                    }
+
+                    // Ferns (forest understory)
+                    for fern in &chunk.ferns {
+                        if dist <= tree_max_distance {
+                            fern.render(&mut render_pass);
                         }
                     }
 
@@ -4962,7 +5134,7 @@ fn main() {
                 orb_pipeline.render(&mut render_pass);
 
                 // Render Water
-                // water_system_guard.draw(&mut render_pass);
+                water_system_guard.draw(&mut render_pass);
 
                 // Render Rain Particles (when stormy)
                 rain_pipeline.update(
@@ -4981,7 +5153,15 @@ fn main() {
                 rain_pipeline.render(&mut render_pass);
 
                 // Log culling stats occasionally (every ~60 frames)
-                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, buildings_rendered);
+                static mut FRAME_COUNTER: u32 = 0;
+                unsafe {
+                    FRAME_COUNTER += 1;
+                    if FRAME_COUNTER % 300 == 1 {
+                        println!("[RENDER STATS] terrain={}, grass={}, trees={}, rocks={}, buildings={}",
+                            terrain_rendered, grass_rendered, trees_rendered, rocks_rendered, buildings_rendered);
+                    }
+                }
+                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, rocks_rendered, buildings_rendered);
             } // End Main Pass
 
             // 2.5 Light Shaft Post-Process Pass

@@ -151,7 +151,12 @@ impl GrassPipeline {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // Small depth bias to prevent Z-fighting with terrain
+                bias: wgpu::DepthBiasState {
+                    constant: -2,      // Push grass slightly forward
+                    slope_scale: -1.0, // Additional bias for angled surfaces
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,

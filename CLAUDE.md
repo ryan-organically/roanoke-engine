@@ -10,4 +10,4 @@
 
 Track what's being worked on to avoid conflicts:
 
-- `biped_ik` - Being handled by another terminal
+(none currently)

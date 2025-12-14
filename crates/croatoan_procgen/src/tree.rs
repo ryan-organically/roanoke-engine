@@ -690,6 +690,505 @@ pub fn generate_default_simple_tree(seed: u64) -> TreeMesh {
     generate_simple_tree_mesh(3.5, 0.25, 2.2, seed)
 }
 
+//=============================================================================
+// ENHANCED PROCEDURAL TREE GENERATOR
+//=============================================================================
+// Creates more natural-looking trees with:
+// - Tapered trunk with optional curve
+// - Multi-layer canopy clusters for fuller appearance
+// - Branch stubs for visual depth
+// - Noise-based organic variation
+// Total: ~400-800 triangles depending on settings
+
+/// Tree style presets for different visual appearances
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProceduralTreeStyle {
+    /// Classic deciduous tree - round, full canopy (oak-like)
+    Deciduous,
+    /// Conifer - tall, conical canopy (pine/spruce-like)
+    Conifer,
+    /// Spreading tree - wide, flattened canopy (acacia-like)
+    Spreading,
+    /// Columnar - tall, narrow canopy (cypress-like)
+    Columnar,
+}
+
+/// Configuration for enhanced procedural tree generation
+#[derive(Debug, Clone)]
+pub struct ProceduralTreeConfig {
+    /// Overall height of the tree (trunk + canopy)
+    pub height: f32,
+    /// Trunk radius at base
+    pub trunk_radius: f32,
+    /// How much the trunk tapers (0.0 = no taper, 1.0 = full taper to point)
+    pub trunk_taper: f32,
+    /// Number of canopy layers/clusters
+    pub canopy_layers: u32,
+    /// Base radius of canopy
+    pub canopy_radius: f32,
+    /// Vertical stretch of canopy (1.0 = sphere, <1.0 = flat, >1.0 = tall)
+    pub canopy_vertical_scale: f32,
+    /// Number of branch stubs to add
+    pub branch_count: u32,
+    /// Trunk curve amount (0.0 = straight)
+    pub trunk_curve: f32,
+    /// Polygon detail (segments around trunk/canopy)
+    pub detail_level: u32,
+    /// Tree style preset
+    pub style: ProceduralTreeStyle,
+}
+
+impl Default for ProceduralTreeConfig {
+    fn default() -> Self {
+        Self::deciduous()
+    }
+}
+
+impl ProceduralTreeConfig {
+    /// Classic deciduous tree (oak/maple style) - FULL CANOPY from mid-trunk to top
+    pub fn deciduous() -> Self {
+        Self {
+            height: 8.0,           // Taller tree
+            trunk_radius: 0.35,
+            trunk_taper: 0.5,
+            canopy_layers: 8,      // MORE layers for fuller canopy
+            canopy_radius: 3.0,    // Wider canopy
+            canopy_vertical_scale: 0.7, // Flatter clusters
+            branch_count: 6,       // More branch stubs
+            trunk_curve: 0.15,
+            detail_level: 8,
+            style: ProceduralTreeStyle::Deciduous,
+        }
+    }
+
+    /// Conifer tree (pine/spruce style) - tiered branches from low to high
+    pub fn conifer() -> Self {
+        Self {
+            height: 12.0,          // Taller
+            trunk_radius: 0.3,
+            trunk_taper: 0.35,
+            canopy_layers: 10,     // Many tiers
+            canopy_radius: 2.5,    // Wider base
+            canopy_vertical_scale: 0.5, // Flatter layers (tiers)
+            branch_count: 0,       // Conifers have branch tiers instead
+            trunk_curve: 0.0,
+            detail_level: 6,
+            style: ProceduralTreeStyle::Conifer,
+        }
+    }
+
+    /// Spreading tree (acacia/oak style) - wide horizontal canopy
+    pub fn spreading() -> Self {
+        Self {
+            height: 6.0,
+            trunk_radius: 0.4,
+            trunk_taper: 0.6,
+            canopy_layers: 6,      // More layers spread horizontally
+            canopy_radius: 5.0,    // Very wide
+            canopy_vertical_scale: 0.35, // Very flat
+            branch_count: 8,       // Lots of visible branches
+            trunk_curve: 0.25,
+            detail_level: 8,
+            style: ProceduralTreeStyle::Spreading,
+        }
+    }
+
+    /// Columnar tree (cypress/poplar style) - tall narrow
+    pub fn columnar() -> Self {
+        Self {
+            height: 14.0,
+            trunk_radius: 0.2,
+            trunk_taper: 0.15,
+            canopy_layers: 8,
+            canopy_radius: 1.0,
+            canopy_vertical_scale: 3.0,
+            branch_count: 0,
+            trunk_curve: 0.0,
+            detail_level: 6,
+            style: ProceduralTreeStyle::Columnar,
+        }
+    }
+
+    /// Dense forest tree - medium size, very full canopy for forest interiors
+    pub fn forest_dense() -> Self {
+        Self {
+            height: 7.0,
+            trunk_radius: 0.3,
+            trunk_taper: 0.45,
+            canopy_layers: 10,     // LOTS of layers
+            canopy_radius: 2.8,
+            canopy_vertical_scale: 0.8,
+            branch_count: 5,
+            trunk_curve: 0.1,
+            detail_level: 6,
+            style: ProceduralTreeStyle::Deciduous,
+        }
+    }
+}
+
+/// Generate an enhanced procedural tree with natural-looking multi-layer canopy
+///
+/// Creates trees with ~400-800 triangles featuring:
+/// - Tapered, optionally curved trunk
+/// - Multiple overlapping canopy spheroids for fuller appearance
+/// - Branch stubs emerging from trunk
+/// - Noise-based vertex displacement for organic variation
+///
+/// # Arguments
+/// * `config` - Tree configuration parameters
+/// * `seed` - Seed for deterministic variation
+///
+/// # Returns
+/// TreeMesh with vertices and indices ready for GPU upload
+pub fn generate_enhanced_tree(config: &ProceduralTreeConfig, seed: u64) -> TreeMesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // PCG-style RNG - returns -1.0 to 1.0
+    let mut rng_state = seed;
+    let mut random = || -> f32 {
+        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((rng_state >> 32) as f32 / u32::MAX as f32) * 2.0 - 1.0
+    };
+
+    // Apply seed-based variation to config (convert -1..1 to 0..1 inline)
+    let height = config.height * (0.85 + (random() + 1.0) * 0.5 * 0.3);
+    let trunk_radius = config.trunk_radius * (0.9 + (random() + 1.0) * 0.5 * 0.2);
+    let canopy_radius = config.canopy_radius * (0.9 + (random() + 1.0) * 0.5 * 0.2);
+
+    // Calculate trunk height (canopy starts partway up)
+    let trunk_height = match config.style {
+        ProceduralTreeStyle::Deciduous => height * 0.45,
+        ProceduralTreeStyle::Conifer => height * 0.25,
+        ProceduralTreeStyle::Spreading => height * 0.55,
+        ProceduralTreeStyle::Columnar => height * 0.15,
+    };
+
+    let segments = config.detail_level as usize;
+    let trunk_rings = 4;
+
+    //=========================================================================
+    // TRUNK - Tapered cylinder with optional curve
+    //=========================================================================
+    for ring in 0..trunk_rings {
+        let t = ring as f32 / (trunk_rings - 1) as f32;
+        let y = t * trunk_height;
+
+        // Taper radius from base to top
+        let radius = trunk_radius * (1.0 - t * config.trunk_taper);
+
+        // Optional trunk curve (lean)
+        let curve_offset = config.trunk_curve * t * t * 0.5;
+
+        for i in 0..segments {
+            let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let x = angle.cos() * radius + curve_offset;
+            let z = angle.sin() * radius;
+
+            // Add slight noise for organic feel
+            let noise = random() * 0.02 * trunk_radius;
+
+            let normal = Vec3::new(angle.cos(), 0.0, angle.sin()).normalize();
+
+            vertices.push(TreeVertex {
+                position: [x + noise, y, z + noise],
+                normal: normal.to_array(),
+                uv: [i as f32 / segments as f32, t], // UV.y < 1.0 = bark
+            });
+        }
+    }
+
+    // Connect trunk rings
+    for ring in 0..(trunk_rings - 1) {
+        for i in 0..segments {
+            let next = (i + 1) % segments;
+            let base = ring * segments;
+            let i0 = (base + i) as u32;
+            let i1 = (base + next) as u32;
+            let i2 = (base + segments + i) as u32;
+            let i3 = (base + segments + next) as u32;
+
+            indices.push(i0);
+            indices.push(i2);
+            indices.push(i1);
+
+            indices.push(i1);
+            indices.push(i2);
+            indices.push(i3);
+        }
+    }
+
+    //=========================================================================
+    // BRANCH STUBS - Short cylinders emerging from trunk
+    //=========================================================================
+    for b in 0..config.branch_count {
+        let branch_base = vertices.len() as u32;
+
+        // Position along trunk (upper half)
+        let branch_t = 0.4 + (b as f32 / config.branch_count as f32) * 0.5;
+        let branch_y = branch_t * trunk_height;
+        let branch_angle = (b as f32 / config.branch_count as f32) * std::f32::consts::TAU
+            + random() * 0.5;
+
+        // Branch direction (outward and slightly up)
+        let branch_dir = Vec3::new(
+            branch_angle.cos(),
+            0.3 + random() * 0.2,
+            branch_angle.sin(),
+        ).normalize();
+
+        let branch_length = trunk_radius * 3.0 * (0.8 + (random() + 1.0) * 0.5 * 0.4);
+        let branch_radius = trunk_radius * 0.3;
+
+        // Branch start and end
+        let trunk_surface_offset = trunk_radius * (1.0 - branch_t * config.trunk_taper);
+        let start = Vec3::new(
+            branch_angle.cos() * trunk_surface_offset,
+            branch_y,
+            branch_angle.sin() * trunk_surface_offset,
+        );
+        let end = start + branch_dir * branch_length;
+
+        // Simple 4-sided branch
+        let up = Vec3::Y;
+        let right = branch_dir.cross(up).normalize();
+        let branch_up = right.cross(branch_dir).normalize();
+
+        // Start cap vertices
+        for i in 0..4 {
+            let a = (i as f32 / 4.0) * std::f32::consts::TAU;
+            let offset = right * a.cos() * branch_radius + branch_up * a.sin() * branch_radius;
+            let pos = start + offset;
+            let normal = offset.normalize();
+
+            vertices.push(TreeVertex {
+                position: pos.to_array(),
+                normal: normal.to_array(),
+                uv: [i as f32 / 4.0, 0.5], // Bark UV
+            });
+        }
+
+        // End cap vertices (tapered)
+        for i in 0..4 {
+            let a = (i as f32 / 4.0) * std::f32::consts::TAU;
+            let offset = right * a.cos() * branch_radius * 0.5 + branch_up * a.sin() * branch_radius * 0.5;
+            let pos = end + offset;
+            let normal = offset.normalize();
+
+            vertices.push(TreeVertex {
+                position: pos.to_array(),
+                normal: normal.to_array(),
+                uv: [i as f32 / 4.0, 0.8], // Bark UV
+            });
+        }
+
+        // Connect branch cylinder
+        for i in 0..4u32 {
+            let next = (i + 1) % 4;
+            indices.push(branch_base + i);
+            indices.push(branch_base + 4 + i);
+            indices.push(branch_base + next);
+
+            indices.push(branch_base + next);
+            indices.push(branch_base + 4 + i);
+            indices.push(branch_base + 4 + next);
+        }
+    }
+
+    //=========================================================================
+    // CANOPY - Multiple overlapping spheroid clusters filling the canopy volume
+    //=========================================================================
+    // Start canopy LOWER on trunk for fuller appearance
+    let canopy_base_y = match config.style {
+        ProceduralTreeStyle::Deciduous => trunk_height * 0.35,  // Start at 35% for full canopy
+        ProceduralTreeStyle::Spreading => trunk_height * 0.5,
+        ProceduralTreeStyle::Conifer => trunk_height * 0.2,     // Conifers start very low
+        ProceduralTreeStyle::Columnar => trunk_height * 0.1,
+    };
+
+    // Total canopy height (from base to top)
+    let canopy_total_height = height - canopy_base_y;
+
+    for layer in 0..config.canopy_layers {
+        let layer_base = vertices.len() as u32;
+        let layer_t = layer as f32 / config.canopy_layers.max(1) as f32;
+
+        // Position this canopy cluster - distribute throughout the canopy volume
+        let (cluster_y, cluster_radius, cluster_height, offset_x, offset_z) = match config.style {
+            ProceduralTreeStyle::Deciduous => {
+                // FULL CANOPY: Distribute clusters throughout 3D canopy volume
+                // Use golden angle for horizontal distribution, varied heights
+                let golden_angle = 2.399963; // Golden angle in radians
+                let layer_angle = layer as f32 * golden_angle;
+
+                // Vertical position: spread from bottom to top of canopy
+                // Use sqrt for more clusters at edges (shell-like distribution)
+                let height_factor = (layer_t * 0.8 + 0.1).sqrt(); // 0.3 to 0.95 of canopy height
+                let y = canopy_base_y + height_factor * canopy_total_height;
+
+                // Horizontal offset: larger at bottom, smaller at top (tree shape)
+                let horizontal_extent = canopy_radius * (1.0 - height_factor * 0.4);
+                let dist_from_center = horizontal_extent * (0.3 + layer_t * 0.5);
+
+                let ox = layer_angle.cos() * dist_from_center + random() * 0.3;
+                let oz = layer_angle.sin() * dist_from_center + random() * 0.3;
+
+                // Cluster size: varies for natural look
+                let r = canopy_radius * (0.4 + random() * 0.15 + (1.0 - height_factor) * 0.3);
+                let h = r * config.canopy_vertical_scale;
+
+                (y, r, h, ox, oz)
+            }
+            ProceduralTreeStyle::Conifer => {
+                // CONE SHAPE: Tiered layers getting smaller toward top
+                // Each layer is a ring of clusters around the trunk
+                let tier = layer / 2; // Two clusters per tier
+                let tier_t = tier as f32 / (config.canopy_layers / 2).max(1) as f32;
+                let is_offset = layer % 2 == 1; // Alternate clusters
+
+                let y = canopy_base_y + tier_t * canopy_total_height;
+
+                // Radius decreases with height (cone shape)
+                let tier_radius = canopy_radius * (1.0 - tier_t * 0.8);
+
+                // Horizontal position: either center or edge
+                let angle = if is_offset {
+                    tier as f32 * 2.399963 + std::f32::consts::PI
+                } else {
+                    tier as f32 * 2.399963
+                };
+                let dist = if is_offset { tier_radius * 0.7 } else { tier_radius * 0.3 };
+
+                let ox = angle.cos() * dist;
+                let oz = angle.sin() * dist;
+
+                let r = tier_radius * (0.5 + random() * 0.2);
+                let h = r * config.canopy_vertical_scale;
+
+                (y, r, h, ox, oz)
+            }
+            ProceduralTreeStyle::Spreading => {
+                // FLAT UMBRELLA: Clusters spread horizontally at similar heights
+                let angle = layer as f32 * 2.399963; // Golden angle
+                let dist = canopy_radius * (0.2 + layer_t * 0.7);
+
+                // Height varies slightly but mostly flat
+                let y = canopy_base_y + canopy_total_height * 0.3 + random() * canopy_total_height * 0.4;
+
+                let ox = angle.cos() * dist + random() * 0.5;
+                let oz = angle.sin() * dist + random() * 0.5;
+
+                let r = canopy_radius * (0.35 + random() * 0.2);
+                let h = r * config.canopy_vertical_scale;
+
+                (y, r, h, ox, oz)
+            }
+            ProceduralTreeStyle::Columnar => {
+                // VERTICAL COLUMN: Stack clusters along the trunk
+                let y = canopy_base_y + layer_t * canopy_total_height;
+
+                // Slight bulge in middle
+                let bulge = 1.0 - (layer_t - 0.5).abs() * 1.5;
+                let r = canopy_radius * (0.7 + bulge * 0.4);
+                let h = r * config.canopy_vertical_scale;
+
+                let ox = random() * r * 0.2;
+                let oz = random() * r * 0.2;
+
+                (y, r, h, ox, oz)
+            }
+        };
+
+        // Generate deformed sphere for this cluster
+        let lat_segments = (segments / 2).max(4);
+        let lon_segments = segments;
+
+        for lat in 0..=lat_segments {
+            let lat_t = lat as f32 / lat_segments as f32;
+            let phi = lat_t * std::f32::consts::PI;
+
+            for lon in 0..=lon_segments {
+                let lon_t = lon as f32 / lon_segments as f32;
+                let theta = lon_t * std::f32::consts::TAU;
+
+                // Spheroid coordinates
+                let mut x = phi.sin() * theta.cos() * cluster_radius;
+                let mut y_local = phi.cos() * cluster_height;
+                let mut z = phi.sin() * theta.sin() * cluster_radius;
+
+                // Add noise-based displacement for organic shape
+                let noise_scale = 0.15;
+                let noise_freq = 3.0;
+                let noise = ((x * noise_freq + seed as f32 * 0.01).sin()
+                    * (z * noise_freq).cos()
+                    * (y_local * noise_freq * 0.5).sin()) * noise_scale;
+
+                let displacement = 1.0 + noise + random() * 0.05;
+                x *= displacement;
+                z *= displacement;
+
+                // Flatten bottom slightly
+                if y_local < 0.0 {
+                    y_local *= 0.7;
+                }
+
+                let pos = Vec3::new(
+                    x + offset_x,
+                    y_local + cluster_y,
+                    z + offset_z,
+                );
+
+                let normal = Vec3::new(x, y_local / config.canopy_vertical_scale, z).normalize();
+
+                vertices.push(TreeVertex {
+                    position: pos.to_array(),
+                    normal: normal.to_array(),
+                    uv: [lon_t, 2.0 + lat_t], // UV.y > 1.0 = canopy/leaf
+                });
+            }
+        }
+
+        // Generate indices for this cluster
+        for lat in 0..lat_segments {
+            for lon in 0..lon_segments {
+                let row_size = (lon_segments + 1) as u32;
+                let i0 = layer_base + lat as u32 * row_size + lon as u32;
+                let i1 = i0 + 1;
+                let i2 = i0 + row_size;
+                let i3 = i2 + 1;
+
+                if lat > 0 {
+                    indices.push(i0);
+                    indices.push(i2);
+                    indices.push(i1);
+                }
+                if lat < lat_segments - 1 {
+                    indices.push(i1);
+                    indices.push(i2);
+                    indices.push(i3);
+                }
+            }
+        }
+    }
+
+    TreeMesh { vertices, indices }
+}
+
+/// Generate a deciduous tree with default settings
+pub fn generate_deciduous_tree(seed: u64) -> TreeMesh {
+    generate_enhanced_tree(&ProceduralTreeConfig::deciduous(), seed)
+}
+
+/// Generate a conifer tree with default settings
+pub fn generate_conifer_tree(seed: u64) -> TreeMesh {
+    generate_enhanced_tree(&ProceduralTreeConfig::conifer(), seed)
+}
+
+/// Generate a spreading tree with default settings
+pub fn generate_spreading_tree(seed: u64) -> TreeMesh {
+    generate_enhanced_tree(&ProceduralTreeConfig::spreading(), seed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +1245,71 @@ mod tests {
             let mesh = generate_tree_mesh(&tree);
             assert!(!mesh.vertices.is_empty());
         }
+    }
+
+    #[test]
+    fn test_enhanced_deciduous_tree() {
+        let mesh = generate_deciduous_tree(12345);
+        println!("Enhanced deciduous: {} vertices, {} triangles",
+            mesh.vertices.len(), mesh.indices.len() / 3);
+        assert!(mesh.vertices.len() > 100, "Enhanced tree should have > 100 vertices");
+        assert!(mesh.indices.len() / 3 > 200, "Enhanced tree should have > 200 triangles");
+        assert_eq!(mesh.indices.len() % 3, 0, "Must be valid triangles");
+    }
+
+    #[test]
+    fn test_enhanced_conifer_tree() {
+        let mesh = generate_conifer_tree(54321);
+        println!("Enhanced conifer: {} vertices, {} triangles",
+            mesh.vertices.len(), mesh.indices.len() / 3);
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+    }
+
+    #[test]
+    fn test_enhanced_spreading_tree() {
+        let mesh = generate_spreading_tree(99999);
+        println!("Enhanced spreading: {} vertices, {} triangles",
+            mesh.vertices.len(), mesh.indices.len() / 3);
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.indices.len() % 3, 0);
+    }
+
+    #[test]
+    fn test_all_enhanced_styles() {
+        let configs = vec![
+            ProceduralTreeConfig::deciduous(),
+            ProceduralTreeConfig::conifer(),
+            ProceduralTreeConfig::spreading(),
+            ProceduralTreeConfig::columnar(),
+        ];
+
+        for config in configs {
+            let mesh = generate_enhanced_tree(&config, 11111);
+            println!("{:?} tree: {} verts, {} tris",
+                config.style, mesh.vertices.len(), mesh.indices.len() / 3);
+            assert!(!mesh.vertices.is_empty());
+            assert!(!mesh.indices.is_empty());
+            assert_eq!(mesh.indices.len() % 3, 0);
+        }
+    }
+
+    #[test]
+    fn test_tree_variation_with_seed() {
+        // Different seeds should produce different trees
+        let mesh1 = generate_deciduous_tree(100);
+        let mesh2 = generate_deciduous_tree(200);
+
+        // Same structure but positions should differ slightly
+        assert_eq!(mesh1.vertices.len(), mesh2.vertices.len());
+
+        // At least some vertices should be different
+        let mut different_count = 0;
+        for (v1, v2) in mesh1.vertices.iter().zip(mesh2.vertices.iter()) {
+            if v1.position != v2.position {
+                different_count += 1;
+            }
+        }
+        assert!(different_count > 0, "Different seeds should produce different trees");
     }
 }

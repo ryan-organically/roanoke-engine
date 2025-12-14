@@ -1,0 +1,103 @@
+{
+  "name": "roanoke",
+  "display_name": "Roanoke Game",
+  "version": "1.0.0",
+  "description": "Export profile for Roanoke game assets",
+
+  "engine": {
+    "name": "custom",
+    "version": "1.0"
+  },
+
+  "export": {
+    "format": "fbx",
+    "format_options": {
+      "scale": 1.0,
+      "apply_transform": true,
+      "forward_axis": "-Y",
+      "up_axis": "Z",
+      "add_leaf_bones": false,
+      "bake_animation": true
+    }
+  },
+
+  "mesh": {
+    "max_polycount": {
+      "prop_small": 500,
+      "prop_large": 2000,
+      "fauna_small": 3000,
+      "fauna_large": 8000,
+      "character": 15000,
+      "structure": 5000
+    },
+    "require_quads": false,
+    "allow_ngons": false,
+    "max_bone_influences": 4
+  },
+
+  "lod": {
+    "enabled": true,
+    "levels": [
+      { "name": "LOD0", "distance": 0, "polycount_ratio": 1.0 },
+      { "name": "LOD1", "distance": 20, "polycount_ratio": 0.4 },
+      { "name": "LOD2", "distance": 50, "polycount_ratio": 0.15 }
+    ]
+  },
+
+  "textures": {
+    "max_resolution": {
+      "props": 512,
+      "fauna": 1024,
+      "characters": 2048,
+      "terrain": 1024
+    },
+    "format": "png",
+    "compression": "bc7",
+    "channels": {
+      "albedo": { "suffix": "_albedo", "color_space": "sRGB" },
+      "normal": { "suffix": "_normal", "color_space": "linear", "format": "opengl" },
+      "orm": { "suffix": "_orm", "color_space": "linear", "note": "R=AO, G=Roughness, B=Metallic" }
+    }
+  },
+
+  "animation": {
+    "fps": 30,
+    "root_motion": true,
+    "bake_constraints": true,
+    "export_mode": "nla_strips"
+  },
+
+  "collision": {
+    "export_separate": true,
+    "naming_suffix": "_collision",
+    "simplification": "convex_hull"
+  },
+
+  "naming": {
+    "pattern": "{category}_{name}_{variant}",
+    "separator": "_",
+    "lowercase": true,
+    "no_spaces": true,
+    "examples": [
+      "fauna_deer_adult_male",
+      "prop_barrel_weathered",
+      "structure_cabin_colonial"
+    ]
+  },
+
+  "validation": {
+    "require_manifest": true,
+    "check_polycount": true,
+    "check_textures": true,
+    "check_naming": true,
+    "check_transforms_applied": true
+  },
+
+  "metadata": {
+    "embed_custom_properties": true,
+    "required_properties": [
+      "roanoke_entity_type",
+      "roanoke_category"
+    ]
+  }
+}

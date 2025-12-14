@@ -154,7 +154,8 @@ pub fn generate_vegetation_for_chunk(
             color_tip: base_recipe.color_tip,
         };
 
-        let base_pos = Vec3::new(world_x, height, world_z);
+        // Small Y offset (5cm) to prevent Z-fighting with terrain
+        let base_pos = Vec3::new(world_x, height + 0.05, world_z);
         let blade = generate_grass_blade(&recipe, seed + i, base_pos);
 
         // Append to combined mesh
@@ -444,11 +445,12 @@ mod tests {
         assert_eq!(height_to_biome(-1.0), "Ocean");
         assert_eq!(height_to_biome(0.5), "Beach");
         assert_eq!(height_to_biome(2.0), "Beach"); // Dunes
-        assert_eq!(height_to_biome(5.0), "CoastalScrub");
-        assert_eq!(height_to_biome(10.0), "Grassland");
+        assert_eq!(height_to_biome(4.0), "CoastalScrub"); // 2.5 - 5.0
+        assert_eq!(height_to_biome(6.0), "Grassland");    // 5.0 - 8.0
+        assert_eq!(height_to_biome(10.0), "DeciduousForest"); // 8.0 - 40.0
         assert_eq!(height_to_biome(30.0), "DeciduousForest");
-        assert_eq!(height_to_biome(60.0), "Foothills");
-        assert_eq!(height_to_biome(90.0), "AlpineMeadow");
+        assert_eq!(height_to_biome(60.0), "Foothills");   // 40.0 - 70.0
+        assert_eq!(height_to_biome(90.0), "AlpineMeadow"); // 70.0+
     }
 
     #[test]

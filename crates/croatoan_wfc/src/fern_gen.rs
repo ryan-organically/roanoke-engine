@@ -1,0 +1,235 @@
+//! Fern Generation System
+//!
+//! Generates fern instances for the forest understory. Ferns spawn exclusively
+//! in the DeciduousForest biome (height 8-40m) at low density to create
+//! natural woodland floor coverage.
+//!
+//! ## Placement Rules
+//! - Biome: DeciduousForest only (biome_t > 0.65, terrain height 8-40m)
+//! - Moisture: Prefers moist areas (moisture > 0.4)
+//! - Density: Sparse (~1-3 per 64m² grid cell)
+//! - Avoids: Water, rocks, steep slopes
+//!
+//! ## Wind Animation
+//! Ferns use the standard tree.wgsl shader which derives wind from vertex Y position.
+//! With origin at base and tips at Y~0.29m, fronds will have subtle sway.
+
+use crate::mesh_gen::{get_height_at, get_biome_t};
+use glam::{Mat4, Quat, Vec3};
+use noise::{NoiseFn, Perlin};
+
+/// Fern instance with transform and model index
+#[derive(Clone, Debug)]
+pub struct FernInstance {
+    pub transform: Mat4,
+    pub model_index: usize,
+}
+
+/// Result of fern generation for a chunk
+#[derive(Default)]
+pub struct FernInstances {
+    pub ferns: Vec<FernInstance>,
+}
+
+impl FernInstances {
+    /// Get fern transforms grouped by model name (fern_02, fern_03, etc.)
+    /// NOTE: fern_01 was corrupted, so we start at fern_02
+    pub fn by_model(&self, model_count: usize) -> std::collections::HashMap<String, Vec<Mat4>> {
+        let mut result = std::collections::HashMap::new();
+        let count = model_count.max(1);
+        for inst in &self.ferns {
+            // Use fern_02, fern_03 naming (starting at 02 since 01 is corrupted)
+            let model_name = format!("fern_{:02}", (inst.model_index % count) + 2);
+            result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
+        }
+        result
+    }
+
+    /// Total fern count
+    pub fn len(&self) -> usize {
+        self.ferns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ferns.is_empty()
+    }
+}
+
+/// Height range for DeciduousForest biome (matches vegetation.rs)
+const FOREST_HEIGHT_MIN: f32 = 8.0;
+const FOREST_HEIGHT_MAX: f32 = 40.0;
+
+/// Minimum biome_t for forest zone
+const FOREST_BIOME_T: f32 = 0.65;
+
+/// Generate fern instances for a terrain chunk.
+///
+/// Ferns spawn only in the DeciduousForest biome at sparse density,
+/// creating natural woodland floor coverage.
+///
+/// # Arguments
+/// * `seed` - World seed for deterministic generation
+/// * `chunk_size` - Chunk size in world units
+/// * `offset_x`, `offset_z` - Chunk world position
+/// * `model_count` - Number of fern model variants available
+///
+/// # Returns
+/// FernInstances containing transforms for all fern placements
+pub fn generate_ferns_for_chunk(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+    model_count: usize,
+) -> FernInstances {
+    let noise = Perlin::new(seed + 4242); // Unique seed offset for ferns
+    let moisture_noise = Perlin::new(seed + 4243);
+    let mut result = FernInstances::default();
+
+    let model_count = model_count.max(1);
+
+    // Grid-based placement with jitter for natural distribution
+    // 22m grid = ~2x density vs 32m grid, filtered by conditions
+    let grid_size = 22.0;
+    let cells_per_row = (chunk_size / grid_size).ceil() as i32;
+
+    for gz in 0..cells_per_row {
+        for gx in 0..cells_per_row {
+            // Grid center with jitter
+            let grid_x = offset_x + (gx as f32 + 0.5) * grid_size;
+            let grid_z = offset_z + (gz as f32 + 0.5) * grid_size;
+
+            // Large jitter for natural scatter
+            let jitter_x = noise.get([grid_x as f64 * 0.1, grid_z as f64 * 0.1]) as f32 * grid_size * 0.8;
+            let jitter_z = noise.get([grid_x as f64 * 0.1 + 50.0, grid_z as f64 * 0.1]) as f32 * grid_size * 0.8;
+
+            let world_x = grid_x + jitter_x;
+            let world_z = grid_z + jitter_z;
+
+            // Get terrain data
+            let (height, _) = get_height_at(world_x, world_z, seed);
+            let biome_t = get_biome_t(world_x, world_z, seed);
+
+            // === BIOME CHECK: DeciduousForest only ===
+            // Must be in forest zone AND within forest elevation band
+            if biome_t < FOREST_BIOME_T {
+                continue;
+            }
+            if height < FOREST_HEIGHT_MIN || height > FOREST_HEIGHT_MAX {
+                continue;
+            }
+
+            // === MOISTURE CHECK ===
+            // Ferns prefer moist forest floor
+            let moisture = (moisture_noise.get([world_x as f64 * 0.02, world_z as f64 * 0.02]) as f32 + 1.0) * 0.5;
+            if moisture < 0.35 {
+                continue; // Too dry for ferns
+            }
+
+            // === DENSITY FILTERING ===
+            // Base ~40% chance, increased in moister areas
+            let density_roll = (noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) + 1.0) * 0.5;
+            let density_threshold = 0.55 - moisture * 0.2; // 0.35-0.55 threshold
+            if density_roll < density_threshold as f64 {
+                continue;
+            }
+
+            // === CLUMPING ===
+            // Ferns grow in patches, not uniformly
+            let clump_noise = noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) as f32;
+            if clump_noise < -0.3 {
+                continue; // Gap in fern coverage
+            }
+
+            // === SPAWN FERN ===
+            // 2x scale for visibility - base 1.6-2.4 with variance up to 3.0
+            let scale_base = 1.6 + moisture * 0.8; // Larger in moist areas
+            let scale_var = noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]).abs() as f32 * 0.6;
+            let scale = scale_base + scale_var;
+
+            let rotation = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
+
+            // Model selection based on position hash
+            let model_idx = ((world_x.abs() as u32).wrapping_mul(73856093)
+                ^ (world_z.abs() as u32).wrapping_mul(19349663)) as usize
+                % model_count;
+
+            // Small sink to ground fern at base
+            let y_offset = -0.02;
+
+            result.ferns.push(FernInstance {
+                transform: Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    Quat::from_rotation_y(rotation),
+                    Vec3::new(world_x, height + y_offset, world_z),
+                ),
+                model_index: model_idx,
+            });
+        }
+    }
+
+    if !result.ferns.is_empty() {
+        println!(
+            "[FERN] Chunk ({}, {}): {} ferns",
+            offset_x, offset_z, result.ferns.len()
+        );
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fern_generation() {
+        let result = generate_ferns_for_chunk(12345, 256.0, 0.0, 0.0, 1);
+        println!("Generated {} ferns", result.len());
+
+        // Verify transforms are valid
+        for inst in &result.ferns {
+            assert!(inst.transform.w_axis.w == 1.0, "Invalid transform");
+        }
+    }
+
+    #[test]
+    fn test_fern_by_model() {
+        let result = generate_ferns_for_chunk(12345, 256.0, 0.0, 0.0, 2);
+        let by_model = result.by_model(2);
+
+        println!("Ferns by model:");
+        for (name, transforms) in &by_model {
+            println!("  {}: {} instances", name, transforms.len());
+        }
+
+        // Should have fern_01 and/or fern_02
+        for name in by_model.keys() {
+            assert!(name.starts_with("fern_"), "Invalid model name: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_forest_biome_only() {
+        // Generate in a chunk and verify all ferns are in valid forest range
+        let seed = 42;
+        let result = generate_ferns_for_chunk(seed, 256.0, -128.0, -128.0, 1);
+
+        for inst in &result.ferns {
+            let pos = inst.transform.w_axis.truncate();
+            let (height, _) = get_height_at(pos.x, pos.z, seed);
+            let biome_t = get_biome_t(pos.x, pos.z, seed);
+
+            assert!(
+                biome_t >= FOREST_BIOME_T,
+                "Fern outside forest biome: biome_t={} at ({}, {})",
+                biome_t, pos.x, pos.z
+            );
+            assert!(
+                height >= FOREST_HEIGHT_MIN && height <= FOREST_HEIGHT_MAX,
+                "Fern outside forest elevation: height={} at ({}, {})",
+                height, pos.x, pos.z
+            );
+        }
+    }
+}

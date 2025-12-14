@@ -213,13 +213,13 @@ fn cordgrass_config() -> GrassSpeciesConfig {
 fn sawgrass_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.4, 0.8),   // Medium height meadow grass
+            height_range: (0.5, 1.0),   // Taller for visibility
             blade_segments: 4,
             curve_factor: 0.35,         // Gentle flowing curve
-            width_base: 0.04,
-            width_tip: 0.01,
-            color_base: [0.12, 0.30, 0.08],  // Darker meadow green
-            color_tip: [0.22, 0.42, 0.15],   // Darker green tip
+            width_base: 0.06,           // Wider blades
+            width_tip: 0.015,
+            color_base: [0.20, 0.45, 0.12],  // Brighter meadow green
+            color_tip: [0.35, 0.60, 0.20],   // Brighter green tip
         },
         density_range: (2.0, 3.5),    // Dense meadow coverage
         wind_amplitude: 0.8,
@@ -234,13 +234,13 @@ fn sawgrass_config() -> GrassSpeciesConfig {
 fn forest_floor_config() -> GrassSpeciesConfig {
     GrassSpeciesConfig {
         recipe: GrassBladeRecipe {
-            height_range: (0.6, 1.2), // Taller, reaching for light
+            height_range: (0.8, 1.5), // Taller for visibility
             blade_segments: 4,
             curve_factor: 0.45, // Pronounced droop in low light
-            width_base: 0.05,   // Broader for light capture
-            width_tip: 0.012,
-            color_base: [0.08, 0.28, 0.06], // Darker deep forest green
-            color_tip: [0.15, 0.40, 0.12],  // Darker tip
+            width_base: 0.07,   // Wider blades for visibility
+            width_tip: 0.02,
+            color_base: [0.15, 0.40, 0.10], // Brighter forest green
+            color_tip: [0.25, 0.55, 0.18],  // Brighter tip
         },
         density_range: (4.0, 6.0), // Very dense - lush forest floor
         wind_amplitude: 0.3,       // Sheltered by canopy

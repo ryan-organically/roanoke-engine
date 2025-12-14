@@ -192,10 +192,16 @@ impl LowlandBunch {
             }
 
             // Scale increases with biome factor (deeper = taller)
-            // Large variance: trees range from small saplings (2.0) to massive old-growth (25.0)
-            let base_scale = 8.0 + self.biome_factor * 8.0;
-            let scale_var = noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32 * 10.0;
-            let tree_scale = (base_scale + scale_var).max(2.0);
+            // MASSIVE variance: trees range from saplings (3.0) to massive old-growth (35.0)
+            // Use multiple noise octaves for more natural distribution
+            let base_scale = 6.0 + self.biome_factor * 12.0;
+            let scale_var1 = noise.get([tx as f64 * 0.15, tz as f64 * 0.15]) as f32 * 12.0;
+            let scale_var2 = noise.get([tx as f64 * 0.4, tz as f64 * 0.4]) as f32 * 6.0;
+            // Occasionally spawn very large trees (10% chance)
+            let giant_bonus = if noise.get([tx as f64 * 0.05, tz as f64 * 0.05]) > 0.8 {
+                15.0
+            } else { 0.0 };
+            let tree_scale = (base_scale + scale_var1 + scale_var2 + giant_bonus).max(3.0);
 
             // Skip large trees near villages (forest clearing effect)
             if tree_scale > LARGE_TREE_SCALE_THRESHOLD && is_near_village(tx, tz, village_centers) {
@@ -362,7 +368,9 @@ pub fn generate_trees_for_chunk(
             let bunch_instances = bunch.generate(seed, village_centers);
             debug_trees_added += bunch_instances.trees.len();
             all_instances.extend(bunch_instances.trees);
-            all_instances.extend(bunch_instances.bushes);
+            // NOTE: Bushes are now handled separately by foliage system
+            // Removing them from tree instances prevents "small trees around big tree" look
+            // all_instances.extend(bunch_instances.bushes);
             // Note: rocks and pebbles handled by rocks.rs
         }
     }
@@ -439,11 +447,16 @@ pub fn generate_trees_for_chunk(
             }
         }
 
-        // Generate tree with large scale variance
+        // Generate tree with MASSIVE scale variance for natural forest look
         let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
-        let base_scale = 8.0 + forest_depth * 10.0;
-        let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32 * 12.0;
-        let scale = (base_scale + scale_var).max(2.0);
+        let base_scale = 5.0 + forest_depth * 15.0;
+        let scale_var1 = noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) as f32 * 14.0;
+        let scale_var2 = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5 + 50.0]) as f32 * 7.0;
+        // 8% chance of ancient giant tree
+        let giant_bonus = if noise.get([world_x as f64 * 0.03, world_z as f64 * 0.03]) > 0.84 {
+            18.0
+        } else { 0.0 };
+        let scale = (base_scale + scale_var1 + scale_var2 + giant_bonus).max(3.0);
 
         // Skip large trees near villages (forest clearing effect)
         if scale > LARGE_TREE_SCALE_THRESHOLD && is_near_village(world_x, world_z, village_centers) {

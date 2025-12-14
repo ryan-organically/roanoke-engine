@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn test_grass_patch() {
         let recipe = GrassBladeRecipe::default();
-        let (positions, colors, indices) = generate_grass_patch(
+        let (positions, colors, _heights, indices) = generate_grass_patch(
             &recipe,
             1587,
             (0.0, 0.0),

@@ -28,6 +28,7 @@ pub struct LoadedChunk {
     pub terrain: TerrainPipeline,
     pub grass: Option<GrassPipeline>,
     pub trees: Vec<TreePipeline>, // Foliage: trees + shrubs
+    pub ferns: Vec<TreePipeline>, // Forest understory ferns
     pub detritus: Option<DetritusPipeline>,
     pub rocks: Vec<TreePipeline>, // List of pipelines for different rock types in this chunk
     pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk
@@ -73,6 +74,17 @@ impl ChunkManager {
     /// `corn_field_exclusions` prevents rocks from spawning in crop fields
     pub fn update(&mut self, player_pos: Vec3, seed: u32, village_centers: &[Vec3], corn_field_exclusions: &[CornFieldBounds]) -> Vec<ChunkRequest> {
         let new_player_chunk = ChunkCoord::from_world_pos(player_pos, self.chunk_size);
+
+        // Debug: Track calls to update
+        static mut CALL_COUNT: u32 = 0;
+        unsafe {
+            CALL_COUNT += 1;
+            if CALL_COUNT % 300 == 1 {
+                println!("[CHUNK DEBUG] update called: player_chunk=({},{}), loaded={}, loading={}",
+                    new_player_chunk.x, new_player_chunk.z,
+                    self.loaded_chunks.len(), self.loading_chunks.len());
+            }
+        }
 
         // Only update if player moved to a different chunk
         if new_player_chunk == self.player_chunk && !self.loaded_chunks.is_empty() {

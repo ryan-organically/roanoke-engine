@@ -112,26 +112,28 @@ impl RockType {
     }
 
     /// Base scale multiplier for this rock type
+    /// NOTE: Pebbles increased 3x from 0.12 to 0.35 for visibility
     pub fn base_scale(&self) -> f32 {
         match self {
-            RockType::Pebble => 0.12,
-            RockType::SmallRock => 0.35,
-            RockType::MediumRock => 0.75,
-            RockType::LargeBoulder => 1.5,
-            RockType::FlatRock => 0.55,
-            RockType::MossyRock => 0.65,
+            RockType::Pebble => 0.35,      // Was 0.12 - too small to see from game camera
+            RockType::SmallRock => 0.45,    // Bumped slightly
+            RockType::MediumRock => 0.85,
+            RockType::LargeBoulder => 1.8,
+            RockType::FlatRock => 0.65,
+            RockType::MossyRock => 0.75,
         }
     }
 
     /// How deep the rock sinks into terrain (prevents floating)
+    /// Reduced to keep more of rock visible above ground
     pub fn sink_amount(&self) -> f32 {
         match self {
-            RockType::Pebble => 0.03,
-            RockType::SmallRock => 0.08,
-            RockType::MediumRock => 0.18,
-            RockType::LargeBoulder => 0.35,
-            RockType::FlatRock => 0.12,
-            RockType::MossyRock => 0.22,
+            RockType::Pebble => 0.02,      // Was 0.03
+            RockType::SmallRock => 0.05,   // Was 0.08
+            RockType::MediumRock => 0.12,  // Was 0.18
+            RockType::LargeBoulder => 0.25, // Was 0.35
+            RockType::FlatRock => 0.08,    // Was 0.12
+            RockType::MossyRock => 0.15,   // Was 0.22
         }
     }
 
