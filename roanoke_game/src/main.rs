@@ -5116,12 +5116,12 @@ fn main() {
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
                 // LOD distance configuration for trees
-                // LOD0 (full detail): 0-300 units, fade out 250-300
-                // LOD1 (simplified): 250-800+ units, fade in 250-300
+                // LOD0 (full detail): 0-500 units, fade out 400-500
+                // LOD1 (simplified): 400-1200+ units, fade in 400-500
                 let lod_config = TreeLODConfig {
-                    lod0_fade_start: 250.0,
-                    lod0_fade_end: 300.0,
-                    lod1_max_distance: (state.render_distance * 1.5).max(800.0),
+                    lod0_fade_start: 400.0,
+                    lod0_fade_end: 500.0,
+                    lod1_max_distance: (state.render_distance * 2.5).max(1200.0),
                 };
 
                 for (_coord, chunk) in manager.iter_chunks() {
@@ -5159,8 +5159,8 @@ fn main() {
                     }
 
                     // Trees with LOD system - dithered fade between detail levels
-                    // LOD0 (full detail): visible 0-300 units, fade out 250-300
-                    // LOD1 (simplified ~18 tris): visible 250-800+ units, fade in 250-300
+                    // LOD0 (full detail): visible 0-500 units, fade out 400-500
+                    // LOD1 (simplified ~18 tris): visible 400-1200+ units, fade in 400-500
 
                     // Determine LOD mode based on distance
                     let in_lod0_range = dist <= lod_config.lod0_fade_end;

@@ -60,9 +60,9 @@ pub struct TreeLODConfig {
 impl Default for TreeLODConfig {
     fn default() -> Self {
         Self {
-            lod0_fade_start: 250.0,
-            lod0_fade_end: 300.0,
-            lod1_max_distance: 800.0,
+            lod0_fade_start: 400.0,
+            lod0_fade_end: 500.0,
+            lod1_max_distance: 1200.0,
         }
     }
 }
