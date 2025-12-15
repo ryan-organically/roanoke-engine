@@ -15,6 +15,15 @@ pub const TREE_SPECIES_MAPLE: usize = 1;    // tree_1 (generic deciduous)
 pub const TREE_SPECIES_BIRCH: usize = 2;    // birch_0
 pub const TREE_SPECIES_PINE: usize = 3;     // pine_0
 
+/// Shrub model indices - must match order in main.rs shrub_models array
+pub const SHRUB_SPECIES_DEFAULT: usize = 0; // shrub_0
+pub const SHRUB_SPECIES_BUSH: usize = 1;    // bush_0
+pub const SHRUB_SPECIES_GRASS: usize = 2;   // grass_0
+
+/// Beach grass model index (low-poly clumps for upper beach → treeline)
+/// Single model with scale variation instead of multiple models
+pub const SHRUB_SPECIES_BEACH_GRASS_0: usize = 3; // beach_grass_0
+
 /// Instance with model index for multi-model rendering
 #[derive(Clone, Debug)]
 pub struct FoliageInstance {
@@ -38,22 +47,35 @@ fn is_birch_zone(world_x: f32, world_z: f32, seed: u32) -> bool {
 
 /// Get birch zone strength (0.0 = not birch zone, 1.0 = deep in birch zone)
 /// Used for smooth transitions at zone edges
+/// Birch only spawns INLAND (biome_t > 0.82) - not near coast or treeline
 fn birch_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
+    // Check if we're far enough inland for birch (beyond coastal forest)
+    let biome_t = crate::mesh_gen::get_biome_t(world_x, world_z, seed);
+    if biome_t < 0.82 {
+        return 0.0; // No birch near coast, treeline, or coastal forest
+    }
+
+    // Birch strength increases with distance inland
+    let inland_factor = ((biome_t - 0.82) / 0.18).clamp(0.0, 1.0);
+
     let birch_noise = Perlin::new(seed.wrapping_add(31337));
     let zone_value = birch_noise.get([world_x as f64 * 0.008, world_z as f64 * 0.008]) as f32;
 
-    // Remap: 0.3 -> 0.0, 0.7 -> 1.0
-    ((zone_value - 0.3) / 0.4).clamp(0.0, 1.0)
+    // Remap: 0.3 -> 0.0, 0.7 -> 1.0, then scale by inland factor
+    let base_strength = ((zone_value - 0.3) / 0.4).clamp(0.0, 1.0);
+    base_strength * inland_factor
 }
 
 /// Get pine zone strength (0.0 = not pine zone, 1.0 = deep in pine zone)
 /// Pines favor coastal areas and sandy soils - uses different noise layer
+/// DOUBLED spawn rate: Pines now cover ~50% of forest area
 fn pine_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
     let pine_noise = Perlin::new(seed.wrapping_add(54321));
     let zone_value = pine_noise.get([world_x as f64 * 0.006, world_z as f64 * 0.006]) as f32;
 
-    // Pines in ~25% of forest area, different zones than birch
-    ((zone_value - 0.4) / 0.4).clamp(0.0, 1.0)
+    // Pines in ~50% of forest area (doubled from 25%)
+    // Lower threshold means more pine zones
+    ((zone_value - 0.1) / 0.5).clamp(0.0, 1.0)
 }
 
 /// Select tree species based on position and zone
@@ -122,12 +144,19 @@ impl FoliageInstances {
         result
     }
 
-    /// Get shrub transforms grouped by model name (shrub_0, shrub_1, etc.)
+    /// Get shrub transforms grouped by model name (shrub_0, bush_0, grass_0, beach_grass_0)
     pub fn shrubs_by_model(&self, model_count: usize) -> HashMap<String, Vec<Mat4>> {
         let mut result = HashMap::new();
         let count = model_count.max(1);
         for inst in &self.shrubs {
-            let model_name = format!("shrub_{}", inst.model_index % count);
+            let idx = inst.model_index % count;
+            // Map species index to actual model name
+            let model_name = match idx {
+                SHRUB_SPECIES_BUSH => "bush_0".to_string(),
+                SHRUB_SPECIES_GRASS => "grass_0".to_string(),
+                SHRUB_SPECIES_BEACH_GRASS_0 => "beach_grass_0".to_string(),
+                _ => "shrub_0".to_string(),
+            };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
         }
         result
@@ -184,11 +213,21 @@ pub fn generate_foliage_for_chunk(
             let biome_t = get_biome_t(world_x, world_z, seed);
             let (height, _) = get_height_at(world_x, world_z, seed);
 
-            if biome_t < 0.52 || height < 1.5 {
+            // Skip ocean and beach (t < 0.65)
+            if biome_t < 0.65 || height < 1.5 {
                 continue;
             }
 
-            let bunch_threshold = if biome_t < 0.65 { 0.3 } else { 0.5 };
+            // Forest-edge/Treeline zone (0.65-0.72): EXTREMELY dense - defines the treeline
+            // Coastal forest (0.72-0.82): moderate density
+            // Inland forest (0.82+): normal density
+            let bunch_threshold = if biome_t < 0.72 {
+                0.08 // Extremely dense treeline (was 0.15)
+            } else if biome_t < 0.82 {
+                0.30 // Moderate density coastal forest
+            } else {
+                0.45 // Normal density inland
+            };
             let density_roll = (noise.get([world_x as f64 * 0.05, world_z as f64 * 0.05]) + 1.0) * 0.5;
             if density_roll < bunch_threshold {
                 continue;
@@ -196,10 +235,10 @@ pub fn generate_foliage_for_chunk(
 
             let shore_dist = distance_to_shoreline(world_x, world_z, seed);
             let beyond_treeline = shore_dist > TREELINE_DISTANCE;
-            let biome_factor = if biome_t > 0.65 {
-                ((biome_t - 0.65) / 0.35).clamp(0.0, 1.0)
+            let biome_factor = if biome_t > 0.72 {
+                ((biome_t - 0.72) / 0.28).clamp(0.0, 1.0)
             } else {
-                0.0
+                0.0 // Treeline trees are smaller/younger
             };
 
             let above_upper = height > UPPER_TREELINE_END;
@@ -214,8 +253,12 @@ pub fn generate_foliage_for_chunk(
             let local_seed = seed.wrapping_add((world_x as u32) ^ (world_z as u32).rotate_left(16));
             let local_noise = Perlin::new(local_seed);
 
-            // SHRUBS (understory) - 1-3 per area, spread randomly NOT clustered around center
-            let shrub_local = 1 + ((local_noise.get([local_seed as f64 * 0.1, 60.0]) + 1.0) * 1.0) as u32;
+            // SHRUBS (understory) - more in treeline zone (defines the forest edge)
+            // Treeline (t 0.65-0.72): 4-7 shrubs per area (very dense)
+            // Regular forest: 1-3 shrubs per area
+            let base_shrubs = if biome_t < 0.72 { 4 } else { 1 };
+            let shrub_variation = if biome_t < 0.72 { 3.0 } else { 1.0 };
+            let shrub_local = base_shrubs + ((local_noise.get([local_seed as f64 * 0.1, 60.0]) + 1.0) * shrub_variation) as u32;
             for i in 0..shrub_local {
                 // Fully random placement within a wide radius, not orbiting center
                 let shrub_offset_x = local_noise.get([local_seed as f64 * 0.5, i as f64 * 7.3]) as f32 * 20.0;
@@ -292,7 +335,8 @@ pub fn generate_foliage_for_chunk(
         let biome_t = get_biome_t(world_x, world_z, seed);
         let (height, _) = get_height_at(world_x, world_z, seed);
 
-        if biome_t < 0.65 {
+        // Updated threshold: forest starts at 0.72 (treeline at 0.65-0.72)
+        if biome_t < 0.72 {
             continue;
         }
         if distance_to_shoreline(world_x, world_z, seed) < TREELINE_DISTANCE {
@@ -306,7 +350,7 @@ pub fn generate_foliage_for_chunk(
             continue;
         }
 
-        let forest_depth = (biome_t - 0.65) / 0.35;
+        let forest_depth = (biome_t - 0.72) / 0.28;
         let threshold = 0.3 + forest_depth * 0.5;
         if (noise.get([world_x as f64 * 0.02, world_z as f64 * 0.02]) + 1.0) * 0.5 > threshold as f64
         {
@@ -325,6 +369,7 @@ pub fn generate_foliage_for_chunk(
 
         let angle =
             noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
+        // Trees scale with forest_depth (based on new 0.62 threshold)
         let scale = 5.5
             + forest_depth * 2.5
             + noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32;
@@ -344,12 +389,107 @@ pub fn generate_foliage_for_chunk(
         });
     }
 
+    // Phase 3: Beach grass on upper beach (height 2.0-5.0m)
+    // Sparse near water, denser toward treeline
+    let beach_grass_count = generate_beach_grass_for_chunk(
+        &mut result,
+        seed,
+        chunk_size,
+        offset_x,
+        offset_z,
+        &noise,
+    );
+
     println!(
-        "[FOLIAGE] Chunk ({}, {}): {} trees, {} shrubs",
+        "[FOLIAGE] Chunk ({}, {}): {} trees, {} shrubs ({} beach grass)",
         offset_x,
         offset_z,
         result.trees.len(),
-        result.shrubs.len()
+        result.shrubs.len(),
+        beach_grass_count
     );
     result
+}
+
+/// Generate beach grass clumps for upper beach areas.
+///
+/// Spawns low-poly grass clumps (beach_grass_0 through beach_grass_3) on:
+/// - Height range: 2.0m - 5.0m (above wet sand, below forest)
+/// - Biome_t range: 0.45 - 0.65 (beach to treeline transition)
+///
+/// Density increases toward treeline, taller variations spawn higher up.
+fn generate_beach_grass_for_chunk(
+    result: &mut FoliageInstances,
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+    noise: &Perlin,
+) -> u32 {
+    let mut count = 0u32;
+
+    // Beach grass density: 0.008 instances/m² (much lower than procedural grass)
+    // This gives sparse clumps that don't overwhelm the beach
+    let base_density = 0.008;
+    let potential = (chunk_size * chunk_size * base_density) as u32;
+
+    // Separate noise for beach grass placement
+    let beach_noise = Perlin::new(seed.wrapping_add(88888));
+
+    for i in 0..potential {
+        // Deterministic random position
+        let rx = noise.get([i as f64 * 0.17, 1200.0]) as f32;
+        let rz = noise.get([i as f64 * 0.17, 1300.0]) as f32;
+        let world_x = offset_x + (rx + 1.0) * 0.5 * chunk_size;
+        let world_z = offset_z + (rz + 1.0) * 0.5 * chunk_size;
+
+        let (height, _) = get_height_at(world_x, world_z, seed);
+        let biome_t = get_biome_t(world_x, world_z, seed);
+
+        // Beach grass zone: full beach + treeline (height 0.5-10.0m, biome_t 0.35-0.72)
+        // 0.5m = just above waterline, 10.0m = through treeline/drift plateaus
+        if height < 0.5 || height > 10.0 {
+            continue;
+        }
+        if biome_t < 0.35 || biome_t > 0.72 {
+            continue;
+        }
+
+        // Even density across beach with slight increase toward treeline
+        let height_factor = ((height - 0.5) / 9.5).clamp(0.0, 1.0);
+        let density_threshold = 0.5 + height_factor * 0.3; // 50-80% spawn rate
+
+        let density_roll = (beach_noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]) + 1.0) * 0.5;
+        if density_roll > density_threshold as f64 {
+            continue;
+        }
+
+        // Clumping: beach grass grows in scattered patches
+        let clump_noise = beach_noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) as f32;
+        if clump_noise < -0.4 {
+            continue; // Gap between clumps
+        }
+
+        // Scale: 3.0-6.0 (larger, visible clumps)
+        let base_scale = 3.0 + height_factor * 2.0;
+        let noise_scale = (beach_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]).abs() as f32) * 1.5;
+        let scale = base_scale + noise_scale;
+
+        // Random Y rotation
+        let rotation = beach_noise.get([world_x as f64 * 0.7, world_z as f64 * 0.7]) as f32
+            * std::f32::consts::TAU;
+
+        result.shrubs.push(FoliageInstance {
+            transform: Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale),
+                Quat::from_rotation_y(rotation),
+                Vec3::new(world_x, height + 0.1, world_z), // Small Y offset to sit on terrain
+            ),
+            model_index: SHRUB_SPECIES_BEACH_GRASS_0,
+        });
+
+        count += 1;
+    }
+
+    count
 }

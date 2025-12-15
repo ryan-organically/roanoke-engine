@@ -17,17 +17,17 @@ use noise::{NoiseFn, Perlin};
 fn height_to_biome(height: f32) -> &'static str {
     if height < 0.0 {
         "Ocean"
-    } else if height < 0.8 {
-        "Beach" // Wet sand - no grass
-    } else if height < 2.5 {
-        "Beach" // Dunes - Sea Oats territory
-    } else if height < 5.0 {
-        "CoastalScrub"
-    } else if height < 8.0 {
-        "Grassland"
-    } else if height < 40.0 {
-        "DeciduousForest" // Forest starts at height 8+ (matches terrain gen)
-    } else if height < 70.0 {
+    } else if height < 1.0 {
+        "Beach" // Wet sand - no procedural grass (using beach_grass_0 model)
+    } else if height < 6.0 {
+        "Beach" // Dunes - steeper, with dune formations
+    } else if height < 10.0 {
+        "CoastalScrub" // Treeline / drift plateaus
+    } else if height < 15.0 {
+        "Grassland" // Sandy understory near forest
+    } else if height < 50.0 {
+        "DeciduousForest" // Forest starts at height 15+ (raised)
+    } else if height < 80.0 {
         "Foothills"
     } else {
         "AlpineMeadow"
@@ -465,14 +465,14 @@ mod tests {
     #[test]
     fn test_height_to_biome() {
         assert_eq!(height_to_biome(-1.0), "Ocean");
-        assert_eq!(height_to_biome(0.5), "Beach");
-        assert_eq!(height_to_biome(2.0), "Beach"); // Dunes
-        assert_eq!(height_to_biome(4.0), "CoastalScrub"); // 2.5 - 5.0
-        assert_eq!(height_to_biome(6.0), "Grassland");    // 5.0 - 8.0
-        assert_eq!(height_to_biome(10.0), "DeciduousForest"); // 8.0 - 40.0
-        assert_eq!(height_to_biome(30.0), "DeciduousForest");
-        assert_eq!(height_to_biome(60.0), "Foothills");   // 40.0 - 70.0
-        assert_eq!(height_to_biome(90.0), "AlpineMeadow"); // 70.0+
+        assert_eq!(height_to_biome(0.5), "Beach");        // Wet sand
+        assert_eq!(height_to_biome(3.0), "Beach");        // Dunes (0-6m)
+        assert_eq!(height_to_biome(8.0), "CoastalScrub"); // Treeline (6-10m)
+        assert_eq!(height_to_biome(12.0), "Grassland");   // Sandy understory (10-15m)
+        assert_eq!(height_to_biome(20.0), "DeciduousForest"); // Forest (15-50m)
+        assert_eq!(height_to_biome(40.0), "DeciduousForest");
+        assert_eq!(height_to_biome(60.0), "Foothills");   // 50-80m
+        assert_eq!(height_to_biome(90.0), "AlpineMeadow"); // 80m+
     }
 
     #[test]

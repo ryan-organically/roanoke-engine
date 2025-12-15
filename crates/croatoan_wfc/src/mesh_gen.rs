@@ -147,6 +147,22 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
     let rolling_hills = hill_noise * 25.0 * hill_strength; // Up to 25m hills
 
     // 7. Biome Definitions
+    // Beach: 0.45-0.65 - steeper incline with dunes
+    // Forest-edge zone: 0.65-0.72 - drift plateaus and treeline
+    // Forest starts higher: 8.0m+ with sandy understory near coast
+
+    // Dune noise - creates rolling sand dunes on beach
+    let dune_noise = noise_util::fbm(
+        Vec2::new(x * 0.015, z * 0.02),
+        4, 2.0, 0.5, seed + 777
+    );
+
+    // Drift plateau noise - creates flat sandy terraces near treeline
+    let plateau_noise = noise_util::fbm(
+        Vec2::new(x * 0.008, z * 0.008),
+        2, 2.0, 0.5, seed + 888
+    );
+
     let (mut base_height, height_mult, mut base_color) = if t < 0.45 {
         // Ocean / Shallow Water
         let sandbar = if detail_noise > 0.5 { 0.5 } else { 0.0 };
@@ -155,24 +171,43 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         let depth_factor = (t / 0.45).clamp(0.0, 1.0);
         let c = lerp_color([0.05, 0.3, 0.4], [0.2, 0.8, 0.8], depth_factor);
         (h, 0.1, c)
-    } else if t < 0.48 {
-        // Beach / Dunes
-        let blend = (t - 0.45) / 0.03;
-        let h = lerp(0.0, 2.0, blend);
-        let c = [0.60, 0.50, 0.40];
-        (h, 0.2, c)
-    } else if t < 0.55 {
-        // Subtropical Scrub / Grassland transition
-        let blend = (t - 0.48) / 0.07;
-        let h = lerp(2.0, 5.0, blend);
-        let c = lerp_color([0.35, 0.45, 0.25], [0.25, 0.38, 0.15], blend);
-        (h, 0.8, c)
+    } else if t < 0.65 {
+        // Beach / Dunes - steeper incline (0.0 to 6.0m) with dune formations
+        let blend = (t - 0.45) / 0.20;
+        let base_h = lerp(0.0, 6.0, blend); // Steeper: was 3.0, now 6.0
+        // Add dune ridges that increase toward treeline
+        let dune_strength = blend * 2.5; // Dunes get bigger inland
+        let dunes = dune_noise.abs() * dune_strength;
+        let h = base_h + dunes;
+        let c = lerp_color([0.60, 0.50, 0.40], [0.52, 0.46, 0.36], blend);
+        (h, 0.4, c)
+    } else if t < 0.72 {
+        // Forest-Edge Zone (Treeline) - drift plateaus with sandy patches
+        let blend = (t - 0.65) / 0.07;
+        let base_h = lerp(6.0, 10.0, blend); // Higher: was 3.0-5.5, now 6.0-10.0
+        // Drift plateaus - flat sandy terraces held by vegetation
+        let plateau_strength = (1.0 - blend) * 3.0; // Stronger at start of treeline
+        let plateaus = if plateau_noise > 0.2 {
+            (plateau_noise - 0.2) * plateau_strength
+        } else {
+            0.0
+        };
+        let h = base_h + plateaus;
+        // Sandy soil color transitioning to forest floor
+        let c = lerp_color([0.50, 0.45, 0.35], [0.30, 0.40, 0.20], blend);
+        (h, 0.6, c)
     } else {
-        // Coastal Forest - flatter near coast, rolling hills inland
-        let blend = (t - 0.55) / 0.45;
-        let h = lerp(5.0, 12.0, blend) + rolling_hills;
-        let m = 1.5 * (1.0 - hill_strength * 0.5); // Less detail noise where hills are
-        let c = lerp_color([0.22, 0.38, 0.12], [0.08, 0.22, 0.06], blend);
+        // Coastal Deciduous Forest - starts higher, sandy understory near treeline
+        let blend = (t - 0.72) / 0.28;
+        // Hills only start at t > 0.82 (far inland), not immediately
+        let far_inland = ((t - 0.82) / 0.18).clamp(0.0, 1.0);
+        let adjusted_hills = rolling_hills * far_inland;
+        let h = lerp(10.0, 15.0, blend) + adjusted_hills; // Higher: was 5.5-10.0, now 10.0-15.0
+        let m = 0.7 * (1.0 - far_inland * 0.3);
+        // Sandy understory near coast, darker forest floor inland
+        let sandy_factor = (1.0 - blend).powi(2) * 0.3;
+        let base_forest = lerp_color([0.22, 0.38, 0.12], [0.08, 0.22, 0.06], blend);
+        let c = lerp_color(base_forest, [0.45, 0.42, 0.32], sandy_factor);
         (h, m, c)
     };
 
@@ -404,11 +439,12 @@ pub fn distance_to_shoreline(x: f32, z: f32, seed: u32) -> f32 {
 /// Get the biome "t" value at a position (0.0-1.0 scale from ocean to deep forest)
 /// Useful for determining spawn zones without full height calculation.
 ///
-/// # Biome Zones
+/// # Biome Zones (Updated v2)
 /// - t < 0.45: Ocean
-/// - t 0.45-0.55: Beach
-/// - t 0.55-0.65: Scrub/Lowland
-/// - t > 0.65: Forest
+/// - t 0.45-0.65: Beach/Sand (expanded 5x)
+/// - t 0.65-0.72: Forest-Edge/Treeline (very dense)
+/// - t 0.72-0.82: Coastal Forest (flat)
+/// - t > 0.82: Inland Forest (rolling hills, birch)
 pub fn get_biome_t(x: f32, z: f32, seed: u32) -> f32 {
     let biome_scale = 0.002;
     let biome_noise = noise_util::fbm(

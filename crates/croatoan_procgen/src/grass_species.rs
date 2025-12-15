@@ -293,7 +293,7 @@ pub fn should_spawn_grass(
         "River" => false,
         "MountainPeak" => height < 120.0, // Only below snowline
         "Cave" => false,
-        "Beach" => height > 0.8 && height < 4.0, // Only on dunes, not wet sand
+        "Beach" => false, // Disabled - using beach_grass_0 model instead
         "SaltMarsh" => !is_water, // Except in channels
         _ => true,
     }
@@ -369,8 +369,8 @@ mod tests {
     #[test]
     fn test_spawn_conditions() {
         assert!(!should_spawn_grass("Ocean", 0.0, 1.0, true, false));
-        assert!(!should_spawn_grass("Beach", 0.3, 0.5, false, false)); // Wet sand
-        assert!(should_spawn_grass("Beach", 1.5, 0.3, false, false)); // Dune
+        assert!(!should_spawn_grass("Beach", 0.3, 0.5, false, false)); // No procedural grass on beach
+        assert!(!should_spawn_grass("Beach", 1.5, 0.3, false, false)); // Using beach_grass_0 model instead
         assert!(should_spawn_grass("Grassland", 5.0, 0.5, false, false));
         assert!(!should_spawn_grass("DeciduousForest", 10.0, 0.5, false, true)); // Rock
     }

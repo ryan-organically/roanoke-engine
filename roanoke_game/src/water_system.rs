@@ -188,12 +188,12 @@ impl WaterSystem {
                 let u = x as f32 / grid_size as f32;
                 let v = y as f32 / grid_size as f32;
                 // Position is just flat plane, displaced in shader
-                // Centered around 0,0
+                // Centered around 0,0, lowered to -1.5 to stay below beach level
                 let px = (u - 0.5) * patch_size;
                 let pz = (v - 0.5) * patch_size;
-                
+
                 vertices.push(px);
-                vertices.push(0.0);
+                vertices.push(-1.5); // Below sea level so waves don't poke through sand
                 vertices.push(pz);
                 
                 vertices.push(u);

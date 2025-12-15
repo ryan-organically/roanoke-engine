@@ -1,14 +1,13 @@
 //! Fern Generation System
 //!
-//! Generates fern instances for the forest understory. Ferns spawn exclusively
-//! in the DeciduousForest biome (height 8-40m) at low density to create
-//! natural woodland floor coverage.
+//! Generates fern instances for the forest understory. Ferns spawn in the
+//! DeciduousForest biome and treeline zones with increased density near trees.
 //!
 //! ## Placement Rules
-//! - Biome: DeciduousForest only (biome_t > 0.65, terrain height 8-40m)
-//! - Moisture: Prefers moist areas (moisture > 0.4)
-//! - Density: Sparse (~1-3 per 64m² grid cell)
-//! - Avoids: Water, rocks, steep slopes
+//! - Biome: Forest and treeline zones (biome_t > 0.65)
+//! - Density: 2x rate near trees, base rate elsewhere
+//! - Size: 2x base scale (6.0 base, varies 3-18)
+//! - Avoids: Water, very low terrain
 //!
 //! ## Wind Animation
 //! Ferns use the standard tree.wgsl shader which derives wind from vertex Y position.
@@ -55,12 +54,15 @@ impl FernInstances {
     }
 }
 
-/// Height range for DeciduousForest biome (matches vegetation.rs)
-const FOREST_HEIGHT_MIN: f32 = 8.0;
-const FOREST_HEIGHT_MAX: f32 = 40.0;
+/// Height range for forest ferns
+const FOREST_HEIGHT_MIN: f32 = 3.0;  // Lower to include treeline
+const FOREST_HEIGHT_MAX: f32 = 50.0; // Higher for rolling hills
 
-/// Minimum biome_t for forest zone
-const FOREST_BIOME_T: f32 = 0.65;
+/// Minimum biome_t for treeline zone (ferns start at treeline)
+const TREELINE_BIOME_T: f32 = 0.65;
+
+/// Biome_t for full forest (higher density)
+const FOREST_BIOME_T: f32 = 0.72;
 
 /// Generate fern instances for a terrain chunk.
 ///
@@ -88,8 +90,8 @@ pub fn generate_ferns_for_chunk(
     let model_count = model_count.max(1);
 
     // Grid-based placement with jitter for natural distribution
-    // 10m grid = 5x density for dense forest floor coverage
-    let grid_size = 10.0;
+    // Denser grid (8m) for better forest floor coverage
+    let grid_size = 8.0;
     let cells_per_row = (chunk_size / grid_size).ceil() as i32;
 
     for gz in 0..cells_per_row {
@@ -109,28 +111,40 @@ pub fn generate_ferns_for_chunk(
             let (height, _) = get_height_at(world_x, world_z, seed);
             let biome_t = get_biome_t(world_x, world_z, seed);
 
-            // === BIOME CHECK: DeciduousForest only ===
-            // Must be in forest zone AND within forest elevation band
-            if biome_t < FOREST_BIOME_T {
+            // === BIOME CHECK: Treeline and Forest zones ===
+            // Ferns start at treeline (0.65) and continue into forest
+            if biome_t < TREELINE_BIOME_T {
                 continue;
             }
             if height < FOREST_HEIGHT_MIN || height > FOREST_HEIGHT_MAX {
                 continue;
             }
 
+            // === DENSITY CHECK ===
+            // 2x density in treeline (near trees) vs deeper forest
+            // Treeline (0.65-0.72): very dense ferns among the trees
+            // Forest (0.72+): moderate fern density
+            let is_treeline = biome_t < FOREST_BIOME_T;
+            let density_threshold = if is_treeline { 0.15 } else { 0.35 };
+
+            let density_roll = (noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) + 1.0) * 0.5;
+            if density_roll < density_threshold as f64 {
+                continue;
+            }
+
             // === LIGHT CLUMPING ===
-            // Only skip ~15% for natural gaps (reduced from 30%)
+            // Only skip ~10% for natural gaps
             let clump_noise = noise.get([world_x as f64 * 0.12, world_z as f64 * 0.12]) as f32;
-            if clump_noise < -0.7 {
+            if clump_noise < -0.8 {
                 continue; // Small gaps in fern coverage
             }
 
             // === SPAWN FERN ===
-            // 2x size increase - high variation from 1.5 to 9.0
-            let scale_base = 3.0;
+            // DOUBLED size: base 6.0 (was 3.0), variation 3-18 (was 1.5-9.0)
+            let scale_base = 6.0;
             let scale_var = noise.get([world_x as f64 * 0.25, world_z as f64 * 0.25]).abs() as f32;
             let scale_mult = 0.5 + scale_var * 2.5; // 0.5x to 3.0x multiplier
-            let scale = scale_base * scale_mult; // Final: 1.5 to 9.0
+            let scale = scale_base * scale_mult; // Final: 3.0 to 18.0
 
             let rotation = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
 
@@ -139,8 +153,8 @@ pub fn generate_ferns_for_chunk(
                 ^ (world_z.abs() as u32).wrapping_mul(19349663)) as usize
                 % model_count;
 
-            // Small sink to ground fern at base
-            let y_offset = -0.02;
+            // Sink ferns 10% lower to prevent floating - some may clip like grass
+            let y_offset = -0.3 - scale * 0.1;
 
             result.ferns.push(FernInstance {
                 transform: Mat4::from_scale_rotation_translation(
@@ -206,8 +220,8 @@ mod tests {
             let biome_t = get_biome_t(pos.x, pos.z, seed);
 
             assert!(
-                biome_t >= FOREST_BIOME_T,
-                "Fern outside forest biome: biome_t={} at ({}, {})",
+                biome_t >= TREELINE_BIOME_T,
+                "Fern outside treeline/forest biome: biome_t={} at ({}, {})",
                 biome_t, pos.x, pos.z
             );
             assert!(
