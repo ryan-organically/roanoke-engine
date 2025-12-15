@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-12-14",
+  "spec_type": "pine_tree_export",
+
+  "export_paths": {
+    "LOD0": "C:/dev/roanoke engine/assets/models/trees/pine_0.glb",
+    "LOD1": "C:/dev/roanoke engine/assets/models/trees/pine_0_lod1.glb",
+    "LOD2": "C:/dev/roanoke engine/assets/models/trees/pine_0_lod2.glb"
+  },
+
+  "lod_levels": {
+    "LOD0": {
+      "triangles": { "min": 15000, "max": 22000 },
+      "distance": [0, 400]
+    },
+    "LOD1": {
+      "triangles": { "min": 4000, "max": 6500 },
+      "distance": [400, 800]
+    },
+    "LOD2": {
+      "triangles": { "min": 800, "max": 1500 },
+      "distance": [800, 1200]
+    }
+  }
+}

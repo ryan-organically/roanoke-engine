@@ -11,8 +11,9 @@ use std::collections::HashMap;
 
 /// Tree species indices - must match order in main.rs tree_models array
 pub const TREE_SPECIES_OAK: usize = 0;      // tree_0
-pub const TREE_SPECIES_PINE: usize = 1;     // tree_1
+pub const TREE_SPECIES_MAPLE: usize = 1;    // tree_1 (generic deciduous)
 pub const TREE_SPECIES_BIRCH: usize = 2;    // birch_0
+pub const TREE_SPECIES_PINE: usize = 3;     // pine_0
 
 /// Instance with model index for multi-model rendering
 #[derive(Clone, Debug)]
@@ -45,34 +46,53 @@ fn birch_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
     ((zone_value - 0.3) / 0.4).clamp(0.0, 1.0)
 }
 
+/// Get pine zone strength (0.0 = not pine zone, 1.0 = deep in pine zone)
+/// Pines favor coastal areas and sandy soils - uses different noise layer
+fn pine_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
+    let pine_noise = Perlin::new(seed.wrapping_add(54321));
+    let zone_value = pine_noise.get([world_x as f64 * 0.006, world_z as f64 * 0.006]) as f32;
+
+    // Pines in ~25% of forest area, different zones than birch
+    ((zone_value - 0.4) / 0.4).clamp(0.0, 1.0)
+}
+
 /// Select tree species based on position and zone
 fn select_tree_species(world_x: f32, world_z: f32, seed: u32, tree_count: usize) -> usize {
     if tree_count < 3 {
-        // No birch available, use random from available
+        // Limited models, use random from available
         return ((world_x.abs() as u32).wrapping_mul(83492791)
             ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize % tree_count;
     }
 
+    let local_noise = Perlin::new(seed.wrapping_add(12345));
+    let roll = (local_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) + 1.0) * 0.5;
+
+    // Check pine zones first (if pine model available)
+    if tree_count >= 4 {
+        let pine_strength = pine_zone_strength(world_x, world_z, seed);
+        if pine_strength > 0.0 {
+            // Deep in zone: 85% pine, edge: 45% pine
+            let pine_probability = 0.45 + pine_strength * 0.4;
+            if roll < pine_probability as f64 {
+                return TREE_SPECIES_PINE;
+            }
+        }
+    }
+
+    // Check birch zones
     let birch_strength = birch_zone_strength(world_x, world_z, seed);
-
     if birch_strength > 0.0 {
-        // In or near birch zone - probability scales with zone strength
-        // Use position-based noise for per-tree variation
-        let local_noise = Perlin::new(seed.wrapping_add(12345));
-        let roll = (local_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) + 1.0) * 0.5;
-
         // Deep in zone: 90% birch, edge of zone: 50% birch
         let birch_probability = 0.5 + birch_strength * 0.4;
-
         if roll < birch_probability as f64 {
             return TREE_SPECIES_BIRCH;
         }
     }
 
-    // Outside birch zone or didn't roll birch - use oak/pine based on position
+    // Outside special zones - oak or maple
     let hash = ((world_x.abs() as u32).wrapping_mul(83492791)
         ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize;
-    hash % 2 // Only oak (0) or pine (1)
+    hash % 2 // oak (0) or maple (1)
 }
 
 /// Result of foliage generation with model variety
@@ -85,7 +105,7 @@ pub struct FoliageInstances {
 }
 
 impl FoliageInstances {
-    /// Get tree transforms grouped by model name (tree_0, tree_1, birch_0, etc.)
+    /// Get tree transforms grouped by model name (tree_0, tree_1, birch_0, pine_0, etc.)
     pub fn trees_by_model(&self, model_count: usize) -> HashMap<String, Vec<Mat4>> {
         let mut result = HashMap::new();
         let count = model_count.max(1);
@@ -94,6 +114,7 @@ impl FoliageInstances {
             // Map species index to actual model name
             let model_name = match idx {
                 TREE_SPECIES_BIRCH => "birch_0".to_string(),
+                TREE_SPECIES_PINE => "pine_0".to_string(),
                 _ => format!("tree_{}", idx),
             };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);

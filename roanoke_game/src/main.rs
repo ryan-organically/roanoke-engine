@@ -1349,16 +1349,16 @@ fn main() {
                 offset_z as f32,
             );
 
-            // Generate trees (with birch communities via foliage system)
+            // Generate trees (with birch/pine communities via foliage system)
             let foliage = generate_foliage_for_chunk(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
-                3, // tree model count: tree_0, tree_1, birch_0
+                4, // tree model count: tree_0, tree_1, birch_0, pine_0
                 2, // shrub model count: shrub_0, bush_0
             );
-            let tree_groups = foliage.trees_by_model(3);
+            let tree_groups = foliage.trees_by_model(4);
 
             // Generate detritus
             let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
@@ -1879,7 +1879,7 @@ fn main() {
                 // Load tree models from assets/models/trees/
                 // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
                 // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
-                let tree_models = ["tree_0", "tree_1", "birch_0"];
+                let tree_models = ["tree_0", "tree_1", "birch_0", "pine_0"];
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
@@ -2065,6 +2065,7 @@ fn main() {
                     ("tree_0_lod1", "tree_0"),
                     ("tree_1_lod1", "tree_1"),
                     ("birch_0_lod1", "birch_0"),
+                    ("pine_0_lod1", "pine_0"),
                 ];
                 let mut lod1_cache = gltf_loader::ModelCache::new("assets/models/trees");
 
@@ -2114,6 +2115,11 @@ fn main() {
                                 4.5, 0.18, 5.5, 1.6, // Taller, thinner birch shape
                                 (i as u64).wrapping_mul(12345),
                             )
+                        } else if base_name.contains("pine") {
+                            generate_lod1_tree_mesh(
+                                6.0, 0.25, 4.0, 2.5, // Tall conical pine shape
+                                (i as u64).wrapping_mul(12345),
+                            )
                         } else {
                             generate_default_lod1_tree((i as u64).wrapping_mul(12345))
                         };
@@ -2127,6 +2133,54 @@ fn main() {
                         state.mesh_registry.insert(lod1_name.to_string(), gpu_mesh);
                         println!("[LOD1] Generated '{}' procedurally: {} verts, {} tris",
                             lod1_name, positions.len(), lod1_mesh.indices.len() / 3);
+                    }
+                }
+
+                // Load LOD2 meshes for very distant tree rendering
+                let lod2_tree_models = [
+                    ("tree_0_lod2", "tree_0"),
+                    ("tree_1_lod2", "tree_1"),
+                    ("birch_0_lod2", "birch_0"),
+                    ("pine_0_lod2", "pine_0"),
+                ];
+                let mut lod2_cache = gltf_loader::ModelCache::new("assets/models/trees");
+
+                for (_i, (lod2_name, base_name)) in lod2_tree_models.iter().enumerate() {
+                    if let Some(model) = lod2_cache.load(lod2_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_lod2_texture", base_name)),
+                                    );
+                                    texture_bind_group = Some(std::sync::Arc::new(
+                                        texture_helper.create_texture_bind_group(
+                                            ctx.device(), &tex_view, Some(&format!("{}_lod2_bind", base_name)),
+                                        )
+                                    ));
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
+                        );
+                        state.mesh_registry.insert(lod2_name.to_string(), gpu_mesh);
+                        println!("[LOD2] Loaded '{}' from GLB: {} verts, {} tris",
+                            lod2_name, positions.len(), indices.len() / 3);
                     }
                 }
 
