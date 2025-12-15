@@ -10,7 +10,12 @@ struct CameraUniform {
     fog_end: f32,        // Fog end distance
     alpha_cutoff: f32,   // Alpha cutoff for masked rendering
     use_texture: f32,    // 1.0 = sample texture, 0.0 = procedural
+    // LOD dither fade parameters
+    lod_fade_start: f32, // Distance where fade begins
+    lod_fade_end: f32,   // Distance where fade ends
+    lod_fade_mode: f32,  // 0.0 = disabled, 1.0 = LOD0 (fade out), 2.0 = LOD1 (fade in)
     _padding: f32,       // Padding
+    _padding2: f32,      // 16-byte struct alignment (208 bytes total)
 }
 
 @group(0) @binding(0)
@@ -45,6 +50,7 @@ struct VertexOutput {
     @location(2) world_position: vec3<f32>,
     @location(3) local_height: f32, // Height in local space for bark gradient
     @location(4) shadow_pos: vec3<f32>, // Shadow map position
+    @location(5) distance_to_camera: f32, // For LOD dither fade
 }
 
 // Tree wind animation - slower and more subtle than grass
@@ -69,6 +75,40 @@ fn apply_tree_wind(world_pos: vec3<f32>, local_height: f32, time: f32) -> vec3<f
     );
 
     return world_pos + wind_offset;
+}
+
+// 4x4 Bayer dither matrix for LOD transitions
+// Returns threshold value 0.0-1.0 based on screen position
+// Using Bayer pattern for temporally stable dithering (no flickering)
+// Pattern:  0  8  2 10
+//          12  4 14  6
+//           3 11  1  9
+//          15  7 13  5
+fn dither_threshold(screen_pos: vec2<f32>) -> f32 {
+    let x = u32(screen_pos.x) % 4u;
+    let y = u32(screen_pos.y) % 4u;
+    let idx = y * 4u + x;
+
+    // WGSL requires constant array indices, so use switch instead
+    switch idx {
+        case 0u:  { return 0.0 / 16.0; }
+        case 1u:  { return 8.0 / 16.0; }
+        case 2u:  { return 2.0 / 16.0; }
+        case 3u:  { return 10.0 / 16.0; }
+        case 4u:  { return 12.0 / 16.0; }
+        case 5u:  { return 4.0 / 16.0; }
+        case 6u:  { return 14.0 / 16.0; }
+        case 7u:  { return 6.0 / 16.0; }
+        case 8u:  { return 3.0 / 16.0; }
+        case 9u:  { return 11.0 / 16.0; }
+        case 10u: { return 1.0 / 16.0; }
+        case 11u: { return 9.0 / 16.0; }
+        case 12u: { return 15.0 / 16.0; }
+        case 13u: { return 7.0 / 16.0; }
+        case 14u: { return 13.0 / 16.0; }
+        case 15u: { return 5.0 / 16.0; }
+        default: { return 0.0; }
+    }
 }
 
 @vertex
@@ -107,11 +147,41 @@ fn vs_main(input: VertexInput, instance: InstanceInput) -> VertexOutput {
         shadow_ndc.z
     );
 
+    // Calculate distance for LOD fade
+    output.distance_to_camera = distance(animated_position, camera.view_pos);
+
     return output;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    //=========================================================================
+    // LOD DITHER FADE
+    //=========================================================================
+    // lod_fade_mode: 0.0 = disabled, 1.0 = LOD0 (fade out), 2.0 = LOD1 (fade in)
+    if (camera.lod_fade_mode > 0.5) {
+        // Calculate fade factor (0 = fully visible, 1 = fully faded)
+        let fade_range = camera.lod_fade_end - camera.lod_fade_start;
+        if (fade_range > 0.001) {
+            let fade_t = saturate((in.distance_to_camera - camera.lod_fade_start) / fade_range);
+            let threshold = dither_threshold(in.clip_position.xy);
+
+            if (camera.lod_fade_mode < 1.5) {
+                // LOD0: fade OUT as distance increases
+                // Discard more pixels as we get farther
+                if (fade_t > threshold) {
+                    discard;
+                }
+            } else {
+                // LOD1: fade IN as distance increases
+                // Discard more pixels as we get closer (inverted)
+                if ((1.0 - fade_t) > threshold) {
+                    discard;
+                }
+            }
+        }
+    }
+
     // Sample texture
     let tex_color = textureSample(t_diffuse, s_diffuse, in.uv);
 

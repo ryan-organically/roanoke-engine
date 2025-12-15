@@ -691,6 +691,148 @@ pub fn generate_default_simple_tree(seed: u64) -> TreeMesh {
 }
 
 //=============================================================================
+// ULTRA-LOW-POLY LOD1 TREE GENERATOR
+//=============================================================================
+// Generates an extremely simple cylinder trunk + cone canopy tree
+// Total: ~18 triangles - designed for distant rendering (300+ units)
+// Used for LOD1 to extend render distance without performance cost
+
+/// Generate an ultra-low-poly LOD1 tree mesh (6-sided cylinder + 6-sided cone)
+///
+/// This creates a tree with approximately 18 triangles:
+/// - Trunk: 6-sided cylinder = 12 triangles (2 per side)
+/// - Canopy: 6-sided cone (no base) = 6 triangles
+///
+/// Designed for distant rendering where detail isn't visible.
+/// Uses same UV convention as detailed trees (uv.y < 1 = bark, uv.y > 1 = canopy)
+///
+/// # Arguments
+/// * `trunk_height` - Height of the trunk (default ~3.0)
+/// * `trunk_radius` - Radius of the trunk (default ~0.25)
+/// * `canopy_height` - Height of the cone canopy (default ~4.0)
+/// * `canopy_radius` - Base radius of the cone canopy (default ~2.0)
+/// * `seed` - Seed for slight variation
+pub fn generate_lod1_tree_mesh(
+    trunk_height: f32,
+    trunk_radius: f32,
+    canopy_height: f32,
+    canopy_radius: f32,
+    seed: u64,
+) -> TreeMesh {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Simple variation from seed
+    let mut rng_state = seed;
+    let mut random = || {
+        let state = rng_state;
+        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((state >> 32) as f32 / u32::MAX as f32) * 0.2 - 0.1 // -0.1 to 0.1
+    };
+    let height_var = 1.0 + random();
+
+    let trunk_h = trunk_height * height_var;
+    let canopy_h = canopy_height * height_var;
+    let segments = 6; // Minimal sides for performance
+
+    //=========================================================================
+    // TRUNK: 6-sided cylinder (12 triangles)
+    //=========================================================================
+    // Bottom ring
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let x = angle.cos() * trunk_radius;
+        let z = angle.sin() * trunk_radius;
+        let normal = Vec3::new(angle.cos(), 0.0, angle.sin());
+
+        vertices.push(TreeVertex {
+            position: [x, 0.0, z],
+            normal: normal.to_array(),
+            uv: [i as f32 / segments as f32, 0.0], // UV.y < 1 = bark
+        });
+    }
+
+    // Top ring (slight taper)
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let x = angle.cos() * trunk_radius * 0.8;
+        let z = angle.sin() * trunk_radius * 0.8;
+        let normal = Vec3::new(angle.cos(), 0.0, angle.sin());
+
+        vertices.push(TreeVertex {
+            position: [x, trunk_h, z],
+            normal: normal.to_array(),
+            uv: [i as f32 / segments as f32, 0.9],
+        });
+    }
+
+    // Connect trunk rings (12 triangles)
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        let i0 = i as u32;
+        let i1 = next as u32;
+        let i2 = (segments + i) as u32;
+        let i3 = (segments + next) as u32;
+
+        indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+    }
+
+    //=========================================================================
+    // CANOPY: 6-sided cone (6 triangles, no base)
+    //=========================================================================
+    let canopy_base_y = trunk_h - canopy_h * 0.15; // Overlap trunk slightly
+    let apex_y = trunk_h + canopy_h;
+    let cone_base_idx = vertices.len() as u32;
+
+    // Cone base ring
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let x = angle.cos() * canopy_radius;
+        let z = angle.sin() * canopy_radius;
+
+        // Normal points outward and up for cone surface
+        let normal = Vec3::new(angle.cos() * 0.8, 0.6, angle.sin() * 0.8).normalize();
+
+        vertices.push(TreeVertex {
+            position: [x, canopy_base_y, z],
+            normal: normal.to_array(),
+            uv: [i as f32 / segments as f32, 2.0], // UV.y > 1 = canopy
+        });
+    }
+
+    // Cone apex (single vertex)
+    let apex_idx = vertices.len() as u32;
+    vertices.push(TreeVertex {
+        position: [0.0, apex_y, 0.0],
+        normal: [0.0, 1.0, 0.0],
+        uv: [0.5, 3.0],
+    });
+
+    // Connect cone triangles (6 triangles)
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        let base_i = cone_base_idx + i as u32;
+        let base_next = cone_base_idx + next as u32;
+
+        indices.extend_from_slice(&[base_i, apex_idx, base_next]);
+    }
+
+    TreeMesh { vertices, indices }
+}
+
+/// Generate a default LOD1 tree with standard proportions
+/// Returns ~18 triangle mesh suitable for distant rendering
+pub fn generate_default_lod1_tree(seed: u64) -> TreeMesh {
+    generate_lod1_tree_mesh(
+        3.0,  // trunk_height
+        0.25, // trunk_radius
+        4.5,  // canopy_height
+        2.2,  // canopy_radius
+        seed,
+    )
+}
+
+//=============================================================================
 // ENHANCED PROCEDURAL TREE GENERATOR
 //=============================================================================
 // Creates more natural-looking trees with:

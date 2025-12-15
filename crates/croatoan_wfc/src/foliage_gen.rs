@@ -1,6 +1,7 @@
 //! Multi-model foliage generation (trees + shrubs with variety)
 //!
 //! Generates foliage instances with model indices for multi-model rendering.
+//! Supports species-based communities (e.g., birch groves) using noise zones.
 
 use crate::mesh_gen::{get_height_at, distance_to_shoreline, get_biome_t};
 use crate::trees::{TREELINE_DISTANCE, UPPER_TREELINE_START, UPPER_TREELINE_END};
@@ -8,11 +9,70 @@ use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec3, Quat};
 use std::collections::HashMap;
 
+/// Tree species indices - must match order in main.rs tree_models array
+pub const TREE_SPECIES_OAK: usize = 0;      // tree_0
+pub const TREE_SPECIES_PINE: usize = 1;     // tree_1
+pub const TREE_SPECIES_BIRCH: usize = 2;    // birch_0
+
 /// Instance with model index for multi-model rendering
 #[derive(Clone, Debug)]
 pub struct FoliageInstance {
     pub transform: Mat4,
     pub model_index: usize,
+}
+
+/// Determine if a world position is in a birch community zone.
+/// Uses low-frequency noise to create large, coherent birch groves.
+#[allow(dead_code)]
+fn is_birch_zone(world_x: f32, world_z: f32, seed: u32) -> bool {
+    // Use a separate noise layer with very low frequency for large zones
+    let birch_noise = Perlin::new(seed.wrapping_add(31337)); // Different seed for birch zones
+
+    // Large-scale noise (0.008 frequency = ~125m features)
+    let zone_value = birch_noise.get([world_x as f64 * 0.008, world_z as f64 * 0.008]);
+
+    // Birch zones occur when noise > 0.3 (roughly 30% of forest area)
+    zone_value > 0.3
+}
+
+/// Get birch zone strength (0.0 = not birch zone, 1.0 = deep in birch zone)
+/// Used for smooth transitions at zone edges
+fn birch_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
+    let birch_noise = Perlin::new(seed.wrapping_add(31337));
+    let zone_value = birch_noise.get([world_x as f64 * 0.008, world_z as f64 * 0.008]) as f32;
+
+    // Remap: 0.3 -> 0.0, 0.7 -> 1.0
+    ((zone_value - 0.3) / 0.4).clamp(0.0, 1.0)
+}
+
+/// Select tree species based on position and zone
+fn select_tree_species(world_x: f32, world_z: f32, seed: u32, tree_count: usize) -> usize {
+    if tree_count < 3 {
+        // No birch available, use random from available
+        return ((world_x.abs() as u32).wrapping_mul(83492791)
+            ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize % tree_count;
+    }
+
+    let birch_strength = birch_zone_strength(world_x, world_z, seed);
+
+    if birch_strength > 0.0 {
+        // In or near birch zone - probability scales with zone strength
+        // Use position-based noise for per-tree variation
+        let local_noise = Perlin::new(seed.wrapping_add(12345));
+        let roll = (local_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) + 1.0) * 0.5;
+
+        // Deep in zone: 90% birch, edge of zone: 50% birch
+        let birch_probability = 0.5 + birch_strength * 0.4;
+
+        if roll < birch_probability as f64 {
+            return TREE_SPECIES_BIRCH;
+        }
+    }
+
+    // Outside birch zone or didn't roll birch - use oak/pine based on position
+    let hash = ((world_x.abs() as u32).wrapping_mul(83492791)
+        ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize;
+    hash % 2 // Only oak (0) or pine (1)
 }
 
 /// Result of foliage generation with model variety
@@ -25,12 +85,17 @@ pub struct FoliageInstances {
 }
 
 impl FoliageInstances {
-    /// Get tree transforms grouped by model name (tree_0, tree_1, etc.)
+    /// Get tree transforms grouped by model name (tree_0, tree_1, birch_0, etc.)
     pub fn trees_by_model(&self, model_count: usize) -> HashMap<String, Vec<Mat4>> {
         let mut result = HashMap::new();
         let count = model_count.max(1);
         for inst in &self.trees {
-            let model_name = format!("tree_{}", inst.model_index % count);
+            let idx = inst.model_index % count;
+            // Map species index to actual model name
+            let model_name = match idx {
+                TREE_SPECIES_BIRCH => "birch_0".to_string(),
+                _ => format!("tree_{}", idx),
+            };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
         }
         result
@@ -176,9 +241,8 @@ pub fn generate_foliage_for_chunk(
                     base_scale + local_noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32;
                 let tree_angle =
                     local_noise.get([tx as f64 * 0.5, tz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
-                let model_idx = ((tx.abs() as u32).wrapping_mul(83492791)
-                    ^ (tz.abs() as u32).wrapping_mul(41729563)) as usize
-                    % tree_count;
+                // Use species-based selection (supports birch community zones)
+                let model_idx = select_tree_species(tx, tz, seed, tree_count);
 
                 // Y-anchor: Use smaller sink for low terrain to prevent floating
                 // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
@@ -243,9 +307,8 @@ pub fn generate_foliage_for_chunk(
         let scale = 5.5
             + forest_depth * 2.5
             + noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32;
-        let model_idx = ((world_x.abs() as u32).wrapping_mul(83492791)
-            ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize
-            % tree_count;
+        // Use species-based selection (supports birch community zones)
+        let model_idx = select_tree_species(world_x, world_z, seed, tree_count);
 
         // Y-anchor: proportional sink to prevent floating
         let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;

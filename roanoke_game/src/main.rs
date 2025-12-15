@@ -4,9 +4,9 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_trees_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, FoliageInstances, generate_ferns_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
-use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, RockRecipe, generate_rock, BuildingRecipe, generate_building};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, generate_ferns_for_chunk};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
+use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, generate_default_lod1_tree, generate_lod1_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
 use wgpu;
 use image; // Added image crate
@@ -1309,7 +1309,7 @@ fn main() {
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>, // Grass (pos, col, local_height, idx)
-        Vec<Mat4>, // Trees (Instanced)
+        std::collections::HashMap<String, Vec<Mat4>>, // Trees (Named + Grouped)
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
         Vec<(String, Mat4)>, // Rocks (Named Instances)
         Vec<(String, Mat4)>, // Buildings (Named Instances)
@@ -1349,14 +1349,16 @@ fn main() {
                 offset_z as f32,
             );
 
-            // Generate trees (with forest clearing around villages)
-            let tree_instances = generate_trees_for_chunk(
+            // Generate trees (with birch communities via foliage system)
+            let foliage = generate_foliage_for_chunk(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
-                &req.village_centers,
+                3, // tree model count: tree_0, tree_1, birch_0
+                2, // shrub model count: shrub_0, bush_0
             );
+            let tree_groups = foliage.trees_by_model(3);
 
             // Generate detritus
             let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
@@ -1404,7 +1406,7 @@ fn main() {
             if chunk_tx.send((
                 terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                 grass_pos, grass_col, grass_heights, grass_idx,
-                tree_instances,
+                tree_groups,
                 det_pos, det_nrm, det_uv, det_idx,
                 rock_instances,
                 building_instances,
@@ -1867,7 +1869,7 @@ fn main() {
                 // The TreePipeline infrastructure is ready:
                 // - TreePipeline::create_mesh() for GPU mesh creation
                 // - TreePipeline::new() for rendering pipeline
-                // - tree_instances from generate_trees_for_chunk() for placement
+                // - tree_groups from generate_foliage_for_chunk() for placement
                 // ========================================================================
                 // Create a temporary TreePipeline to get access to texture_bind_group_layout
                 let shadow_map = shadow_map_mutex.safe_lock();
@@ -1877,7 +1879,7 @@ fn main() {
                 // Load tree models from assets/models/trees/
                 // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
                 // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
-                let tree_models = ["tree_0", "tree_1"];
+                let tree_models = ["tree_0", "tree_1", "birch_0"];
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
@@ -2054,6 +2056,77 @@ fn main() {
                         state.mesh_registry.insert(name.to_string(), gpu_mesh);
                         println!("[FOLIAGE] Registered procedural '{}': {} verts, {} tris",
                             name, positions.len(), proc_mesh.indices.len() / 3);
+                    }
+                }
+
+                // Load or generate LOD1 meshes for distant tree rendering
+                // First try to load artist-created GLB, fall back to procedural generation
+                let lod1_tree_models = [
+                    ("tree_0_lod1", "tree_0"),
+                    ("tree_1_lod1", "tree_1"),
+                    ("birch_0_lod1", "birch_0"),
+                ];
+                let mut lod1_cache = gltf_loader::ModelCache::new("assets/models/trees");
+
+                for (i, (lod1_name, base_name)) in lod1_tree_models.iter().enumerate() {
+                    // Try to load GLB first
+                    if let Some(model) = lod1_cache.load(lod1_name) {
+                        // Load from GLB - combine all meshes
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            // Use first texture found
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_lod1_texture", base_name)),
+                                    );
+                                    texture_bind_group = Some(std::sync::Arc::new(
+                                        texture_helper.create_texture_bind_group(
+                                            ctx.device(), &tex_view, Some(&format!("{}_lod1_bind", base_name)),
+                                        )
+                                    ));
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
+                        );
+                        state.mesh_registry.insert(lod1_name.to_string(), gpu_mesh);
+                        println!("[LOD1] Loaded '{}' from GLB: {} verts, {} tris",
+                            lod1_name, positions.len(), indices.len() / 3);
+                    } else {
+                        // Fall back to procedural generation
+                        let lod1_mesh = if base_name.contains("birch") {
+                            generate_lod1_tree_mesh(
+                                4.5, 0.18, 5.5, 1.6, // Taller, thinner birch shape
+                                (i as u64).wrapping_mul(12345),
+                            )
+                        } else {
+                            generate_default_lod1_tree((i as u64).wrapping_mul(12345))
+                        };
+                        let positions: Vec<[f32; 3]> = lod1_mesh.vertices.iter().map(|v| v.position).collect();
+                        let normals: Vec<[f32; 3]> = lod1_mesh.vertices.iter().map(|v| v.normal).collect();
+                        let uvs: Vec<[f32; 2]> = lod1_mesh.vertices.iter().map(|v| v.uv).collect();
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &positions, &normals, &uvs, &lod1_mesh.indices, None,
+                        );
+                        state.mesh_registry.insert(lod1_name.to_string(), gpu_mesh);
+                        println!("[LOD1] Generated '{}' procedurally: {} verts, {} tris",
+                            lod1_name, positions.len(), lod1_mesh.indices.len() / 3);
                     }
                 }
 
@@ -4325,7 +4398,7 @@ fn main() {
                     match rx.try_recv() {
                         Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
                             grass_pos, grass_col, grass_heights, grass_idx,
-                            tree_instances,
+                            tree_groups,
                             det_pos, det_nrm, det_uv, det_idx,
                             rock_instances,
                             building_instances,
@@ -4333,10 +4406,11 @@ fn main() {
                             offset_x, offset_z)) => {
 
                             // Debug: Show generation counts - ROCK DIAGNOSTIC
+                            let tree_count: usize = tree_groups.values().map(|v| v.len()).sum();
                             println!("========================================");
                             println!("[ROCK DEBUG] Chunk ({}, {}) received:", offset_x, offset_z);
                             println!("[ROCK DEBUG]   Total rocks: {}", rock_instances.len());
-                            println!("[ROCK DEBUG]   Trees: {}, Detritus verts: {}", tree_instances.len(), det_pos.len());
+                            println!("[ROCK DEBUG]   Trees: {} (groups: {:?})", tree_count, tree_groups.keys().collect::<Vec<_>>());
                             println!("========================================");
 
                             // Update status
@@ -4385,14 +4459,11 @@ fn main() {
 
                             // FOLIAGE: Create pipelines for trees and shrubs
                             let mut foliage_pipelines: Vec<TreePipeline> = Vec::new();
-                            let tree_model_names = ["tree_0", "tree_1"];
-                            let shrub_model_names = ["shrub_0", "bush_0"];
-
-                            // Group trees by model
-                            let mut tree_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
-                            for (i, transform) in tree_instances.iter().enumerate() {
-                                let name = tree_model_names[i % tree_model_names.len()].to_string();
-                                tree_groups.entry(name).or_default().push(*transform);
+                            // tree_groups is already HashMap<String, Vec<Mat4>> from foliage_gen.rs
+                            // DEBUG: Show registry contents when processing first chunk
+                            if state.mesh_registry.len() < 20 {
+                                println!("[DEBUG] mesh_registry has {} entries: {:?}",
+                                    state.mesh_registry.len(), state.mesh_registry.keys().collect::<Vec<_>>());
                             }
                             // Acquire shadow map once for all tree pipelines
                             let shadow_map = shadow_map_mutex.safe_lock();
@@ -4405,6 +4476,8 @@ fn main() {
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
                                     println!("[FOLIAGE] Tree '{}' bark: {} instances", name, transforms.len());
+                                } else {
+                                    println!("[FOLIAGE] MISSING bark mesh '{}' - registry has {} entries", bark_name, state.mesh_registry.len());
                                 }
                                 // Render leaves mesh (BLEND) with same transforms
                                 let leaves_name = format!("{}_leaves", name);
@@ -4414,13 +4487,32 @@ fn main() {
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
                                     println!("[FOLIAGE] Tree '{}' leaves: {} instances", name, transforms.len());
+                                } else {
+                                    println!("[FOLIAGE] MISSING leaves mesh '{}' - registry has {} entries", leaves_name, state.mesh_registry.len());
                                 }
                             }
                             drop(shadow_map);
 
                             // Shrubs are now generated by foliage_gen.rs with random spread
                             // No longer generating shrubs around tree bases (was causing bushiness)
-                            println!("[CHUNK] Foliage: {} pipelines", foliage_pipelines.len());
+                            println!("[CHUNK] Foliage LOD0: {} pipelines", foliage_pipelines.len());
+
+                            // Create LOD1 pipelines (same transforms, ultra-low-poly meshes)
+                            let mut foliage_pipelines_lod1: Vec<TreePipeline> = Vec::new();
+                            let shadow_map_lod1 = shadow_map_mutex.safe_lock();
+                            for (name, transforms) in &tree_groups {
+                                // Map tree name to LOD1 mesh name (tree_0 -> tree_0_lod1)
+                                let lod1_name = format!("{}_lod1", name);
+                                if let Some(mesh) = state.mesh_registry.get(&lod1_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_lod1);
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), transforms);
+                                    foliage_pipelines_lod1.push(tp);
+                                    println!("[LOD1] Tree '{}': {} instances (18 tris each)", lod1_name, transforms.len());
+                                }
+                            }
+                            drop(shadow_map_lod1);
+                            println!("[CHUNK] Foliage LOD1: {} pipelines", foliage_pipelines_lod1.len());
 
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
@@ -4572,6 +4664,7 @@ fn main() {
                                 terrain: terrain_pipeline,
                                 grass: grass_pipeline,
                                 trees: foliage_pipelines,
+                                trees_lod1: foliage_pipelines_lod1,
                                 ferns: fern_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
@@ -5019,9 +5112,17 @@ fn main() {
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
                 let grass_max_distance = 250.0;  // Grass visible within 250 units (increased for visibility)
-                let tree_max_distance = (state.render_distance * 1.5).max(300.0);   // Foliage visible far
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
+
+                // LOD distance configuration for trees
+                // LOD0 (full detail): 0-300 units, fade out 250-300
+                // LOD1 (simplified): 250-800+ units, fade in 250-300
+                let lod_config = TreeLODConfig {
+                    lod0_fade_start: 250.0,
+                    lod0_fade_end: 300.0,
+                    lod1_max_distance: (state.render_distance * 1.5).max(800.0),
+                };
 
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
@@ -5057,13 +5158,70 @@ fn main() {
                         }
                     }
 
-                    // Trees - RE-ENABLED with simple low-poly mesh (~36 tris per tree)
-                    // Previously: 94K tris per instance (247K face OBJ)
-                    // Now: ~36 tris per instance (cylinder trunk + icosphere canopy)
-                    for trees in &chunk.trees {
-                        if dist <= tree_max_distance {
+                    // Trees with LOD system - dithered fade between detail levels
+                    // LOD0 (full detail): visible 0-300 units, fade out 250-300
+                    // LOD1 (simplified ~18 tris): visible 250-800+ units, fade in 250-300
+
+                    // Determine LOD mode based on distance
+                    let in_lod0_range = dist <= lod_config.lod0_fade_end;
+                    let in_lod1_range = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod1_max_distance;
+                    let in_transition = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod0_fade_end;
+
+                    // Render LOD0 (full detail) when in range
+                    if in_lod0_range {
+                        for trees in &chunk.trees {
+                            // Use fade mode if in transition zone
+                            // LOD0 trees are GLTF models - use_texture=1.0 to sample textures
+                            if in_transition {
+                                trees.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0, // alpha_cutoff for leaves, USE TEXTURE for GLTF models
+                                    LODFadeMode::LOD0FadeOut,
+                                    lod_config.lod0_fade_start,
+                                    lod_config.lod0_fade_end,
+                                );
+                            } else {
+                                trees.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0, // alpha_cutoff, USE TEXTURE for GLTF models
+                                );
+                            }
                             trees_rendered += 1;
                             trees.render(&mut render_pass);
+                        }
+                    }
+
+                    // Render LOD1 (simplified) when in range
+                    if in_lod1_range {
+                        for trees_lod1 in &chunk.trees_lod1 {
+                            // Use texture if mesh has one (GLB-loaded), otherwise procedural
+                            let use_texture = if trees_lod1.has_texture() { 1.0 } else { 0.0 };
+                            let alpha_cutoff = if trees_lod1.has_texture() { 0.5 } else { 0.0 };
+
+                            // Use fade mode if in transition zone
+                            if in_transition {
+                                trees_lod1.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    alpha_cutoff, use_texture,
+                                    LODFadeMode::LOD1FadeIn,
+                                    lod_config.lod0_fade_start,
+                                    lod_config.lod0_fade_end,
+                                );
+                            } else {
+                                trees_lod1.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    alpha_cutoff, use_texture,
+                                );
+                            }
+                            trees_lod1.render(&mut render_pass);
                         }
                     }
 
@@ -5074,17 +5232,17 @@ fn main() {
                         }
                     }
 
-                    // Rocks
+                    // Rocks (same max distance as LOD1 trees)
                     for rock in &chunk.rocks {
-                        if dist <= tree_max_distance {
+                        if dist <= lod_config.lod1_max_distance {
                             rocks_rendered += rock.instance_count() as usize;
                             rock.render(&mut render_pass);
                         }
                     }
 
-                    // Ferns (forest understory)
+                    // Ferns (forest understory - same max distance as LOD1 trees)
                     for fern in &chunk.ferns {
-                        if dist <= tree_max_distance {
+                        if dist <= lod_config.lod1_max_distance {
                             fern.render(&mut render_pass);
                         }
                     }

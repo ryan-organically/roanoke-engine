@@ -1058,22 +1058,37 @@ impl ModelCache {
     }
 
     /// Load a model by name (without extension)
+    /// Tries .glb first, then .gltf
     pub fn load(&mut self, name: &str) -> Option<&LoadedModel> {
         if self.models.contains_key(name) {
             return self.models.get(name);
         }
 
+        // Try .glb first (more common), then .gltf
         let glb_path = format!("{}/{}.glb", self.base_path, name);
         let gltf_path = format!("{}/{}.gltf", self.base_path, name);
-        let path = if std::path::Path::new(&glb_path).exists() { glb_path } else { gltf_path };
 
-        match load_gltf(&path) {
+        // Try loading .glb first - don't rely on exists() which can fail on Windows
+        match load_gltf(&glb_path) {
+            Ok(model) => {
+                self.models.insert(name.to_string(), model);
+                return self.models.get(name);
+            }
+            Err(_) => {
+                // GLB failed, try GLTF
+            }
+        }
+
+        // Fall back to .gltf
+        match load_gltf(&gltf_path) {
             Ok(model) => {
                 self.models.insert(name.to_string(), model);
                 self.models.get(name)
             }
             Err(e) => {
-                log::warn!("[ModelCache] Failed to load '{}': {}", name, e);
+                // Show current working directory for debugging path issues
+                let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".to_string());
+                println!("[ModelCache] Failed to load '{}' from '{}': {} (cwd: {})", name, gltf_path, e, cwd);
                 None
             }
         }

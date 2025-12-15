@@ -38,7 +38,44 @@ struct CameraUniform {
     fog_end: f32,                   // 4 bytes (176-180)
     alpha_cutoff: f32,              // 4 bytes (180-184)
     use_texture: f32,               // 4 bytes (184-188)
-    _padding: f32,                  // 4 bytes (188-192) - struct alignment
+    // LOD dither fade parameters
+    lod_fade_start: f32,            // 4 bytes (188-192) - distance where fade begins
+    lod_fade_end: f32,              // 4 bytes (192-196) - distance where fade ends
+    lod_fade_mode: f32,             // 4 bytes (196-200) - 0=disabled, 1=LOD0 fade out, 2=LOD1 fade in
+    _padding: f32,                  // 4 bytes (200-204)
+    _padding2: f32,                 // 4 bytes (204-208) - 16-byte struct alignment
+}
+
+/// Configuration for tree LOD distance bands
+#[derive(Clone, Copy, Debug)]
+pub struct TreeLODConfig {
+    /// Distance at which LOD0 starts fading out (full detail)
+    pub lod0_fade_start: f32,
+    /// Distance at which LOD0 is fully faded (switch to LOD1)
+    pub lod0_fade_end: f32,
+    /// Maximum distance for LOD1 rendering
+    pub lod1_max_distance: f32,
+}
+
+impl Default for TreeLODConfig {
+    fn default() -> Self {
+        Self {
+            lod0_fade_start: 250.0,
+            lod0_fade_end: 300.0,
+            lod1_max_distance: 800.0,
+        }
+    }
+}
+
+/// LOD fade mode for shader
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LODFadeMode {
+    /// No dither fade (fully visible)
+    Disabled,
+    /// LOD0: fade OUT as distance increases
+    LOD0FadeOut,
+    /// LOD1: fade IN as distance increases
+    LOD1FadeIn,
 }
 
 #[repr(C)]
@@ -423,6 +460,13 @@ impl TreePipeline {
         self.mesh = Some(mesh);
     }
 
+    /// Check if this pipeline's mesh has a custom texture (vs default/procedural)
+    pub fn has_texture(&self) -> bool {
+        self.mesh.as_ref()
+            .and_then(|m| m.texture_bind_group.as_ref())
+            .is_some()
+    }
+
     /// Upload instances for a chunk with validation
     ///
     /// # Errors
@@ -513,7 +557,7 @@ impl TreePipeline {
         fog_end: f32,
         fog_density: f32,
     ) {
-        // Default: procedural rendering, no alpha cutoff
+        // Default: procedural rendering, no alpha cutoff, no LOD fade
         self.update_camera_full(queue, view_proj, light_view_proj, sun_dir, time, view_pos, fog_color, fog_start, fog_end, fog_density, 0.0, 0.0);
     }
 
@@ -533,6 +577,40 @@ impl TreePipeline {
         alpha_cutoff: f32,
         use_texture: f32,
     ) {
+        // No LOD fade by default
+        self.update_camera_with_lod(queue, view_proj, light_view_proj, sun_dir, time, view_pos, fog_color, fog_start, fog_end, fog_density, alpha_cutoff, use_texture, LODFadeMode::Disabled, 0.0, 0.0);
+    }
+
+    /// Update camera uniform with LOD fade parameters for distance-based LOD transitions
+    ///
+    /// # Arguments
+    /// * `lod_mode` - LOD fade mode (Disabled, LOD0FadeOut, or LOD1FadeIn)
+    /// * `fade_start` - Distance where fade begins
+    /// * `fade_end` - Distance where fade completes
+    pub fn update_camera_with_lod(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+        alpha_cutoff: f32,
+        use_texture: f32,
+        lod_mode: LODFadeMode,
+        fade_start: f32,
+        fade_end: f32,
+    ) {
+        let lod_fade_mode = match lod_mode {
+            LODFadeMode::Disabled => 0.0,
+            LODFadeMode::LOD0FadeOut => 1.0,
+            LODFadeMode::LOD1FadeIn => 2.0,
+        };
+
         let uniform = CameraUniform {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
@@ -545,7 +623,11 @@ impl TreePipeline {
             fog_end,
             alpha_cutoff,
             use_texture,
+            lod_fade_start: fade_start,
+            lod_fade_end: fade_end,
+            lod_fade_mode,
             _padding: 0.0,
+            _padding2: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

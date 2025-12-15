@@ -11,20 +11,24 @@ use wgpu::util::DeviceExt;
 const RAIN_PARTICLE_COUNT: u32 = 4000;
 
 /// Rain uniform data
+/// NOTE: Must match WGSL std140 alignment rules exactly
+/// vec3 fields need explicit padding to 16 bytes
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct RainUniforms {
-    view_proj: [[f32; 4]; 4],
-    camera_pos: [f32; 3],
-    time: f32,
-    camera_right: [f32; 3],
-    rain_intensity: f32,
-    camera_up: [f32; 3],
-    wind_strength: f32,
-    fog_color: [f32; 3],
-    fog_start: f32,
-    fog_end: f32,
-    _padding: [f32; 3],
+    view_proj: [[f32; 4]; 4],       // 64 bytes (offset 0)
+    camera_pos: [f32; 3],           // 12 bytes (offset 64)
+    time: f32,                      // 4 bytes (offset 76)
+    camera_right: [f32; 3],         // 12 bytes (offset 80)
+    rain_intensity: f32,            // 4 bytes (offset 92)
+    camera_up: [f32; 3],            // 12 bytes (offset 96)
+    wind_strength: f32,             // 4 bytes (offset 108)
+    fog_color: [f32; 3],            // 12 bytes (offset 112)
+    fog_start: f32,                 // 4 bytes (offset 124)
+    fog_end: f32,                   // 4 bytes (offset 128)
+    _pad1: [f32; 3],                // 12 bytes (offset 132) - padding before final vec3
+    _padding: [f32; 3],             // 12 bytes (offset 144) - matches shader _padding vec3
+    _pad2: f32,                     // 4 bytes (offset 156) - align to 160
 }
 
 /// Pipeline for rendering rain particles
@@ -60,7 +64,9 @@ impl RainPipeline {
                 fog_color: [0.5, 0.52, 0.58],
                 fog_start: 30.0,
                 fog_end: 200.0,
+                _pad1: [0.0; 3],
                 _padding: [0.0; 3],
+                _pad2: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -187,7 +193,9 @@ impl RainPipeline {
             fog_color: fog_color.to_array(),
             fog_start,
             fog_end,
+            _pad1: [0.0; 3],
             _padding: [0.0; 3],
+            _pad2: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

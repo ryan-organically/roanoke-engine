@@ -27,7 +27,8 @@ impl ChunkCoord {
 pub struct LoadedChunk {
     pub terrain: TerrainPipeline,
     pub grass: Option<GrassPipeline>,
-    pub trees: Vec<TreePipeline>, // Foliage: trees + shrubs
+    pub trees: Vec<TreePipeline>, // Foliage: trees + shrubs (LOD0 - full detail)
+    pub trees_lod1: Vec<TreePipeline>, // LOD1 simplified trees for distant rendering
     pub ferns: Vec<TreePipeline>, // Forest understory ferns
     pub detritus: Option<DetritusPipeline>,
     pub rocks: Vec<TreePipeline>, // List of pipelines for different rock types in this chunk
@@ -175,22 +176,26 @@ impl ChunkManager {
     }
 
     /// Update load/unload radii based on render distance
-    /// Buildings render at 1.5x render_distance, so we need chunks loaded beyond that
+    /// Trees render at 1.5x render_distance with LOD system, so we need chunks loaded for that
     pub fn update_radius_for_render_distance(&mut self, render_distance: f32) {
         // Validate input - clamp to sane range
         let render_distance = render_distance.clamp(100.0, 1000.0);
 
-        // Buildings visible at 1.0x render distance now (reduced from 1.5x)
-        let max_visible_distance = render_distance * 1.0;
+        // Trees visible at 1.5x render distance (LOD1 extends further)
+        // Buildings at 1.0x, so trees are the furthest-visible objects
+        let max_visible_distance = render_distance * 1.5;
         // Convert to chunk units and round up, ensure chunk_size is valid
         let chunk_size = self.chunk_size.max(1.0);
         let needed_radius = (max_visible_distance / chunk_size).ceil() as i32;
-        // Clamp to small range (1-2) for FPS - fewer chunks = much faster
-        self.load_radius = needed_radius.clamp(1, 2);
+        // Allow up to 4 chunks for extended render distance with LOD system
+        // 1-2 chunks: 150-400 render distance
+        // 3-4 chunks: 400-1000 render distance (LOD1 trees fill the extra distance)
+        self.load_radius = needed_radius.clamp(1, 4);
         // Unload radius should be 1 chunk beyond load radius for hysteresis
         self.unload_radius = self.load_radius + 1;
 
-        println!("[CHUNK] Updated radii for render_distance={:.0}: load={}, unload={}",
-                 render_distance, self.load_radius, self.unload_radius);
+        println!("[CHUNK] Updated radii for render_distance={:.0}: load={}, unload={} ({} max chunks)",
+                 render_distance, self.load_radius, self.unload_radius,
+                 (self.load_radius * 2 + 1) * (self.load_radius * 2 + 1));
     }
 }

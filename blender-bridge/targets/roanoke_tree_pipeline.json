@@ -1,0 +1,73 @@
+{
+  "response_to": "tree_system_spec",
+  "from": "roanoke_engine",
+  "version": "1.2.0",
+  "spec_type": "tree_pipeline",
+  "last_updated": "2024-12-14",
+
+  "export_spec": {
+    "format": "glb",
+    "destination": "assets/models/trees/",
+
+    "lod": {
+      "level": 0,
+      "triangles": { "target": 15000, "min": 12000, "max": 20000 },
+      "notes": "Single high-quality LOD for close-up viewing. Engine handles distant fallback."
+    },
+
+    "naming": {
+      "pattern": "tree_{species}_{variant}.glb",
+      "example": "tree_birch_01.glb"
+    },
+
+    "requirements": {
+      "unit": "meters",
+      "height_range": [8.0, 15.0],
+      "origin": "trunk_base_center",
+      "y_up": true,
+      "uv_convention": {
+        "trunk": "UV.y in [0.0, 1.0]",
+        "canopy": "UV.y in [1.0, 3.0]"
+      },
+      "materials": {
+        "bark": { "alpha_mode": "OPAQUE" },
+        "leaves": { "alpha_mode": "MASK", "alpha_cutoff": 0.5, "double_sided": true }
+      }
+    },
+
+    "checklist": [
+      "Decimate to 15-20K triangles (preserve UV boundaries)",
+      "Apply all transforms",
+      "Origin at trunk base (Y=0)",
+      "UV.y < 1.0 for bark, UV.y > 1.0 for leaves",
+      "Leaf material: alpha MASK, double-sided",
+      "Embed textures in GLB"
+    ]
+  },
+
+  "species": {
+    "birch": {
+      "id": "birch",
+      "height_range": [8.0, 15.0],
+      "visual_notes": "White bark with dark horizontal marks, small triangular leaves"
+    }
+  },
+
+  "communities": {
+    "birch_grove": {
+      "species": "birch",
+      "tree_count": [5, 10],
+      "spacing": [3.0, 8.0],
+      "cluster_radius": 15.0,
+      "scale_variation": [0.7, 1.2],
+      "rotation_random": true,
+      "biomes": ["DeciduousForest"],
+      "spawn_chance": 0.08
+    }
+  },
+
+  "engine_refs": {
+    "shader": "assets/shaders/tree.wgsl",
+    "spawner": "vegetation.rs"
+  }
+}

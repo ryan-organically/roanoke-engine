@@ -1,0 +1,148 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-12-14",
+  "engine": "roanoke",
+  "spec_type": "birch_tree_export",
+  "description": "Export spec for birch tree with 3 LOD levels",
+
+  "global": {
+    "format": "glb",
+    "up_axis": "Y",
+    "forward_axis": "-Z",
+    "scale_unit": "meters",
+    "origin": "trunk_base_center",
+    "apply_transforms": true
+  },
+
+  "species": {
+    "name": "birch",
+    "visual_traits": {
+      "bark": "White/cream with dark horizontal lenticels (birch marks)",
+      "leaves": "Small, triangular/diamond shaped, bright green",
+      "silhouette": "Tall and slender, often with slight lean",
+      "canopy": "Open, airy, light dappled appearance"
+    },
+    "height_range_meters": [8.0, 15.0],
+    "trunk_diameter_meters": [0.2, 0.4]
+  },
+
+  "lod_levels": {
+    "LOD0": {
+      "name": "birch_0",
+      "filename": "birch_0.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/birch_0.glb",
+      "triangles": { "target": 15000, "min": 12000, "max": 20000 },
+      "distance_range": [0, 250],
+      "notes": "Full detail - visible bark texture, individual leaf cards"
+    },
+    "LOD1": {
+      "name": "birch_0_lod1",
+      "filename": "birch_0_lod1.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/birch_0_lod1.glb",
+      "triangles": { "target": 2000, "min": 1500, "max": 10000 },
+      "distance_range": [250, 500],
+      "notes": "Mid-range - simplified bark, merged leaf clusters"
+    },
+    "LOD2": {
+      "name": "birch_0_lod2",
+      "filename": "birch_0_lod2.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/birch_0_lod2.glb",
+      "triangles": { "target": 200, "min": 50, "max": 400 },
+      "distance_range": [500, 800],
+      "notes": "Far distance - cylinder trunk + simple cone/sphere canopy, or engine uses procedural"
+    }
+  },
+
+  "uv_convention": {
+    "critical": true,
+    "description": "Engine shader uses UV.y to distinguish bark from canopy for procedural fallback",
+    "trunk": {
+      "uv_y_range": [0.0, 1.0],
+      "notes": "All trunk/bark vertices must have UV.y between 0.0 and 1.0"
+    },
+    "canopy": {
+      "uv_y_range": [1.0, 3.0],
+      "notes": "All leaf/canopy vertices must have UV.y greater than 1.0"
+    },
+    "enforcement": "If UV.y > 1.0, shader renders green (canopy). If UV.y <= 1.0, shader renders brown (bark)."
+  },
+
+  "materials": {
+    "bark": {
+      "name": "birch_bark",
+      "alpha_mode": "OPAQUE",
+      "texture": {
+        "albedo": "birch_bark.png",
+        "resolution": 1024,
+        "notes": "White/cream base with dark horizontal marks"
+      }
+    },
+    "leaves": {
+      "name": "birch_leaves",
+      "alpha_mode": "MASK",
+      "alpha_cutoff": 0.5,
+      "double_sided": true,
+      "texture": {
+        "albedo": "birch_leaves.png",
+        "resolution": 512,
+        "notes": "Leaf atlas with alpha cutout, bright green"
+      }
+    }
+  },
+
+  "export_checklist": {
+    "all_lods": [
+      "Apply all transforms (Ctrl+A > All Transforms)",
+      "Origin at trunk base center (Y=0 at ground)",
+      "Scale in meters (tree ~10m tall)",
+      "Verify UV convention: bark UV.y < 1.0, leaves UV.y > 1.0",
+      "Embed textures in GLB"
+    ],
+    "LOD0": [
+      "Keep detail on bark texture UVs",
+      "Individual leaf cards acceptable",
+      "~15K triangles"
+    ],
+    "LOD1": [
+      "Decimate trunk geometry",
+      "Merge leaf cards into clusters",
+      "Maintain UV convention through decimation",
+      "~2K triangles"
+    ],
+    "LOD2": [
+      "Heavily simplified - cylinder + cone/sphere",
+      "Or skip and let engine use procedural LOD",
+      "~200 triangles"
+    ]
+  },
+
+  "blender_workflow": {
+    "lod_creation": [
+      "1. Start with LOD0 (full detail model)",
+      "2. Duplicate, apply Decimate modifier (ratio ~0.15) for LOD1",
+      "3. For LOD2: Create simple cylinder+cone primitive OR skip",
+      "4. Verify UVs survived decimation (check UV editor)",
+      "5. Export each LOD to separate GLB files"
+    ],
+    "decimate_settings": {
+      "LOD1": {
+        "method": "COLLAPSE",
+        "ratio": 0.12,
+        "use_symmetry": false,
+        "preserve_uvs": true
+      },
+      "LOD2": {
+        "method": "COLLAPSE",
+        "ratio": 0.015,
+        "notes": "Or manually create low-poly proxy"
+      }
+    }
+  },
+
+  "engine_integration": {
+    "loader": "main.rs tree_models array",
+    "lod_system": "TreeLODConfig in tree_pipeline.rs",
+    "shader": "assets/shaders/tree.wgsl",
+    "notes": "LOD2 can be skipped - engine generates procedural LOD1 if _lod1 mesh not found"
+  }
+}
