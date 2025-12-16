@@ -1,0 +1,84 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-12-16",
+  "engine": "roanoke",
+  "spec_type": "deadwood_export",
+  "description": "Export spec for fallen log / deadwood ground scatter",
+
+  "IMPORTANT_FOR_AGENTS": {
+    "engine_spec": "docs/specs/DEADWOOD_LOD_SPEC.json",
+    "workflow_guide": "docs/guides/BLENDER_ASSET_WORKFLOW.md",
+    "related_specs": [
+      "blender-bridge/targets/roanoke_pine.json",
+      "blender-bridge/targets/roanoke_birch.json"
+    ]
+  },
+
+  "global": {
+    "format": "glb",
+    "up_axis": "Y",
+    "forward_axis": "-Z",
+    "scale_unit": "meters",
+    "origin": "center_base",
+    "apply_transforms": true,
+    "compression": "OFF - Draco NOT supported by engine"
+  },
+
+  "asset": {
+    "name": "dead_log_0",
+    "category": "trees",
+    "visual_traits": {
+      "form": "Fallen log, broken/decayed",
+      "bark": "Weathered texture",
+      "orientation": "Horizontal (lying on ground)"
+    },
+    "length_range_meters": [2.0, 5.0],
+    "diameter_meters": [0.3, 0.6]
+  },
+
+  "lod_levels": {
+    "LOD0": {
+      "name": "dead_log_0",
+      "filename": "dead_log_0.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/dead_log_0.glb",
+      "triangles": { "actual": 320 },
+      "distance_range": [0, 150],
+      "notes": "Full detail"
+    },
+    "LOD1": {
+      "name": "dead_log_0_lod1",
+      "filename": "dead_log_0_lod1.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/dead_log_0_lod1.glb",
+      "triangles": { "actual": 80 },
+      "distance_range": [150, 400],
+      "notes": "Mid-range"
+    },
+    "LOD2": {
+      "name": "dead_log_0_lod2",
+      "filename": "dead_log_0_lod2.glb",
+      "destination": "C:/dev/roanoke engine/assets/models/trees/dead_log_0_lod2.glb",
+      "triangles": { "actual": 26 },
+      "distance_range": [400, 800],
+      "notes": "Far distance"
+    }
+  },
+
+  "materials": {
+    "bark": {
+      "name": "deadwood_bark",
+      "alpha_mode": "OPAQUE",
+      "texture": {
+        "albedo": "embedded in GLB",
+        "notes": "Weathered bark texture"
+      }
+    }
+  },
+
+  "engine_integration": {
+    "loader_location": "main.rs ~line 2425 (after boulder loading)",
+    "mesh_registry_keys": ["dead_log_0", "dead_log_0_lod1", "dead_log_0_lod2"],
+    "spawn_function": "rocks.rs generate_deadwood_for_chunk()",
+    "render_pipeline": "tree_pipeline (OPAQUE pass)",
+    "status": "IMPLEMENTED"
+  }
+}

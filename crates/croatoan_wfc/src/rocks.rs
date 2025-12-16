@@ -31,7 +31,7 @@
 //! - Instance transforms are batched by type for efficient rendering
 //! - Clustering reduces apparent randomness while maintaining density
 
-use crate::mesh_gen::{get_height_at, get_biome_t};
+use crate::mesh_gen::{get_height_at, get_biome_t, calculate_river_depth};
 use crate::trees::generate_bunches_for_chunk;
 use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec2, Vec3, Quat};
@@ -277,17 +277,18 @@ pub fn generate_rocks_for_chunk_with_exclusions(
             continue;
         }
 
-        // Select rock type based on conditions
+        // Select rock type based on conditions - BOULDERS ARE PRIMARY
         let type_noise = noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]) as f32;
         let rock_type = if is_beach_edge {
             // Beach gets flat rocks and small rocks
             if type_noise > 0.3 { RockType::FlatRock } else { RockType::SmallRock }
-        } else if type_noise > 0.6 {
+        } else if type_noise > -0.2 {
+            // ~60% of non-beach rocks are now boulders (was 20% at > 0.6)
             RockType::LargeBoulder
-        } else if type_noise > 0.2 {
+        } else if type_noise > -0.6 {
             RockType::MediumRock
         } else if height < 4.0 && rocky_noise_val < 0.35 {
-            RockType::MossyRock // Mossy in damp lowlands
+            RockType::MossyRock
         } else {
             RockType::SmallRock
         };
@@ -312,10 +313,123 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     }
 
     //=========================================================================
-    // PHASE 3 & 4: DISABLED - Pebble fields removed for performance
+    // PHASE 3: DEDICATED BOULDER SCATTER (everywhere above water)
     //=========================================================================
-    // Pebbles now only spawn as part of bunches (PHASE 1) near large boulders
-    // This greatly reduces vertex count while keeping boulders interesting
+    // Large boulders spawned across all terrain for visual landmark
+    // These use the new GLB boulder model with LOD system
+
+    let boulder_density = 0.8; // ~50+ boulders per 256x256 chunk - VERY dense
+    let potential_boulders_scatter = (chunk_size * chunk_size * boulder_density / 1000.0) as u32;
+
+    for i in 0..potential_boulders_scatter {
+        let rand_x = pebble_noise.get([i as f64 * 0.17, 500.0]) as f32;
+        let rand_z = pebble_noise.get([i as f64 * 0.17, 600.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+
+        // Skip water and very high altitudes
+        if height < 1.0 || height > 50.0 {
+            continue;
+        }
+
+        let angle = pebble_noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) as f32 * std::f32::consts::TAU;
+        let scale_t = (pebble_noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) + 1.0) * 0.5;
+        let scale = 1.8 * (0.85 + scale_t as f32 * 0.3); // 1.53 - 2.07 scale range
+
+        let tilt_x = pebble_noise.get([world_x as f64 * 0.6, 110.0]) as f32 * 0.15;
+        let tilt_z = pebble_noise.get([world_z as f64 * 0.6, 160.0]) as f32 * 0.15;
+
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
+            Vec3::new(world_x, height - 0.25, world_z),
+        );
+
+        instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
+    }
+
+    //=========================================================================
+    // PHASE 4: RIVER MEGA-BOULDERS
+    //=========================================================================
+    // Massive boulders in and around rivers/streams (low height, non-beach)
+    // These create dramatic river scenery with huge rocks jutting from water
+
+    let river_boulder_density = 0.25; // High density along rivers
+    let potential_river_boulders = (chunk_size * chunk_size * river_boulder_density / 500.0) as u32;
+
+    for i in 0..potential_river_boulders {
+        let rand_x = pebble_noise.get([i as f64 * 0.23, 700.0]) as f32;
+        let rand_z = pebble_noise.get([i as f64 * 0.23, 800.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+
+        // River zone: use actual river detection, not biome_t
+        // calculate_river_depth returns 0.0-1.0 where >0 means in/near river
+        let river_depth = calculate_river_depth(world_x, world_z, seed);
+
+        // Also check nearby for riverbank boulders (within ~12m of river)
+        let nearby_river = if river_depth < 0.05 {
+            // Sample nearby points to catch riverbanks
+            let sample_offsets = [(8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0)];
+            sample_offsets.iter().any(|(dx, dz)| {
+                calculate_river_depth(world_x + dx, world_z + dz, seed) > 0.2
+            })
+        } else {
+            false
+        };
+
+        let is_river_zone = river_depth > 0.05 || nearby_river;
+
+        if !is_river_zone {
+            continue;
+        }
+
+        // Cluster check - rivers should have boulder clusters
+        let cluster_val = cluster_noise.get([world_x as f64 * 0.05, world_z as f64 * 0.05]) as f32;
+        if cluster_val < -0.3 {
+            continue; // Skip ~35% for clustering
+        }
+
+        let angle = pebble_noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]) as f32 * std::f32::consts::TAU;
+        let scale_t = (pebble_noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) + 1.0) * 0.5;
+        // MASSIVE scale: 2.5 - 4.5 (huge river boulders)
+        let scale = 2.5 + scale_t as f32 * 2.0;
+
+        let tilt_x = pebble_noise.get([world_x as f64 * 0.5, 120.0]) as f32 * 0.2;
+        let tilt_z = pebble_noise.get([world_z as f64 * 0.5, 170.0]) as f32 * 0.2;
+
+        // Sink deeper - some boulders partially submerged
+        let sink = 0.4 + (pebble_noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) + 1.0) as f32 * 0.3;
+
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
+            Vec3::new(world_x, height - sink, world_z),
+        );
+
+        instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
+    }
+
     let _ = pebble_noise; // Silence unused warning
     let _ = cluster_noise;
 
@@ -395,6 +509,88 @@ pub fn generate_rocks_for_chunk_with_exclusions(
 
 //=============================================================================
 // TESTS
+//=============================================================================
+// DEADWOOD GENERATION
+//=============================================================================
+
+/// Generate deadwood (fallen logs, driftwood) for a chunk.
+/// Spawns in:
+/// - Forest areas (height > 4m) - fallen logs
+/// - Beach areas (height 1-3m) - driftwood
+/// - All biomes with varying density
+///
+/// Returns Vec of (model_name, transform) tuples.
+pub fn generate_deadwood_for_chunk(
+    seed: u32,
+    chunk_size: f32,
+    offset_x: f32,
+    offset_z: f32,
+) -> Vec<(String, Mat4)> {
+    let noise = Perlin::new(seed.wrapping_add(7777));
+    let mut instances = Vec::new();
+
+    // Deadwood density varies by biome
+    // ~0.01-0.02 per sq meter in forests, ~0.005 on beaches
+    let base_density = 0.012;
+    let potential_count = (chunk_size * chunk_size * base_density) as u32;
+
+    for i in 0..potential_count {
+        // Pseudo-random position
+        let rand_x = noise.get([i as f64 * 0.31, seed as f64 * 0.1]) as f32;
+        let rand_z = noise.get([i as f64 * 0.31, seed as f64 * 0.1 + 100.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+
+        // Determine if this location should have deadwood
+        let spawn_roll = noise.get([world_x as f64 * 0.7, world_z as f64 * 0.7]) as f32;
+
+        let should_spawn = if height > 4.0 {
+            // Forest: higher probability
+            spawn_roll > 0.3
+        } else if height > 1.0 && height < 3.5 {
+            // Beach/shoreline: driftwood, lower probability
+            spawn_roll > 0.6
+        } else if height > 3.5 {
+            // Scrub/transition: moderate probability
+            spawn_roll > 0.5
+        } else {
+            // Too low (water) or other - skip
+            false
+        };
+
+        if !should_spawn {
+            continue;
+        }
+
+        // Random rotation (logs lie flat, rotate around Y)
+        let angle = noise.get([world_x as f64 * 1.5, world_z as f64 * 1.5]) as f32 * std::f32::consts::PI;
+
+        // Scale variation (0.7 to 1.3)
+        let scale_var = 0.7 + (noise.get([world_x as f64 * 2.0, world_z as f64 * 2.0]) as f32 + 1.0) * 0.3;
+
+        // Slight tilt for natural look (up to 15 degrees)
+        let tilt_x = noise.get([world_x as f64 * 3.0, world_z as f64]) as f32 * 0.26; // ~15 deg
+        let tilt_z = noise.get([world_x as f64, world_z as f64 * 3.0]) as f32 * 0.26;
+
+        let rotation = Quat::from_euler(glam::EulerRot::YXZ, angle, tilt_x, tilt_z);
+        let translation = Vec3::new(world_x, height, world_z);
+        let scale = Vec3::splat(scale_var);
+
+        let transform = Mat4::from_scale_rotation_translation(scale, rotation, translation);
+
+        // All deadwood uses the same base model (LOD selected at render time)
+        instances.push(("dead_log_0".to_string(), transform));
+    }
+
+    instances
+}
+
 //=============================================================================
 
 #[cfg(test)]

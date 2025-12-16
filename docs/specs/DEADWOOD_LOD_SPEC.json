@@ -1,0 +1,43 @@
+{
+  "asset": "dead_log_0",
+  "description": "Fallen log / deadwood for forest floor and beach driftwood",
+
+  "IMPORTANT_FOR_AGENTS": {
+    "blender_export_spec": "blender-bridge/targets/roanoke_deadwood.json",
+    "workflow_guide": "docs/guides/BLENDER_ASSET_WORKFLOW.md",
+    "this_file_is": "Engine integration spec - for main.rs hookup"
+  },
+
+  "lods": {
+    "lod0": { "triangles": 320, "distance": "0-150 units" },
+    "lod1": { "triangles": 80, "distance": "100-400 units" },
+    "lod2": { "triangles": 26, "distance": "350-800 units" }
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF (Draco NOT supported)",
+    "path": "C:/dev/roanoke engine/assets/models/trees/",
+    "filenames": [
+      "dead_log_0.glb",
+      "dead_log_0_lod1.glb",
+      "dead_log_0_lod2.glb"
+    ]
+  },
+
+  "pipeline": {
+    "target": "tree_pipeline (OPAQUE)",
+    "status": "IMPLEMENTED",
+    "exported": "2025-12-16",
+    "loader_location": "main.rs ~line 2425",
+    "spawn_location": "rocks.rs generate_deadwood_for_chunk()",
+    "notes": "Merged with rock_instances, renders via same pass"
+  },
+
+  "spawn": {
+    "zones": "Forest (height > 4m), Beach (height 1-3.5m), Scrub (height 3.5-4m)",
+    "density": "~0.012 items/sq meter base, varies by biome",
+    "orientation": "Horizontal (fallen), random Y rotation, slight tilt",
+    "scale_variation": "0.7-1.3x"
+  }
+}

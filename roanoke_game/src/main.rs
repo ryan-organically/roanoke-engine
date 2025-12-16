@@ -4,7 +4,7 @@
 #![allow(unused_imports)]
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
-use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_buildings_for_chunk, generate_foliage_for_chunk, generate_ferns_for_chunk};
+use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_deadwood_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, generate_ferns_for_chunk};
 use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
 use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, generate_default_lod1_tree, generate_lod1_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
 use glam::{Vec3, Mat4};
@@ -1356,11 +1356,11 @@ fn main() {
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
-                4, // tree model count: tree_0, tree_1, birch_0, pine_0
-                4, // shrub model count: shrub_0, bush_0, grass_0, beach_grass_0
+                4, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0
+                2, // shrub model count: beach_grass_0, conifer_shrub_0
             );
             let tree_groups = foliage.trees_by_model(4);
-            let shrub_groups = foliage.shrubs_by_model(4);
+            let shrub_groups = foliage.shrubs_by_model(2);
 
             // Generate detritus
             let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
@@ -1371,13 +1371,22 @@ fn main() {
             );
 
             // Generate rocks (excluding corn field areas)
-            let rock_instances = generate_rocks_for_chunk_with_exclusions(
+            let mut rock_instances = generate_rocks_for_chunk_with_exclusions(
                 req.seed,
                 chunk_world_size,
                 offset_x as f32,
                 offset_z as f32,
                 &req.corn_field_exclusions,
             );
+
+            // Generate deadwood (fallen logs) and merge with rock instances
+            let deadwood_instances = generate_deadwood_for_chunk(
+                req.seed,
+                chunk_world_size,
+                offset_x as f32,
+                offset_z as f32,
+            );
+            rock_instances.extend(deadwood_instances);
 
             // Generate buildings
             let building_instances = generate_buildings_for_chunk(
@@ -1882,7 +1891,11 @@ fn main() {
                 // Load tree models from assets/models/trees/
                 // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
                 // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
-                let tree_models = ["tree_0", "tree_1", "birch_0", "pine_0"];
+                // NOTE: tree_0, tree_1 are single-LOD placeholders - DISABLED
+                let tree_models = [
+                    // "tree_0", "tree_1", // DISABLED - single LOD placeholders
+                    "birch_0", "pine_0", "dead_conifer_0", "fir_0",
+                ];
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
@@ -2065,52 +2078,100 @@ fn main() {
                 // Load or generate LOD1 meshes for distant tree rendering
                 // First try to load artist-created GLB, fall back to procedural generation
                 let lod1_tree_models = [
-                    ("tree_0_lod1", "tree_0"),
-                    ("tree_1_lod1", "tree_1"),
+                    // ("tree_0_lod1", "tree_0"), // DISABLED
+                    // ("tree_1_lod1", "tree_1"), // DISABLED
                     ("birch_0_lod1", "birch_0"),
                     ("pine_0_lod1", "pine_0"),
+                    ("dead_conifer_0_lod1", "dead_conifer_0"),
+                    ("fir_0_lod1", "fir_0"),
                 ];
                 let mut lod1_cache = gltf_loader::ModelCache::new("assets/models/trees");
 
                 for (i, (lod1_name, base_name)) in lod1_tree_models.iter().enumerate() {
                     // Try to load GLB first
                     if let Some(model) = lod1_cache.load(lod1_name) {
-                        // Load from GLB - combine all meshes
-                        let mut positions: Vec<[f32; 3]> = Vec::new();
-                        let mut normals: Vec<[f32; 3]> = Vec::new();
-                        let mut uvs: Vec<[f32; 2]> = Vec::new();
-                        let mut indices: Vec<u32> = Vec::new();
-                        let mut texture_bind_group = None;
+                        // Load from GLB - separate bark (OPAQUE) and leaves (BLEND) like LOD0
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                        for mesh in &model.meshes {
-                            let base_idx = positions.len() as u32;
-                            positions.extend_from_slice(&mesh.positions);
-                            normals.extend_from_slice(&mesh.normals);
-                            uvs.extend_from_slice(&mesh.uvs);
-                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                            // Use first texture found
-                            if texture_bind_group.is_none() {
-                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
-                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                        ctx.device(), ctx.queue(), tex_data,
-                                        Some(&format!("{}_lod1_texture", base_name)),
-                                    );
-                                    texture_bind_group = Some(std::sync::Arc::new(
-                                        texture_helper.create_texture_bind_group(
-                                            ctx.device(), &tex_view, Some(&format!("{}_lod1_bind", base_name)),
-                                        )
-                                    ));
+                        println!("[LOD1] {} has {} meshes", lod1_name, model.meshes.len());
+                        for (mesh_idx, mesh) in model.meshes.iter().enumerate() {
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
+                            let has_tex = mesh.material.base_color_texture_data.is_some();
+                            println!("[LOD1]   mesh[{}]: {} verts, alpha_mode={}, has_texture={}, is_leaves={}",
+                                mesh_idx, mesh.positions.len(), mesh.material.alpha_mode, has_tex, is_leaves);
+
+                            if is_leaves {
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            } else {
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
                                 }
                             }
                         }
 
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
-                        );
-                        state.mesh_registry.insert(lod1_name.to_string(), gpu_mesh);
-                        println!("[LOD1] Loaded '{}' from GLB: {} verts, {} tris",
-                            lod1_name, positions.len(), indices.len() / 3);
+                        // Create bark mesh for LOD1
+                        if !bark_positions.is_empty() {
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                println!("[LOD1]   -> bark texture {}x{}", tex_data.width, tex_data.height);
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_lod1_bark_texture", base_name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_lod1_bark_bind", base_name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_lod1_bark", base_name), gpu_mesh);
+                            println!("[LOD1] Registered {}_lod1_bark: {} verts, {} tris",
+                                base_name, bark_positions.len(), bark_indices.len() / 3);
+                        }
+
+                        // Create leaves mesh for LOD1
+                        if !leaf_positions.is_empty() {
+                            let texture_bind_group = leaf_texture.map(|tex_data| {
+                                println!("[LOD1]   -> leaf texture {}x{}", tex_data.width, tex_data.height);
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_lod1_leaf_texture", base_name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_lod1_leaf_bind", base_name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_lod1_leaves", base_name), gpu_mesh);
+                            println!("[LOD1] Registered {}_lod1_leaves: {} verts, {} tris",
+                                base_name, leaf_positions.len(), leaf_indices.len() / 3);
+                        }
                     } else {
                         // Fall back to procedural generation
                         let lod1_mesh = if base_name.contains("birch") {
@@ -2141,10 +2202,12 @@ fn main() {
 
                 // Load LOD2 meshes for very distant tree rendering
                 let lod2_tree_models = [
-                    ("tree_0_lod2", "tree_0"),
-                    ("tree_1_lod2", "tree_1"),
+                    // ("tree_0_lod2", "tree_0"), // DISABLED
+                    // ("tree_1_lod2", "tree_1"), // DISABLED
                     ("birch_0_lod2", "birch_0"),
                     ("pine_0_lod2", "pine_0"),
+                    ("dead_conifer_0_lod2", "dead_conifer_0"),
+                    ("fir_0_lod2", "fir_0"),
                 ];
                 let mut lod2_cache = gltf_loader::ModelCache::new("assets/models/trees");
 
@@ -2190,9 +2253,11 @@ fn main() {
                 // Load shrub/bush models from assets/models/shrubs/
                 // Same pattern as trees: separate bark and leaves meshes
                 // Includes beach grass (low-poly clumps for upper beach)
+                // NOTE: shrub_0, bush_0, grass_0 are single-LOD placeholders - disabled for now
                 let shrub_models = [
-                    "shrub_0", "bush_0", "grass_0",
+                    // "shrub_0", "bush_0", "grass_0", // DISABLED - single LOD placeholders
                     "beach_grass_0",
+                    "conifer_shrub_0", // New 3-LOD shrub
                 ];
                 let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
                 for name in &shrub_models {
@@ -2277,6 +2342,87 @@ fn main() {
                     }
                 }
 
+                // Load conifer_shrub_0 LOD1 and LOD2 with bark/leaves separation
+                for lod in 1..=2 {
+                    let lod_name = format!("conifer_shrub_0_lod{}", lod);
+                    if let Some(model) = shrub_cache.load(&lod_name) {
+                        // Separate bark (OPAQUE) and leaves (BLEND) like LOD0
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        for mesh in &model.meshes {
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
+
+                            if is_leaves {
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            } else {
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            }
+                        }
+
+                        // Create bark mesh
+                        if !bark_positions.is_empty() {
+                            let texture_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_bark_texture", lod_name)),
+                                );
+                                Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", lod_name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_bark", lod_name), gpu_mesh);
+                            println!("[SHRUB] Registered {}_bark: {} verts", lod_name, bark_positions.len());
+                        }
+
+                        // Create leaves mesh
+                        if !leaf_positions.is_empty() {
+                            let texture_bind_group = leaf_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_leaf_texture", lod_name)),
+                                );
+                                Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", lod_name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_leaves", lod_name), gpu_mesh);
+                            println!("[SHRUB] Registered {}_leaves: {} verts", lod_name, leaf_positions.len());
+                        }
+                    }
+                }
+
                 // Load fern models from assets/models/shrubs/
                 // Ferns are single mesh with MASK alpha mode for leaf cutout
                 // NOTE: fern_01.glb was corrupted (empty scene), using fern_02
@@ -2329,9 +2475,8 @@ fn main() {
                     }
                 }
 
-                // 2. Rocks - All Types (boulder, pebble, small, medium, flat, mossy)
+                // 2. Rocks - Procedural types (pebble, small, medium, flat, mossy)
                 let rock_types: Vec<(RockRecipe, &str)> = vec![
-                    (RockRecipe::boulder(), "rock_boulder"),
                     (RockRecipe::pebble(), "rock_pebble"),
                     (RockRecipe::small_rock(), "rock_small"),
                     (RockRecipe::medium_rock(), "rock_medium"),
@@ -2355,6 +2500,119 @@ fn main() {
                     );
                     state.mesh_registry.insert(name.to_string(), gpu_mesh);
                     println!("[ASSET] Registered rock: {} ({} verts)", name, positions.len());
+                }
+
+                // 3. Boulder LODs - loaded from GLB models
+                let mut boulder_cache = gltf_loader::ModelCache::new("assets/models/rocks");
+                let shadow_map_for_boulders = shadow_map_mutex.safe_lock();
+                let boulder_texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_for_boulders);
+                drop(shadow_map_for_boulders);
+
+                for lod in 0..=2 {
+                    let name = format!("boulder_lod{}", lod);
+                    if let Some(model) = boulder_cache.load(&name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            // Get texture from first mesh that has one
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", name)),
+                                    );
+                                    texture_bind_group = Some(Arc::new(
+                                        boulder_texture_helper.create_texture_bind_group(
+                                            ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                        )
+                                    ));
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &positions,
+                            &normals,
+                            &uvs,
+                            &indices,
+                            texture_bind_group,
+                        );
+                        println!("[ASSET] Registered boulder: {} ({} verts) from GLB", name, positions.len());
+                        state.mesh_registry.insert(name, gpu_mesh);
+                    } else {
+                        println!("[ASSET] WARNING: boulder_lod{}.glb not found, using procedural fallback", lod);
+                        let mesh = generate_rock(&RockRecipe::boulder());
+                        let positions: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.position).collect();
+                        let normals: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+                        let uvs: Vec<[f32; 2]> = mesh.vertices.iter().map(|v| v.uv).collect();
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &mesh.indices, None);
+                        state.mesh_registry.insert(format!("boulder_lod{}", lod), gpu_mesh);
+                    }
+                }
+                // Keep rock_boulder as alias to boulder_lod0 for backwards compat
+                if let Some(lod0) = state.mesh_registry.get("boulder_lod0").cloned() {
+                    state.mesh_registry.insert("rock_boulder".to_string(), lod0);
+                    println!("[ASSET] Aliased rock_boulder -> boulder_lod0");
+                }
+
+                // 4. Dead log LODs - fallen logs for forest floor and beach driftwood
+                let mut dead_log_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                for lod in 0..=2 {
+                    let name = if lod == 0 {
+                        "dead_log_0".to_string()
+                    } else {
+                        format!("dead_log_0_lod{}", lod)
+                    };
+
+                    if let Some(model) = dead_log_cache.load(&name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", name)),
+                                    );
+                                    texture_bind_group = Some(Arc::new(
+                                        boulder_texture_helper.create_texture_bind_group(
+                                            ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                        )
+                                    ));
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
+                        );
+                        println!("[ASSET] Registered dead_log: {} ({} verts, {} tris) from GLB",
+                            name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(name, gpu_mesh);
+                    } else {
+                        println!("[ASSET] Dead log {} not found - will skip", name);
+                    }
                 }
 
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
@@ -4557,48 +4815,107 @@ fn main() {
                             }
                             drop(shadow_map);
 
-                            // SHRUBS: Render shrub instances (same pattern as trees)
+                            // SHRUBS: Separate conifer_shrub_0 for LOD handling, others go to foliage_pipelines
                             let shadow_map_shrubs = shadow_map_mutex.safe_lock();
+                            let mut conifer_shrub_transforms: Vec<Mat4> = Vec::new();
+
                             for (name, transforms) in &shrub_groups {
-                                // Render bark mesh (OPAQUE)
-                                let bark_name = format!("{}_bark", name);
-                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
-                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
-                                    tp.set_mesh(mesh.clone());
-                                    tp.upload_instances(ctx.device(), transforms);
-                                    foliage_pipelines.push(tp);
-                                    println!("[SHRUB] '{}' bark: {} instances", name, transforms.len());
-                                }
-                                // Render leaves mesh (BLEND)
-                                let leaves_name = format!("{}_leaves", name);
-                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
-                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
-                                    tp.set_mesh(mesh.clone());
-                                    tp.upload_instances(ctx.device(), transforms);
-                                    foliage_pipelines.push(tp);
-                                    println!("[SHRUB] '{}' leaves: {} instances", name, transforms.len());
+                                if name == "conifer_shrub_0" {
+                                    // Collect conifer shrub transforms for LOD handling
+                                    conifer_shrub_transforms.extend(transforms.iter().cloned());
+                                } else {
+                                    // Other shrubs (beach_grass_0) render without LOD
+                                    let bark_name = format!("{}_bark", name);
+                                    if let Some(mesh) = state.mesh_registry.get(&bark_name) {
+                                        let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
+                                        tp.set_mesh(mesh.clone());
+                                        tp.upload_instances(ctx.device(), transforms);
+                                        foliage_pipelines.push(tp);
+                                        println!("[SHRUB] '{}' bark: {} instances", name, transforms.len());
+                                    }
+                                    let leaves_name = format!("{}_leaves", name);
+                                    if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                        let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
+                                        tp.set_mesh(mesh.clone());
+                                        tp.upload_instances(ctx.device(), transforms);
+                                        foliage_pipelines.push(tp);
+                                        println!("[SHRUB] '{}' leaves: {} instances", name, transforms.len());
+                                    }
                                 }
                             }
+
+                            // Create conifer_shrub LOD pipelines
+                            let mut conifer_shrubs_lod0 = Vec::new();
+                            let mut conifer_shrubs_lod1 = Vec::new();
+                            let mut conifer_shrubs_lod2 = Vec::new();
+
+                            if !conifer_shrub_transforms.is_empty() {
+                                for (lod, pipelines) in [(0, &mut conifer_shrubs_lod0), (1, &mut conifer_shrubs_lod1), (2, &mut conifer_shrubs_lod2)] {
+                                    let mesh_name = if lod == 0 {
+                                        "conifer_shrub_0".to_string()
+                                    } else {
+                                        format!("conifer_shrub_0_lod{}", lod)
+                                    };
+                                    // Try bark mesh first, then leaves
+                                    let bark_name = format!("{}_bark", mesh_name);
+                                    let leaves_name = format!("{}_leaves", mesh_name);
+
+                                    if let Some(mesh) = state.mesh_registry.get(&bark_name) {
+                                        let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
+                                        tp.set_mesh(mesh.clone());
+                                        tp.upload_instances(ctx.device(), &conifer_shrub_transforms);
+                                        pipelines.push(tp);
+                                    }
+                                    if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                        let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
+                                        tp.set_mesh(mesh.clone());
+                                        tp.upload_instances(ctx.device(), &conifer_shrub_transforms);
+                                        pipelines.push(tp);
+                                    }
+                                    // Try single mesh (no bark/leaves split)
+                                    if let Some(mesh) = state.mesh_registry.get(&mesh_name) {
+                                        let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_shrubs);
+                                        tp.set_mesh(mesh.clone());
+                                        tp.upload_instances(ctx.device(), &conifer_shrub_transforms);
+                                        pipelines.push(tp);
+                                        println!("[SHRUB] conifer_shrub_0 LOD{}: {} instances", lod, conifer_shrub_transforms.len());
+                                    }
+                                }
+                            }
+
                             drop(shadow_map_shrubs);
-                            println!("[CHUNK] Foliage LOD0: {} pipelines (trees + shrubs)", foliage_pipelines.len());
+                            println!("[CHUNK] Foliage LOD0: {} pipelines, Conifer shrubs: {}/{}/{}",
+                                foliage_pipelines.len(), conifer_shrubs_lod0.len(), conifer_shrubs_lod1.len(), conifer_shrubs_lod2.len());
 
                             // Create LOD1 pipelines (scaled down transforms for reduced visual volume)
+                            // LOD1 now uses separate bark/leaves like LOD0
                             let mut foliage_pipelines_lod1: Vec<TreePipeline> = Vec::new();
                             let shadow_map_lod1 = shadow_map_mutex.safe_lock();
                             for (name, transforms) in &tree_groups {
-                                // Map tree name to LOD1 mesh name (tree_0 -> tree_0_lod1)
-                                let lod1_name = format!("{}_lod1", name);
-                                if let Some(mesh) = state.mesh_registry.get(&lod1_name) {
-                                    // Scale down LOD1 trees to 70% size for reduced poly volume at distance
-                                    let scaled_transforms: Vec<Mat4> = transforms.iter().map(|t| {
-                                        let (scale, rot, trans) = t.to_scale_rotation_translation();
-                                        Mat4::from_scale_rotation_translation(scale * 0.7, rot, trans)
-                                    }).collect();
+                                // Scale down LOD1 trees to 70% size for reduced poly volume at distance
+                                let scaled_transforms: Vec<Mat4> = transforms.iter().map(|t| {
+                                    let (scale, rot, trans) = t.to_scale_rotation_translation();
+                                    Mat4::from_scale_rotation_translation(scale * 0.7, rot, trans)
+                                }).collect();
+
+                                // Try bark mesh first
+                                let bark_name = format!("{}_lod1_bark", name);
+                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
                                     let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_lod1);
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), &scaled_transforms);
                                     foliage_pipelines_lod1.push(tp);
-                                    println!("[LOD1] Tree '{}': {} instances (70% scale, 18 tris each)", lod1_name, transforms.len());
+                                    println!("[LOD1] Tree '{}' bark: {} instances", name, transforms.len());
+                                }
+
+                                // Then leaves mesh
+                                let leaves_name = format!("{}_lod1_leaves", name);
+                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_lod1);
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), &scaled_transforms);
+                                    foliage_pipelines_lod1.push(tp);
+                                    println!("[LOD1] Tree '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
                             drop(shadow_map_lod1);
@@ -4611,38 +4928,81 @@ fn main() {
                                 detritus_pipeline = Some(dp);
                             }
 
-                            // Group rocks by type
+                            // Group rocks by type, separating boulders and dead_logs for LOD handling
                             let mut rock_groups: std::collections::HashMap<String, Vec<Mat4>> = std::collections::HashMap::new();
+                            let mut boulder_transforms: Vec<Mat4> = Vec::new();
+                            let mut dead_log_transforms: Vec<Mat4> = Vec::new();
+
                             for (name, transform) in rock_instances {
-                                rock_groups.entry(name).or_default().push(transform);
+                                if name == "rock_boulder" {
+                                    boulder_transforms.push(transform);
+                                } else if name == "dead_log_0" {
+                                    dead_log_transforms.push(transform);
+                                } else {
+                                    rock_groups.entry(name).or_default().push(transform);
+                                }
                             }
 
-                            // Debug: Show rock type breakdown - ROCK DIAGNOSTIC
-                            println!("[ROCK DEBUG] Rock types in chunk: {:?}", rock_groups.keys().collect::<Vec<_>>());
-                            let total_rock_instances: usize = rock_groups.values().map(|v| v.len()).sum();
-                            println!("[ROCK DEBUG] Total rock instances to upload: {}", total_rock_instances);
-                            for (name, transforms) in &rock_groups {
-                                println!("[ROCK DEBUG]   {}: {} instances", name, transforms.len());
-                            }
+                            // Debug: Show rock type breakdown
+                            println!("[ROCK DEBUG] Rock types: {:?}, boulders: {}, dead_logs: {}",
+                                rock_groups.keys().collect::<Vec<_>>(), boulder_transforms.len(), dead_log_transforms.len());
 
+                            // Create pipelines for non-boulder rocks
                             let mut rock_pipelines = Vec::new();
-                            let mut rock_instances_uploaded = 0usize;
                             let shadow_map = shadow_map_mutex.safe_lock();
                             for (name, transforms) in rock_groups {
                                 if let Some(mesh) = state.mesh_registry.get(&name) {
                                     let mut rp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
                                     rp.set_mesh(mesh.clone());
                                     rp.upload_instances(ctx.device(), &transforms);
-                                    rock_instances_uploaded += transforms.len();
                                     rock_pipelines.push(rp);
-                                    println!("[ROCK DEBUG] Created pipeline '{}': {} instances", name, transforms.len());
-                                } else {
-                                    println!("[ROCK ERROR] Mesh '{}' not in registry! Available: {:?}",
-                                        name, state.mesh_registry.keys().collect::<Vec<_>>());
                                 }
                             }
+
+                            // Create boulder LOD pipelines (all share same transforms, different meshes)
+                            let mut boulders_lod0 = Vec::new();
+                            let mut boulders_lod1 = Vec::new();
+                            let mut boulders_lod2 = Vec::new();
+
+                            if !boulder_transforms.is_empty() {
+                                for (lod, pipelines) in [(0, &mut boulders_lod0), (1, &mut boulders_lod1), (2, &mut boulders_lod2)] {
+                                    let mesh_name = format!("boulder_lod{}", lod);
+                                    if let Some(mesh) = state.mesh_registry.get(&mesh_name) {
+                                        let mut bp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                                        bp.set_mesh(mesh.clone());
+                                        bp.upload_instances(ctx.device(), &boulder_transforms);
+                                        pipelines.push(bp);
+                                        println!("[BOULDER] LOD{}: {} instances", lod, boulder_transforms.len());
+                                    }
+                                }
+                            }
+
+                            // Create dead_log LOD pipelines
+                            let mut dead_logs_lod0 = Vec::new();
+                            let mut dead_logs_lod1 = Vec::new();
+                            let mut dead_logs_lod2 = Vec::new();
+
+                            if !dead_log_transforms.is_empty() {
+                                for (lod, pipelines) in [(0, &mut dead_logs_lod0), (1, &mut dead_logs_lod1), (2, &mut dead_logs_lod2)] {
+                                    let mesh_name = if lod == 0 {
+                                        "dead_log_0".to_string()
+                                    } else {
+                                        format!("dead_log_0_lod{}", lod)
+                                    };
+                                    if let Some(mesh) = state.mesh_registry.get(&mesh_name) {
+                                        let mut dlp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                                        dlp.set_mesh(mesh.clone());
+                                        dlp.upload_instances(ctx.device(), &dead_log_transforms);
+                                        pipelines.push(dlp);
+                                        println!("[DEAD_LOG] LOD{}: {} instances", lod, dead_log_transforms.len());
+                                    }
+                                }
+                            }
+
                             drop(shadow_map);
-                            println!("[ROCK DEBUG] Total pipelines: {}, total instances: {}", rock_pipelines.len(), rock_instances_uploaded);
+                            println!("[ROCK DEBUG] Rock pipelines: {}, Boulder LODs: {}/{}/{}, DeadLog LODs: {}/{}/{}",
+                                rock_pipelines.len(), boulders_lod0.len(), boulders_lod1.len(), boulders_lod2.len(),
+                                dead_logs_lod0.len(), dead_logs_lod1.len(), dead_logs_lod2.len());
 
                             // Process Buildings
                             let mut building_pipelines = Vec::new();
@@ -4758,7 +5118,17 @@ fn main() {
                                 ferns: fern_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
+                                boulders_lod0,
+                                boulders_lod1,
+                                boulders_lod2,
+                                dead_logs_lod0,
+                                dead_logs_lod1,
+                                dead_logs_lod2,
+                                conifer_shrubs_lod0,
+                                conifer_shrubs_lod1,
+                                conifer_shrubs_lod2,
                                 buildings: building_pipelines,
+                                river_water: Vec::new(), // TODO: implement river water
                                 bounds,
                             };
                             
@@ -5206,11 +5576,13 @@ fn main() {
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
                 // LOD distance configuration for trees
-                // LOD0 (full detail): 0-500 units, fade out 400-500
-                // LOD1 (simplified): 400-1200+ units, fade in 400-500
+                // LOD0 (full detail): 0-700 units, fade out 600-700
+                // LOD1 (simplified): 600-1200+ units, fade in 600-700
+                // Extended LOD0 range for higher visual quality at distance
+                // Performance impact: ~50% more high-poly trees in typical view
                 let lod_config = TreeLODConfig {
-                    lod0_fade_start: 400.0,
-                    lod0_fade_end: 500.0,
+                    lod0_fade_start: 600.0,  // was 400 - extended high detail range
+                    lod0_fade_end: 700.0,    // was 500 - keeps 100 unit transition zone
                     lod1_max_distance: (state.render_distance * 2.5).max(1200.0),
                 };
 
@@ -5249,8 +5621,8 @@ fn main() {
                     }
 
                     // Trees with LOD system - dithered fade between detail levels
-                    // LOD0 (full detail): visible 0-500 units, fade out 400-500
-                    // LOD1 (simplified ~18 tris): visible 400-1200+ units, fade in 400-500
+                    // LOD0 (full detail): visible 0-700 units, fade out 600-700
+                    // LOD1 (simplified ~18 tris): visible 600-1200+ units, fade in 600-700
 
                     // Determine LOD mode based on distance
                     let in_lod0_range = dist <= lod_config.lod0_fade_end;
@@ -5288,17 +5660,15 @@ fn main() {
                     // Render LOD1 (simplified) when in range
                     if in_lod1_range {
                         for trees_lod1 in &chunk.trees_lod1 {
-                            // Use texture if mesh has one (GLB-loaded), otherwise procedural
-                            let use_texture = if trees_lod1.has_texture() { 1.0 } else { 0.0 };
-                            let alpha_cutoff = if trees_lod1.has_texture() { 0.5 } else { 0.0 };
-
+                            // Always use texture mode with alpha cutoff for clean foliage edges
+                            // (all LOD1 GLBs have embedded textures)
                             // Use fade mode if in transition zone
                             if in_transition {
                                 trees_lod1.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    alpha_cutoff, use_texture,
+                                    0.5, 1.0, // alpha_cutoff, use_texture
                                     LODFadeMode::LOD1FadeIn,
                                     lod_config.lod0_fade_start,
                                     lod_config.lod0_fade_end,
@@ -5308,7 +5678,7 @@ fn main() {
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    alpha_cutoff, use_texture,
+                                    0.5, 1.0, // alpha_cutoff, use_texture
                                 );
                             }
                             trees_lod1.render(&mut render_pass);
@@ -5322,11 +5692,204 @@ fn main() {
                         }
                     }
 
-                    // Rocks (same max distance as LOD1 trees)
+                    // Rocks (non-boulder, same max distance as LOD1 trees)
                     for rock in &chunk.rocks {
                         if dist <= lod_config.lod1_max_distance {
+                            rock.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 0.0, // no alpha cutoff, procedural coloring
+                            );
                             rocks_rendered += rock.instance_count() as usize;
                             rock.render(&mut render_pass);
+                        }
+                    }
+
+                    // Boulders with LOD system - dithered fade between detail levels
+                    // Extended distances for better visibility
+                    // LOD0: 0-400 units (high detail), fade out 350-400
+                    // LOD1: 350-800 units (medium), fade 350-400 in, 750-800 out
+                    // LOD2: 750-1200 units (low detail), fade in 750-800
+                    let boulder_lod0_end = 400.0;
+                    let boulder_lod0_fade_start = 350.0;
+                    let boulder_lod1_end = 800.0;
+                    let boulder_lod1_fade_start = 750.0;
+
+                    let in_boulder_lod0 = dist <= boulder_lod0_end;
+                    let in_boulder_lod1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod1_end;
+                    let in_boulder_lod2 = dist >= boulder_lod1_fade_start && dist <= lod_config.lod1_max_distance;
+                    let boulder_transition_0_1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod0_end;
+                    let boulder_transition_1_2 = dist >= boulder_lod1_fade_start && dist <= boulder_lod1_end;
+
+                    // Boulder LOD0 (high detail)
+                    if in_boulder_lod0 {
+                        for boulder in &chunk.boulders_lod0 {
+                            if boulder_transition_0_1 {
+                                boulder.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0, LODFadeMode::LOD0FadeOut,
+                                    boulder_lod0_fade_start, boulder_lod0_end,
+                                );
+                            } else {
+                                boulder.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0, // use texture
+                                );
+                            }
+                            rocks_rendered += boulder.instance_count() as usize;
+                            boulder.render(&mut render_pass);
+                        }
+                    }
+
+                    // Boulder LOD1 (medium detail)
+                    if in_boulder_lod1 {
+                        for boulder in &chunk.boulders_lod1 {
+                            if boulder_transition_0_1 {
+                                boulder.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0, LODFadeMode::LOD1FadeIn,
+                                    boulder_lod0_fade_start, boulder_lod0_end,
+                                );
+                            } else if boulder_transition_1_2 {
+                                boulder.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0, LODFadeMode::LOD0FadeOut,
+                                    boulder_lod1_fade_start, boulder_lod1_end,
+                                );
+                            } else {
+                                boulder.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0,
+                                );
+                            }
+                            boulder.render(&mut render_pass);
+                        }
+                    }
+
+                    // Boulder LOD2 (low detail)
+                    if in_boulder_lod2 {
+                        for boulder in &chunk.boulders_lod2 {
+                            if boulder_transition_1_2 {
+                                boulder.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0, LODFadeMode::LOD1FadeIn,
+                                    boulder_lod1_fade_start, boulder_lod1_end,
+                                );
+                            } else {
+                                boulder.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.0, 1.0,
+                                );
+                            }
+                            boulder.render(&mut render_pass);
+                        }
+                    }
+
+                    // Dead logs (fallen trees / driftwood) - LOD based on distance
+                    // LOD distances: 0-150 (LOD0), 100-400 (LOD1), 350-800 (LOD2)
+                    let dead_log_lod0_end = 150.0;
+                    let dead_log_lod0_fade_start = 100.0;
+                    let dead_log_lod1_end = 400.0;
+                    let dead_log_lod1_fade_start = 350.0;
+
+                    let in_dead_log_lod0 = dist <= dead_log_lod0_end;
+                    let in_dead_log_lod1 = dist >= dead_log_lod0_fade_start && dist <= dead_log_lod1_end;
+                    let in_dead_log_lod2 = dist >= dead_log_lod1_fade_start && dist <= 800.0;
+
+                    if in_dead_log_lod0 {
+                        for dead_log in &chunk.dead_logs_lod0 {
+                            dead_log.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0,
+                            );
+                            dead_log.render(&mut render_pass);
+                        }
+                    }
+
+                    if in_dead_log_lod1 && !in_dead_log_lod0 {
+                        for dead_log in &chunk.dead_logs_lod1 {
+                            dead_log.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0,
+                            );
+                            dead_log.render(&mut render_pass);
+                        }
+                    }
+
+                    if in_dead_log_lod2 && !in_dead_log_lod1 {
+                        for dead_log in &chunk.dead_logs_lod2 {
+                            dead_log.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0,
+                            );
+                            dead_log.render(&mut render_pass);
+                        }
+                    }
+
+                    // Conifer shrubs - LOD based on distance
+                    // LOD distances: 0-100 (LOD0), 80-250 (LOD1), 200-500 (LOD2)
+                    let shrub_lod0_end = 100.0;
+                    let shrub_lod1_end = 250.0;
+                    let shrub_lod2_end = 500.0;
+
+                    let in_shrub_lod0 = dist <= shrub_lod0_end;
+                    let in_shrub_lod1 = dist > shrub_lod0_end && dist <= shrub_lod1_end;
+                    let in_shrub_lod2 = dist > shrub_lod1_end && dist <= shrub_lod2_end;
+
+                    if in_shrub_lod0 {
+                        for shrub in &chunk.conifer_shrubs_lod0 {
+                            shrub.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
+                            );
+                            shrub.render(&mut render_pass);
+                        }
+                    }
+
+                    if in_shrub_lod1 {
+                        for shrub in &chunk.conifer_shrubs_lod1 {
+                            shrub.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
+                            );
+                            shrub.render(&mut render_pass);
+                        }
+                    }
+
+                    if in_shrub_lod2 {
+                        for shrub in &chunk.conifer_shrubs_lod2 {
+                            shrub.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
+                            );
+                            shrub.render(&mut render_pass);
                         }
                     }
 

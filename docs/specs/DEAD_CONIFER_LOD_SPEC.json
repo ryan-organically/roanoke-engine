@@ -1,0 +1,41 @@
+{
+  "asset": "dead_conifer_0",
+  "description": "Dead coniferous tree - bare branches, no foliage",
+
+  "lods": {
+    "lod0": { "triangles": 1484, "distance": "0-200 units" },
+    "lod1": { "triangles": 355, "distance": "150-500 units", "decimate": 0.24 },
+    "lod2": { "triangles": 80, "distance": "450-1200 units", "decimate": 0.054 }
+  },
+
+  "textures": {
+    "lod0": { "color": "2048", "normal": "1024" },
+    "lod1": { "color": "1024", "normal": "512" },
+    "lod2": { "color": "512", "normal": null }
+  },
+
+  "material": {
+    "name": "BarkMat.003",
+    "alphaMode": "OPAQUE",
+    "shared": true,
+    "notes": "Shared with other dead tree variants"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "C:/dev/roanoke engine/assets/models/trees/",
+    "filenames": [
+      "dead_conifer_0.glb",
+      "dead_conifer_0_lod1.glb",
+      "dead_conifer_0_lod2.glb"
+    ]
+  },
+
+  "pipeline": {
+    "target": "tree_pipeline",
+    "status": "IMPLEMENTED",
+    "exported": "2025-12-16",
+    "notes": "OPAQUE only, no leaf pass needed (no foliage)"
+  }
+}

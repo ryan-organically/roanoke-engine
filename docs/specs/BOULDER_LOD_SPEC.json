@@ -1,0 +1,30 @@
+{
+  "asset": "boulder",
+  "description": "Large boulder rock for terrain scatter",
+
+  "lods": {
+    "lod0": {
+      "triangles": "800-1200",
+      "distance": "0-200 units"
+    },
+    "lod1": {
+      "triangles": "150-250",
+      "distance": "150-500 units"
+    },
+    "lod2": {
+      "triangles": "40-60",
+      "distance": "450-1200 units"
+    }
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF (Draco NOT supported by engine)",
+    "path": "assets/models/rocks/",
+    "filenames": [
+      "boulder_lod0.glb",
+      "boulder_lod1.glb",
+      "boulder_lod2.glb"
+    ]
+  }
+}

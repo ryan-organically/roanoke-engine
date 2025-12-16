@@ -6,6 +6,16 @@
 - Before implementing a feature, ask if another terminal is already working on it
 - If the user mentions another terminal is handling something, stop immediately and defer
 
+## Blender Asset Workflow
+
+**When preparing any new asset for Blender export, read `docs/guides/BLENDER_ASSET_WORKFLOW.md` first.**
+
+Before Blender exports:
+1. Create export directory (`assets/models/<category>/`)
+2. Write LOD spec (`docs/specs/<ASSET>_LOD_SPEC.json`)
+3. Prepare pipeline hookup code
+4. Have everything ready before export
+
 ## Active Work Areas
 
 Track what's being worked on to avoid conflicts:

@@ -251,7 +251,7 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
 }
 
 /// Calculate river depth at a position (0.0 = no river, 1.0 = center of river)
-fn calculate_river_depth(x: f32, z: f32, seed: u32) -> f32 {
+pub fn calculate_river_depth(x: f32, z: f32, seed: u32) -> f32 {
     // Multiple river channels using sine waves with noise perturbation
     let mut max_depth = 0.0f32;
 

@@ -186,6 +186,7 @@ pub use fern_gen::FernInstances;
 // Rocks
 pub use rocks::generate_rocks_for_chunk;
 pub use rocks::generate_rocks_for_chunk_with_exclusions;
+pub use rocks::generate_deadwood_for_chunk;
 pub use rocks::CornFieldBounds;
 pub use rocks::RockType;
 

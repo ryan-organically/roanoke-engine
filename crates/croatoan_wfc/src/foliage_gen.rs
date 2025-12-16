@@ -3,32 +3,39 @@
 //! Generates foliage instances with model indices for multi-model rendering.
 //! Supports species-based communities (e.g., birch groves) using noise zones.
 
-use crate::mesh_gen::{get_height_at, distance_to_shoreline, get_biome_t};
+use crate::mesh_gen::{get_height_at, distance_to_shoreline, get_biome_t, calculate_river_depth};
 use crate::trees::{TREELINE_DISTANCE, UPPER_TREELINE_START, UPPER_TREELINE_END};
 use noise::{NoiseFn, Perlin};
 use glam::{Mat4, Vec3, Quat};
 use std::collections::HashMap;
 
 /// Tree species indices - must match order in main.rs tree_models array
-pub const TREE_SPECIES_OAK: usize = 0;      // tree_0
-pub const TREE_SPECIES_MAPLE: usize = 1;    // tree_1 (generic deciduous)
-pub const TREE_SPECIES_BIRCH: usize = 2;    // birch_0
-pub const TREE_SPECIES_PINE: usize = 3;     // pine_0
+/// NOTE: tree_0, tree_1 (oak/maple) disabled - single-LOD placeholders
+pub const TREE_SPECIES_BIRCH: usize = 0;       // birch_0
+pub const TREE_SPECIES_PINE: usize = 1;        // pine_0
+pub const TREE_SPECIES_DEAD_CONIFER: usize = 2; // dead_conifer_0
+pub const TREE_SPECIES_FIR: usize = 3;         // fir_0 (bushy, forest edges)
 
 /// Shrub model indices - must match order in main.rs shrub_models array
-pub const SHRUB_SPECIES_DEFAULT: usize = 0; // shrub_0
-pub const SHRUB_SPECIES_BUSH: usize = 1;    // bush_0
-pub const SHRUB_SPECIES_GRASS: usize = 2;   // grass_0
-
-/// Beach grass model index (low-poly clumps for upper beach → treeline)
-/// Single model with scale variation instead of multiple models
-pub const SHRUB_SPECIES_BEACH_GRASS_0: usize = 3; // beach_grass_0
+/// NOTE: shrub_0, bush_0, grass_0 disabled (single-LOD placeholders)
+pub const SHRUB_SPECIES_BEACH_GRASS_0: usize = 0; // beach_grass_0
+pub const SHRUB_SPECIES_CONIFER_SHRUB: usize = 1; // conifer_shrub_0 (3 LODs)
 
 /// Instance with model index for multi-model rendering
 #[derive(Clone, Debug)]
 pub struct FoliageInstance {
     pub transform: Mat4,
     pub model_index: usize,
+    /// Megaflora: giant ancient trees (4x scale, future: harder to chop)
+    pub is_megaflora: bool,
+}
+
+/// Check if a pine tree should become megaflora (12% chance)
+/// Megaflora are ancient giant pines - 4x normal size
+fn is_megaflora(world_x: f32, world_z: f32, seed: u32) -> bool {
+    let mega_noise = Perlin::new(seed.wrapping_add(99999));
+    let roll = (mega_noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) + 1.0) * 0.5;
+    roll < 0.12 // ~12% chance
 }
 
 /// Determine if a world position is in a birch community zone.
@@ -68,14 +75,14 @@ fn birch_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
 
 /// Get pine zone strength (0.0 = not pine zone, 1.0 = deep in pine zone)
 /// Pines favor coastal areas and sandy soils - uses different noise layer
-/// DOUBLED spawn rate: Pines now cover ~50% of forest area
+/// DOUBLED again: Pines now cover ~75% of forest area for denser canopy
 fn pine_zone_strength(world_x: f32, world_z: f32, seed: u32) -> f32 {
     let pine_noise = Perlin::new(seed.wrapping_add(54321));
     let zone_value = pine_noise.get([world_x as f64 * 0.006, world_z as f64 * 0.006]) as f32;
 
-    // Pines in ~50% of forest area (doubled from 25%)
-    // Lower threshold means more pine zones
-    ((zone_value - 0.1) / 0.5).clamp(0.0, 1.0)
+    // Pines in ~75% of forest area (doubled from 50%)
+    // Much lower threshold = pine zones almost everywhere
+    ((zone_value + 0.3) / 0.6).clamp(0.0, 1.0)
 }
 
 /// Select tree species based on position and zone
@@ -90,12 +97,21 @@ fn select_tree_species(world_x: f32, world_z: f32, seed: u32, tree_count: usize)
     let roll = (local_noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) + 1.0) * 0.5;
 
     // Check pine zones first (if pine model available)
+    // Pine probability increased for denser forest (+25% total trees)
     if tree_count >= 4 {
         let pine_strength = pine_zone_strength(world_x, world_z, seed);
         if pine_strength > 0.0 {
-            // Deep in zone: 85% pine, edge: 45% pine
-            let pine_probability = 0.45 + pine_strength * 0.4;
+            // Deep in zone: 95% pine, edge: 60% pine (increased from 85%/45%)
+            let pine_probability = 0.60 + pine_strength * 0.35;
             if roll < pine_probability as f64 {
+                // ~10% of pines become dead conifers (if model available)
+                if tree_count >= 3 {
+                    let dead_hash = ((world_x.abs() as u32).wrapping_mul(29473891)
+                        ^ (world_z.abs() as u32).wrapping_mul(73829461)) % 100;
+                    if dead_hash < 10 {
+                        return TREE_SPECIES_DEAD_CONIFER;
+                    }
+                }
                 return TREE_SPECIES_PINE;
             }
         }
@@ -111,10 +127,28 @@ fn select_tree_species(world_x: f32, world_z: f32, seed: u32, tree_count: usize)
         }
     }
 
-    // Outside special zones - oak or maple
-    let hash = ((world_x.abs() as u32).wrapping_mul(83492791)
-        ^ (world_z.abs() as u32).wrapping_mul(41729563)) as usize;
-    hash % 2 // oak (0) or maple (1)
+    // Fir trees at forest edges (bushy, sun-loving)
+    // biome_t 0.65-0.78 = coastal forest / forest edge zone (where beach transitions to forest)
+    if tree_count >= 4 {
+        let biome_t = get_biome_t(world_x, world_z, seed);
+        if biome_t > 0.65 && biome_t < 0.78 {
+            // Fir dominates forest edges (70% fir, 30% other)
+            let edge_hash = ((world_x.abs() as u32).wrapping_mul(67891234)
+                ^ (world_z.abs() as u32).wrapping_mul(98765432)) % 100;
+            if edge_hash < 70 {
+                return TREE_SPECIES_FIR;
+            }
+        }
+        // Also spawn fir in sparse areas of deeper forest (~15% chance)
+        let sparse_hash = ((world_x.abs() as u32).wrapping_mul(11223344)
+            ^ (world_z.abs() as u32).wrapping_mul(55667788)) % 100;
+        if sparse_hash < 15 {
+            return TREE_SPECIES_FIR;
+        }
+    }
+
+    // Fallback: birch for remaining trees
+    TREE_SPECIES_BIRCH
 }
 
 /// Result of foliage generation with model variety
@@ -127,7 +161,7 @@ pub struct FoliageInstances {
 }
 
 impl FoliageInstances {
-    /// Get tree transforms grouped by model name (tree_0, tree_1, birch_0, pine_0, etc.)
+    /// Get tree transforms grouped by model name (birch_0, pine_0, dead_conifer_0, fir_0)
     pub fn trees_by_model(&self, model_count: usize) -> HashMap<String, Vec<Mat4>> {
         let mut result = HashMap::new();
         let count = model_count.max(1);
@@ -137,14 +171,16 @@ impl FoliageInstances {
             let model_name = match idx {
                 TREE_SPECIES_BIRCH => "birch_0".to_string(),
                 TREE_SPECIES_PINE => "pine_0".to_string(),
-                _ => format!("tree_{}", idx),
+                TREE_SPECIES_DEAD_CONIFER => "dead_conifer_0".to_string(),
+                TREE_SPECIES_FIR => "fir_0".to_string(),
+                _ => "birch_0".to_string(), // fallback to birch
             };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
         }
         result
     }
 
-    /// Get shrub transforms grouped by model name (shrub_0, bush_0, grass_0, beach_grass_0)
+    /// Get shrub transforms grouped by model name (beach_grass_0, conifer_shrub_0)
     pub fn shrubs_by_model(&self, model_count: usize) -> HashMap<String, Vec<Mat4>> {
         let mut result = HashMap::new();
         let count = model_count.max(1);
@@ -152,10 +188,9 @@ impl FoliageInstances {
             let idx = inst.model_index % count;
             // Map species index to actual model name
             let model_name = match idx {
-                SHRUB_SPECIES_BUSH => "bush_0".to_string(),
-                SHRUB_SPECIES_GRASS => "grass_0".to_string(),
                 SHRUB_SPECIES_BEACH_GRASS_0 => "beach_grass_0".to_string(),
-                _ => "shrub_0".to_string(),
+                SHRUB_SPECIES_CONIFER_SHRUB => "conifer_shrub_0".to_string(),
+                _ => "conifer_shrub_0".to_string(), // Default to conifer shrub
             };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
         }
@@ -219,15 +254,32 @@ pub fn generate_foliage_for_chunk(
             }
 
             // Forest-edge/Treeline zone (0.65-0.72): EXTREMELY dense - defines the treeline
-            // Coastal forest (0.72-0.82): moderate density
-            // Inland forest (0.82+): normal density
-            let bunch_threshold = if biome_t < 0.72 {
-                0.08 // Extremely dense treeline (was 0.15)
+            // Coastal forest (0.72-0.82): denser with more pines
+            // Inland forest (0.82+): moderate density
+            let mut bunch_threshold = if biome_t < 0.72 {
+                0.05 // Even denser treeline
             } else if biome_t < 0.82 {
-                0.30 // Moderate density coastal forest
+                0.20 // Denser coastal forest (was 0.30)
             } else {
-                0.45 // Normal density inland
+                0.35 // Denser inland (was 0.45)
             };
+
+            // River proximity boost: denser trees near rivers
+            // Check if we're near a river channel
+            let river_depth = calculate_river_depth(world_x, world_z, seed);
+            let near_river = if river_depth < 0.05 {
+                // Sample nearby for riverbank detection
+                [(10.0, 0.0), (-10.0, 0.0), (0.0, 10.0), (0.0, -10.0)]
+                    .iter()
+                    .any(|(dx, dz)| calculate_river_depth(world_x + dx, world_z + dz, seed) > 0.1)
+            } else {
+                true // Already in/near river
+            };
+            if near_river {
+                // Reduce threshold by 50% near rivers = much denser trees
+                bunch_threshold *= 0.5;
+            }
+
             let density_roll = (noise.get([world_x as f64 * 0.05, world_z as f64 * 0.05]) + 1.0) * 0.5;
             if density_roll < bunch_threshold {
                 continue;
@@ -285,6 +337,7 @@ pub fn generate_foliage_for_chunk(
                         Vec3::new(sx, sh - 0.1, sz),
                     ),
                     model_index: model_idx,
+                    is_megaflora: false,
                 });
             }
 
@@ -301,12 +354,18 @@ pub fn generate_foliage_for_chunk(
                 }
 
                 let base_scale = 5.0 + biome_factor * 3.0;
-                let tree_scale =
+                let mut tree_scale =
                     base_scale + local_noise.get([tx as f64 * 0.2, tz as f64 * 0.2]) as f32;
                 let tree_angle =
                     local_noise.get([tx as f64 * 0.5, tz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
                 // Use species-based selection (supports birch community zones)
                 let model_idx = select_tree_species(tx, tz, seed, tree_count);
+
+                // Megaflora: 12% of pines become giant ancient trees (4x scale)
+                let mega = model_idx == TREE_SPECIES_PINE && is_megaflora(tx, tz, seed);
+                if mega {
+                    tree_scale *= 4.0;
+                }
 
                 // Y-anchor: Use smaller sink for low terrain to prevent floating
                 // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
@@ -319,6 +378,7 @@ pub fn generate_foliage_for_chunk(
                         Vec3::new(tx, th - sink_amount, tz),
                     ),
                     model_index: model_idx,
+                    is_megaflora: mega,
                 });
             }
         }
@@ -370,11 +430,17 @@ pub fn generate_foliage_for_chunk(
         let angle =
             noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
         // Trees scale with forest_depth (based on new 0.62 threshold)
-        let scale = 5.5
+        let mut scale = 5.5
             + forest_depth * 2.5
             + noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]) as f32;
         // Use species-based selection (supports birch community zones)
         let model_idx = select_tree_species(world_x, world_z, seed, tree_count);
+
+        // Megaflora: 12% of pines become giant ancient trees (4x scale)
+        let mega = model_idx == TREE_SPECIES_PINE && is_megaflora(world_x, world_z, seed);
+        if mega {
+            scale *= 4.0;
+        }
 
         // Y-anchor: proportional sink to prevent floating
         let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
@@ -386,6 +452,7 @@ pub fn generate_foliage_for_chunk(
                 Vec3::new(world_x, height - sink_amount, world_z),
             ),
             model_index: model_idx,
+            is_megaflora: mega,
         });
     }
 
@@ -486,6 +553,7 @@ fn generate_beach_grass_for_chunk(
                 Vec3::new(world_x, height + 0.1, world_z), // Small Y offset to sit on terrain
             ),
             model_index: SHRUB_SPECIES_BEACH_GRASS_0,
+            is_megaflora: false,
         });
 
         count += 1;

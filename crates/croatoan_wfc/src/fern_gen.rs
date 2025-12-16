@@ -13,7 +13,7 @@
 //! Ferns use the standard tree.wgsl shader which derives wind from vertex Y position.
 //! With origin at base and tips at Y~0.29m, fronds will have subtle sway.
 
-use crate::mesh_gen::{get_height_at, get_biome_t};
+use crate::mesh_gen::{get_height_at, get_biome_t, calculate_river_depth};
 use glam::{Mat4, Quat, Vec3};
 use noise::{NoiseFn, Perlin};
 
@@ -167,9 +167,80 @@ pub fn generate_ferns_for_chunk(
         }
     }
 
+    // === PHASE 2: RIVER MEGA-FERNS ===
+    // Giant ferns along rivers and streams (low height, non-beach)
+    // These create lush riparian vegetation
+
+    let river_grid_size = 6.0; // Denser near water
+    let river_cells = (chunk_size / river_grid_size).ceil() as i32;
+
+    for gz in 0..river_cells {
+        for gx in 0..river_cells {
+            let grid_x = offset_x + (gx as f32 + 0.5) * river_grid_size;
+            let grid_z = offset_z + (gz as f32 + 0.5) * river_grid_size;
+
+            let jitter_x = noise.get([grid_x as f64 * 0.15, grid_z as f64 * 0.15 + 100.0]) as f32 * river_grid_size * 0.8;
+            let jitter_z = noise.get([grid_x as f64 * 0.15 + 100.0, grid_z as f64 * 0.15]) as f32 * river_grid_size * 0.8;
+
+            let world_x = grid_x + jitter_x;
+            let world_z = grid_z + jitter_z;
+
+            let (height, _) = get_height_at(world_x, world_z, seed);
+
+            // River zone: use actual river detection
+            // calculate_river_depth returns 0.0-1.0 where >0 means in/near river
+            let river_depth = calculate_river_depth(world_x, world_z, seed);
+
+            // Also check nearby for riverbank ferns (within ~10m of river)
+            let nearby_river = if river_depth < 0.05 {
+                let sample_offsets = [(6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0)];
+                sample_offsets.iter().any(|(dx, dz)| {
+                    calculate_river_depth(world_x + dx, world_z + dz, seed) > 0.15
+                })
+            } else {
+                false
+            };
+
+            let is_river_zone = river_depth > 0.05 || nearby_river;
+
+            if !is_river_zone {
+                continue;
+            }
+
+            // Density roll - ~40% spawn rate along rivers
+            let density_roll = (noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) + 1.0) * 0.5;
+            if density_roll < 0.6 {
+                continue;
+            }
+
+            // HUGE ferns: 12-30 scale (double the forest ferns)
+            let scale_base = 12.0;
+            let scale_var = noise.get([world_x as f64 * 0.2, world_z as f64 * 0.2]).abs() as f32;
+            let scale_mult = 1.0 + scale_var * 1.5;
+            let scale = scale_base * scale_mult;
+
+            let rotation = noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) as f32 * std::f32::consts::TAU;
+
+            let model_idx = ((world_x.abs() as u32).wrapping_mul(73856093)
+                ^ (world_z.abs() as u32).wrapping_mul(19349663)) as usize
+                % model_count;
+
+            let y_offset = -0.5 - scale * 0.08;
+
+            result.ferns.push(FernInstance {
+                transform: Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    Quat::from_rotation_y(rotation),
+                    Vec3::new(world_x, height + y_offset, world_z),
+                ),
+                model_index: model_idx,
+            });
+        }
+    }
+
     if !result.ferns.is_empty() {
         println!(
-            "[FERN] Chunk ({}, {}): {} ferns",
+            "[FERN] Chunk ({}, {}): {} ferns (forest + river)",
             offset_x, offset_z, result.ferns.len()
         );
     }

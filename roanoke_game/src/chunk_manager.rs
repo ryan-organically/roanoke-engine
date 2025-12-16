@@ -31,8 +31,18 @@ pub struct LoadedChunk {
     pub trees_lod1: Vec<TreePipeline>, // LOD1 simplified trees for distant rendering
     pub ferns: Vec<TreePipeline>, // Forest understory ferns
     pub detritus: Option<DetritusPipeline>,
-    pub rocks: Vec<TreePipeline>, // List of pipelines for different rock types in this chunk
+    pub rocks: Vec<TreePipeline>, // Non-boulder rocks (pebble, small, medium, flat, mossy)
+    pub boulders_lod0: Vec<TreePipeline>, // Boulder LOD0 (0-200 units)
+    pub boulders_lod1: Vec<TreePipeline>, // Boulder LOD1 (150-500 units)
+    pub boulders_lod2: Vec<TreePipeline>, // Boulder LOD2 (450-1200 units)
+    pub dead_logs_lod0: Vec<TreePipeline>, // Dead log LOD0 (0-150 units)
+    pub dead_logs_lod1: Vec<TreePipeline>, // Dead log LOD1 (100-400 units)
+    pub dead_logs_lod2: Vec<TreePipeline>, // Dead log LOD2 (350-800 units)
+    pub conifer_shrubs_lod0: Vec<TreePipeline>, // Conifer shrub LOD0 (0-100 units)
+    pub conifer_shrubs_lod1: Vec<TreePipeline>, // Conifer shrub LOD1 (80-250 units)
+    pub conifer_shrubs_lod2: Vec<TreePipeline>, // Conifer shrub LOD2 (200-500 units)
     pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk
+    pub river_water: Vec<TreePipeline>, // Flat calm water quads for rivers
     pub bounds: ChunkBounds,
 }
 
