@@ -86,9 +86,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let shimmer = shimmer_hash(shimmer_uv) * 0.08 + shimmer_hash(shimmer_uv * 1.7 + 2.3) * 0.05;
     let shimmer_intensity = shimmer * horizon_factor;
 
-    // Pure silver colors - no orange/warm tones
-    let moon_silver = vec3<f32>(0.92, 0.94, 0.98);
-    let glow_silver = vec3<f32>(0.75, 0.78, 0.88);
+    // Pure silver/white colors - bright enough to overpower orange sky bleed-through
+    let moon_silver = vec3<f32>(0.98, 0.98, 1.0);  // Nearly pure white
+    let glow_silver = vec3<f32>(0.85, 0.88, 0.95); // Brighter silver glow
 
     if dist < core_radius {
         // Moon disk - soft bright silver with gentle edge blend
@@ -111,11 +111,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let alpha = smoothstep(1.0, 0.7, core_blend);
         return vec4<f32>(moon_color, alpha);
     } else if dist < glow_radius {
-        // Soft diffuse glow - like sun's blur but more subtle
+        // Soft diffuse glow - more blur/spread than before
         let glow_blend = (dist - core_radius) / (glow_radius - core_radius);
 
-        // Softer exponential falloff - less defined than sun
-        var glow = exp(-glow_blend * 5.0) * 0.4;
+        // Much softer exponential falloff for ethereal moon glow
+        // Lower decay (2.5 vs 5.0) = more spread, higher multiplier = brighter
+        var glow = exp(-glow_blend * 2.5) * 0.6;
 
         // Very subtle horizon enhancement - stays silver
         glow = glow * (1.0 + horizon_factor * 0.15 + shimmer_intensity * 0.5);

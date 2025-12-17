@@ -2262,6 +2262,13 @@ fn main() {
                 let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
                 for name in &shrub_models {
                     if let Some(model) = shrub_cache.load(name) {
+                        // Debug: show mesh breakdown
+                        println!("[SHRUB DEBUG] '{}' has {} meshes:", name, model.meshes.len());
+                        for (i, mesh) in model.meshes.iter().enumerate() {
+                            let has_tex = mesh.material.base_color_texture_data.is_some();
+                            println!("  mesh[{}]: alpha_mode='{}', has_texture={}, verts={}",
+                                i, mesh.material.alpha_mode, has_tex, mesh.positions.len());
+                        }
                         // Separate meshes into bark (OPAQUE) and leaves (BLEND)
                         let mut bark_positions: Vec<[f32; 3]> = Vec::new();
                         let mut bark_normals: Vec<[f32; 3]> = Vec::new();
@@ -2343,9 +2350,15 @@ fn main() {
                 }
 
                 // Load conifer_shrub_0 LOD1 and LOD2 with bark/leaves separation
+                println!("[SHRUB_LOD] === Starting conifer shrub LOD loading ===");
                 for lod in 1..=2 {
                     let lod_name = format!("conifer_shrub_0_lod{}", lod);
+                    println!("[SHRUB_LOD_DEBUG] Attempting to load '{}'", lod_name);
                     if let Some(model) = shrub_cache.load(&lod_name) {
+                        println!("[SHRUB_LOD_DEBUG] Loaded '{}' with {} meshes", lod_name, model.meshes.len());
+                        for (i, mesh) in model.meshes.iter().enumerate() {
+                            println!("[SHRUB_LOD_DEBUG]   mesh[{}]: alpha_mode={}, verts={}", i, mesh.material.alpha_mode, mesh.positions.len());
+                        }
                         // Separate bark (OPAQUE) and leaves (BLEND) like LOD0
                         let mut bark_positions: Vec<[f32; 3]> = Vec::new();
                         let mut bark_normals: Vec<[f32; 3]> = Vec::new();
@@ -2382,6 +2395,9 @@ fn main() {
                                 }
                             }
                         }
+
+                        println!("[SHRUB_LOD_DEBUG] '{}' after separation: bark={} verts, leaves={} verts",
+                            lod_name, bark_positions.len(), leaf_positions.len());
 
                         // Create bark mesh
                         if !bark_positions.is_empty() {
@@ -5160,10 +5176,11 @@ fn main() {
                             // Check if loading is complete
                             // For streaming, "complete" just means "initial batch done"
                             if state.game_state == GameState::Loading {
-                                let (loaded, loading) = manager.get_stats();
-                                // If we have loaded enough and no more pending, switch to playing
-                                if loading == 0 && loaded > 0 {
-                                    println!("[LOAD] Initial chunks loaded! Transitioning to Playing...");
+                                let (loaded, _loading) = manager.get_stats();
+                                // Start playing after 5 chunks loaded (don't wait for all)
+                                // Remaining chunks will stream in while playing
+                                if loaded >= 5 {
+                                    println!("[LOAD] Initial {} chunks loaded! Transitioning to Playing...", loaded);
                                     state.loading_progress.current_status = "Ready!".to_string();
                                     state.game_state = GameState::Playing;
                                 }
@@ -5249,11 +5266,14 @@ fn main() {
             {
                 for (_coord, chunk) in manager.iter_chunks() {
                     if let Some(grass) = &chunk.grass {
+                        // Pass sun_dir (not light_dir) so shader can detect day/night properly
+                        // At night, light_dir is moon_dir which has negative y (moon above)
+                        // This confuses the shader into thinking it's daytime
                         grass.update_camera(
                             ctx.queue(),
                             &view_proj,
                             &light_view_proj,
-                            light_dir.to_array(),
+                            sun_dir.to_array(),
                             elapsed,
                             state.camera.position.to_array(),
                             fog_color,
@@ -5565,7 +5585,12 @@ fn main() {
                 let mut terrain_culled = 0;
                 let mut grass_rendered = 0;
                 let mut trees_rendered = 0;
+                let mut trees_lod1_rendered = 0;
                 let mut rocks_rendered: usize = 0;
+                let mut boulders_rendered: usize = 0;
+                let mut shrubs_rendered: usize = 0;
+                let mut ferns_rendered: usize = 0;
+                let mut dead_logs_rendered: usize = 0;
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
@@ -5580,10 +5605,12 @@ fn main() {
                 // LOD1 (simplified): 600-1200+ units, fade in 600-700
                 // Extended LOD0 range for higher visual quality at distance
                 // Performance impact: ~50% more high-poly trees in typical view
+                // LOD1 max should be tied to render distance, not infinitely far
+                // Beyond dither fade, nothing should render
                 let lod_config = TreeLODConfig {
                     lod0_fade_start: 600.0,  // was 400 - extended high detail range
                     lod0_fade_end: 700.0,    // was 500 - keeps 100 unit transition zone
-                    lod1_max_distance: (state.render_distance * 2.5).max(1200.0),
+                    lod1_max_distance: state.render_distance * 1.8, // Strict cutoff - saves FPS
                 };
 
                 for (_coord, chunk) in manager.iter_chunks() {
@@ -5681,6 +5708,7 @@ fn main() {
                                     0.5, 1.0, // alpha_cutoff, use_texture
                                 );
                             }
+                            trees_lod1_rendered += 1;
                             trees_lod1.render(&mut render_pass);
                         }
                     }
@@ -5716,9 +5744,11 @@ fn main() {
                     let boulder_lod1_end = 800.0;
                     let boulder_lod1_fade_start = 750.0;
 
+                    // Cap boulder rendering at reasonable distance for FPS
+                    let boulder_max_distance = state.render_distance * 1.5;
                     let in_boulder_lod0 = dist <= boulder_lod0_end;
                     let in_boulder_lod1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod1_end;
-                    let in_boulder_lod2 = dist >= boulder_lod1_fade_start && dist <= lod_config.lod1_max_distance;
+                    let in_boulder_lod2 = dist >= boulder_lod1_fade_start && dist <= boulder_max_distance;
                     let boulder_transition_0_1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod0_end;
                     let boulder_transition_1_2 = dist >= boulder_lod1_fade_start && dist <= boulder_lod1_end;
 
@@ -5865,6 +5895,7 @@ fn main() {
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
+                            shrubs_rendered += shrub.instance_count() as usize;
                             shrub.render(&mut render_pass);
                         }
                     }
@@ -5877,6 +5908,7 @@ fn main() {
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
+                            shrubs_rendered += shrub.instance_count() as usize;
                             shrub.render(&mut render_pass);
                         }
                     }
@@ -5889,6 +5921,7 @@ fn main() {
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
+                            shrubs_rendered += shrub.instance_count() as usize;
                             shrub.render(&mut render_pass);
                         }
                     }
@@ -5896,6 +5929,7 @@ fn main() {
                     // Ferns (forest understory - same max distance as LOD1 trees)
                     for fern in &chunk.ferns {
                         if dist <= lod_config.lod1_max_distance {
+                            ferns_rendered += fern.instance_count() as usize;
                             fern.render(&mut render_pass);
                         }
                     }
@@ -5968,11 +6002,13 @@ fn main() {
                 unsafe {
                     FRAME_COUNTER += 1;
                     if FRAME_COUNTER % 300 == 1 {
-                        println!("[RENDER STATS] terrain={}, grass={}, trees={}, rocks={}, buildings={}",
-                            terrain_rendered, grass_rendered, trees_rendered, rocks_rendered, buildings_rendered);
+                        println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}",
+                            terrain_rendered, grass_rendered, trees_rendered, trees_lod1_rendered,
+                            shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered);
                     }
                 }
-                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, rocks_rendered, buildings_rendered);
+                let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, trees_lod1_rendered,
+                         rocks_rendered, boulders_rendered, shrubs_rendered, ferns_rendered, dead_logs_rendered, buildings_rendered);
             } // End Main Pass
 
             // 2.5 Light Shaft Post-Process Pass
@@ -6066,44 +6102,40 @@ fn main() {
                 }
             }
 
-            // 3. Viewmodel Pass (First-person arms and weapon) - only in playing mode
-            if state.game_state == GameState::Playing {
-                let viewmodel_pipeline = viewmodel_pipeline_mutex.safe_lock();
-
-                // Update viewmodel uniforms with camera rotation and swing animation
-                viewmodel_pipeline.update_uniforms(
-                    ctx.queue(),
-                    state.camera.yaw,
-                    state.camera.pitch,
-                    state.camera.aspect_ratio,
-                    state.swing_animation.swing_progress,
-                );
-
-                // Render viewmodel on top of world but below UI
-                let mut viewmodel_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Viewmodel Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load, // Load existing pixels (world scene)
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: ctx.depth_view(),
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0), // Clear to far plane (1.0) so viewmodel is always closest
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                viewmodel_pipeline.render(&mut viewmodel_pass);
-            } // End Viewmodel Pass
+            // 3. Viewmodel Pass (First-person arms and weapon) - DISABLED (block arms)
+            // TODO: Replace with proper first-person arm model
+            // if state.game_state == GameState::Playing {
+            //     let viewmodel_pipeline = viewmodel_pipeline_mutex.safe_lock();
+            //     viewmodel_pipeline.update_uniforms(
+            //         ctx.queue(),
+            //         state.camera.yaw,
+            //         state.camera.pitch,
+            //         state.camera.aspect_ratio,
+            //         state.swing_animation.swing_progress,
+            //     );
+            //     let mut viewmodel_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            //         label: Some("Viewmodel Pass"),
+            //         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            //             view: &view,
+            //             resolve_target: None,
+            //             ops: wgpu::Operations {
+            //                 load: wgpu::LoadOp::Load,
+            //                 store: wgpu::StoreOp::Store,
+            //             },
+            //         })],
+            //         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            //             view: ctx.depth_view(),
+            //             depth_ops: Some(wgpu::Operations {
+            //                 load: wgpu::LoadOp::Clear(1.0),
+            //                 store: wgpu::StoreOp::Store,
+            //             }),
+            //             stencil_ops: None,
+            //         }),
+            //         timestamp_writes: None,
+            //         occlusion_query_set: None,
+            //     });
+            //     viewmodel_pipeline.render(&mut viewmodel_pass);
+            // }
 
             // 4. Egui Pass
             {

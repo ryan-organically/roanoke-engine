@@ -185,6 +185,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sun_elevation = -light_dir.y;
 
     // Day factor: 0 = night, 1 = full day
+    // Now correctly receives sun_dir (not moon_dir) so this works properly
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
 
     // Night lighting from moon - subtle, not washing out colors
@@ -226,9 +227,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Apply lighting (reduced multiplier for darker grass)
-    let diffuse_contribution = sun_color * n_dot_l * 1.2 * shadow;
+    // Scale diffuse by day_factor to prevent bright grass at night when sun is below horizon
+    let diffuse_contribution = sun_color * n_dot_l * 1.2 * shadow * day_factor;
     let lighting = ambient_color + diffuse_contribution;
-    var final_color = in.color * lighting;
+
+    // At night, desaturate and darken the grass color to prevent neon glow
+    // day_factor: 0 = night, 1 = day
+    let grass_color = in.color;
+    let grass_luminance = dot(grass_color, vec3<f32>(0.299, 0.587, 0.114));
+    let desaturated_grass = vec3<f32>(grass_luminance);
+    // At night: mostly desaturated and darker, during day: full color
+    let night_grass = desaturated_grass * 0.3; // Very dark gray at night
+    let adjusted_grass = mix(night_grass, grass_color, day_factor);
+
+    var final_color = clamp(adjusted_grass * lighting, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Night brightness is now handled correctly via day_factor
+    // (Fixed in main.rs by passing sun_dir instead of light_dir/moon_dir)
 
     // Apply distance fog
     let dist_to_camera = distance(in.world_position, camera.view_pos);

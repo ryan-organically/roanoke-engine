@@ -14,7 +14,24 @@ glam = { version = "0.25", features = ["serde"] }  # SIMD Math with serializatio
 noise = "0.9"        # Base noise library
 bytemuck = { version = "1.14", features = ["derive"] }
 
+# Fast dev builds - use for iteration
+[profile.dev]
+opt-level = 1          # Some optimization, still fast compile
+incremental = true
+
+# Dev with optimized deps (fast compile, fast runtime)
+[profile.dev.package."*"]
+opt-level = 2
+
+# Release builds - balanced speed vs compile time
 [profile.release]
 opt-level = 3
+lto = false            # Disable LTO for faster compile (was "thin")
+codegen-units = 16     # Parallel codegen (was 1)
+incremental = true
+
+# Max performance release (use --profile release-max)
+[profile.release-max]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
