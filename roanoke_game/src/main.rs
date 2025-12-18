@@ -353,11 +353,14 @@ struct SharedState {
     mouse_sensitivity: f32,
     movement_speed: f32,
     render_distance: f32,
+    dither_distance_ratio: f32,  // 0.5-1.0, controls when LOD dither begins (relative to render_distance)
+    dither_fade_width: f32,      // Width of dither transition zone in units
     master_volume: f32,
     // Swing Animation
     swing_animation: SwingAnimation,
     atmosphere: AtmosphereEngine,
     show_load_menu: bool, // For Load Game submenu
+    show_debug_ui: bool,  // F12 toggle for performance stats
     // Animal System
     animal_manager: AnimalManager,
     animal_spawner: AnimalSpawner,
@@ -879,6 +882,156 @@ fn render_character_sheet(ui_ctx: &egui::Context, state: &mut SharedState) {
         });
 }
 
+// --- Journal Settings UI (renders inside journal book when Settings tab active) ---
+
+fn render_journal_settings(ui_ctx: &egui::Context, state: &mut SharedState) {
+    let screen_rect = ui_ctx.screen_rect();
+    let screen_width = screen_rect.width();
+    let screen_height = screen_rect.height();
+
+    // Match journal layout dimensions exactly
+    let journal_width = (screen_width * 0.75).min(1000.0);
+    let journal_height = (screen_height * 0.80).min(700.0);
+    // Use screen_rect min position for proper centering
+    let journal_left = screen_rect.min.x + (screen_width - journal_width) / 2.0;
+    let journal_top = screen_rect.min.y + (screen_height - journal_height) / 2.0;
+
+    // Left navigation tab width
+    let tab_width = 140.0;
+    let content_width = journal_width - tab_width;
+    let margin = 20.0;
+
+    // Content positioning (matches journal render)
+    let content_top = journal_top + 90.0; // Below header and tabs
+    let content_height = journal_height - 110.0;
+    let half_width = (content_width - margin * 3.0) / 2.0;
+
+    // Three columns for settings: Game, Audio, Developer
+    let col_width = (content_width - margin * 4.0) / 3.0;
+    let col1_x = journal_left + tab_width + margin;
+    let col2_x = col1_x + col_width + margin;
+    let col3_x = col2_x + col_width + margin;
+
+    let ink_color = egui::Color32::from_rgb(40, 30, 20);
+    let slider_width = col_width - 20.0;
+
+    // Column 1: Game Settings
+    egui::Area::new(egui::Id::new("settings_game"))
+        .fixed_pos(egui::pos2(col1_x, content_top))
+        .order(egui::Order::Foreground)
+        .show(ui_ctx, |ui| {
+            ui.set_max_width(col_width);
+
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("GAME").size(14.0).color(ink_color).strong());
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Mouse Sensitivity").size(11.0).color(ink_color));
+                ui.add(egui::Slider::new(&mut state.mouse_sensitivity, 1.0..=100.0)
+                    .custom_formatter(|n, _| format!("{:.0}", n)));
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new("Movement Speed").size(11.0).color(ink_color));
+                ui.add(egui::Slider::new(&mut state.movement_speed, 1.0..=1000.0)
+                    .logarithmic(true)
+                    .custom_formatter(|n, _| format!("{:.0}x", n / 10.0)));
+                state.player.speed = state.movement_speed;
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new("Render Distance").size(11.0).color(ink_color));
+                ui.add(egui::Slider::new(&mut state.render_distance, 150.0..=600.0)
+                    .custom_formatter(|n, _| format!("{:.0}m", n)));
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new("Dither Distance").size(11.0).color(ink_color));
+                let effective_dist = state.render_distance * state.dither_distance_ratio;
+                ui.add(egui::Slider::new(&mut state.dither_distance_ratio, 0.5..=1.0)
+                    .custom_formatter(move |n, _| format!("{:.0}%", n * 100.0)));
+                ui.label(egui::RichText::new(format!("Effective: {:.0}m", effective_dist))
+                    .size(9.0).color(egui::Color32::DARK_GRAY));
+            });
+        });
+
+    // Column 2: Audio Settings
+    egui::Area::new(egui::Id::new("settings_audio"))
+        .fixed_pos(egui::pos2(col2_x, content_top))
+        .order(egui::Order::Foreground)
+        .show(ui_ctx, |ui| {
+            ui.set_max_width(col_width);
+
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("AUDIO").size(14.0).color(ink_color).strong());
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Master Volume").size(11.0).color(ink_color));
+                ui.add(egui::Slider::new(&mut state.master_volume, 0.0..=100.0)
+                    .custom_formatter(|n, _| format!("{:.0}", n)));
+                state.audio_system.set_master_volume(state.master_volume / 100.0);
+                ui.add_space(8.0);
+
+                let mut music_vol = state.audio_system.music_volume * 100.0;
+                ui.label(egui::RichText::new("Music Volume").size(11.0).color(ink_color));
+                if ui.add(egui::Slider::new(&mut music_vol, 0.0..=100.0)
+                    .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                    state.audio_system.set_music_volume(music_vol / 100.0);
+                }
+                ui.add_space(8.0);
+
+                let mut amb_vol = state.audio_system.ambience_volume * 100.0;
+                ui.label(egui::RichText::new("Ambience Volume").size(11.0).color(ink_color));
+                if ui.add(egui::Slider::new(&mut amb_vol, 0.0..=100.0)
+                    .custom_formatter(|n, _| format!("{:.0}", n))).changed() {
+                    state.audio_system.set_ambience_volume(amb_vol / 100.0);
+                }
+            });
+        });
+
+    // Column 3: Developer Settings
+    egui::Area::new(egui::Id::new("settings_developer"))
+        .fixed_pos(egui::pos2(col3_x, content_top))
+        .order(egui::Order::Foreground)
+        .show(ui_ctx, |ui| {
+            ui.set_max_width(col_width);
+
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("DEVELOPER").size(14.0).color(ink_color).strong());
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Time of Day").size(11.0).color(ink_color));
+                ui.add(egui::Slider::new(&mut state.time_of_day, 0.0..=24.0)
+                    .custom_formatter(|n, _| {
+                        let h = n as i32;
+                        let m = ((n - h as f64) * 60.0) as i32;
+                        format!("{:02}:{:02}", h % 24, m)
+                    }));
+                ui.add_space(12.0);
+
+                ui.label(egui::RichText::new("Weather").size(11.0).color(ink_color));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button("Clear").clicked() {
+                        state.weather.set_weather(WeatherType::Clear, false);
+                    }
+                    if ui.small_button("Cloudy").clicked() {
+                        state.weather.set_weather(WeatherType::PartlyCloudy, false);
+                    }
+                    if ui.small_button("Overcast").clicked() {
+                        state.weather.set_weather(WeatherType::Overcast, false);
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button("Stormy").clicked() {
+                        state.weather.set_weather(WeatherType::Stormy, false);
+                    }
+                    if ui.small_button("Foggy").clicked() {
+                        state.weather.set_weather(WeatherType::Foggy, false);
+                    }
+                });
+                ui.add_space(8.0);
+                ui.checkbox(&mut state.weather.auto_weather_enabled, "Auto Weather");
+            });
+        });
+}
+
 fn render_inventory_tab(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1249,6 +1402,8 @@ fn main() {
         mouse_sensitivity: 50.0, // 0-100 scale, 50 = default
         movement_speed: 10.0,
         render_distance: 400.0, // Extended for long-distance fidelity testing
+        dither_distance_ratio: 0.85, // 85% of render distance before dithering begins
+        dither_fade_width: 100.0,    // 100 unit transition zone for smooth dithering
         master_volume: 80.0, // 0-100 scale, 80 = default
         swing_animation: SwingAnimation {
             is_swinging: false,
@@ -1258,6 +1413,7 @@ fn main() {
         },
         atmosphere: AtmosphereEngine::new(),
         show_load_menu: false,
+        show_debug_ui: false,  // Hidden by default, F12 to toggle
         // Animal System
         animal_manager: AnimalManager::new(Difficulty::Normal),
         animal_spawner: AnimalSpawner::new(12345), // Will be re-seeded when game starts
@@ -1322,115 +1478,142 @@ fn main() {
     let (request_tx, request_rx): (Sender<ChunkRequest>, Receiver<ChunkRequest>) = channel();
     // Channel for receiving generated chunks
     let (chunk_tx, chunk_rx): (Sender<ChunkData>, Receiver<ChunkData>) = channel();
-    
+
     let chunk_rx = Arc::new(Mutex::new(chunk_rx));
 
-    // Spawn Persistent Generation Thread
-    thread::spawn(move || {
-        println!("[GEN] Generation thread started.");
-        while let Ok(req) = request_rx.recv() {
-            println!("[GEN] Received request for chunk ({}, {})", req.coord.x, req.coord.z);
-            let chunk_world_size = 256.0;
-            let chunk_resolution = 64;
-            let scale = 4.0;
-            let (offset_x, offset_z) = req.coord.world_offset(chunk_world_size);
-            let offset_x = offset_x as i32;
-            let offset_z = offset_z as i32;
+    // Wrap request receiver in Arc<Mutex<>> for multi-threaded access
+    let request_rx = Arc::new(Mutex::new(request_rx));
 
-            // Generate terrain
-            println!("[GEN] Generating terrain...");
-            let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
-                generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
+    // Spawn Multiple Chunk Generation Worker Threads
+    // Using 6 workers for better parallel chunk generation at high speeds
+    let num_workers = 6;
+    println!("[GEN] Spawning {} chunk generation workers...", num_workers);
 
-            // Generate grass
-            let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-            );
+    for worker_id in 0..num_workers {
+        let request_rx = Arc::clone(&request_rx);
+        let chunk_tx = chunk_tx.clone();
 
-            // Generate trees (with birch/pine communities via foliage system)
-            let foliage = generate_foliage_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-                4, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0
-                2, // shrub model count: beach_grass_0, conifer_shrub_0
-            );
-            let tree_groups = foliage.trees_by_model(4);
-            let shrub_groups = foliage.shrubs_by_model(2);
+        thread::spawn(move || {
+            println!("[GEN-{}] Worker thread started.", worker_id);
+            loop {
+                // Try to get a request from the shared queue
+                let req = {
+                    let rx = request_rx.lock().unwrap();
+                    rx.recv()
+                };
 
-            // Generate detritus
-            let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-            );
+                let req = match req {
+                    Ok(r) => r,
+                    Err(_) => {
+                        println!("[GEN-{}] Channel closed, stopping worker.", worker_id);
+                        break;
+                    }
+                };
 
-            // Generate rocks (excluding corn field areas)
-            let mut rock_instances = generate_rocks_for_chunk_with_exclusions(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-                &req.corn_field_exclusions,
-            );
+                println!("[GEN-{}] Processing chunk ({}, {})", worker_id, req.coord.x, req.coord.z);
+                let chunk_world_size = 256.0;
+                let chunk_resolution = 64;
+                let scale = 4.0;
+                let (offset_x, offset_z) = req.coord.world_offset(chunk_world_size);
+                let offset_x = offset_x as i32;
+                let offset_z = offset_z as i32;
 
-            // Generate deadwood (fallen logs) and merge with rock instances
-            let deadwood_instances = generate_deadwood_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-            );
-            rock_instances.extend(deadwood_instances);
+                // Generate terrain
+                let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
+                    generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
 
-            // Generate buildings
-            let building_instances = generate_buildings_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-            );
+                // Generate grass
+                let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                );
 
-            // Generate ferns (forest understory)
-            let fern_result = generate_ferns_for_chunk(
-                req.seed,
-                chunk_world_size,
-                offset_x as f32,
-                offset_z as f32,
-                1, // Currently 1 fern model variant (fern_01)
-            );
-            // Convert to named instances
-            let fern_instances: Vec<(String, Mat4)> = fern_result.by_model(1)
-                .into_iter()
-                .flat_map(|(name, transforms)| {
-                    transforms.into_iter().map(move |t| (name.clone(), t))
-                })
-                .collect();
+                // Generate trees (with birch/pine communities via foliage system)
+                let foliage = generate_foliage_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                    4, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0
+                    2, // shrub model count: beach_grass_0, conifer_shrub_0
+                );
+                let tree_groups = foliage.trees_by_model(4);
+                let shrub_groups = foliage.shrubs_by_model(2);
 
-            // Send result
-            println!("[GEN] Chunk ({}, {}) generated, sending to main thread...", req.coord.x, req.coord.z);
-            if chunk_tx.send((
-                terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                grass_pos, grass_col, grass_heights, grass_idx,
-                tree_groups,
-                shrub_groups,
-                det_pos, det_nrm, det_uv, det_idx,
-                rock_instances,
-                building_instances,
-                fern_instances,
-                offset_x, offset_z
-            )).is_err() {
-                println!("[GEN] Receiver dropped, stopping thread.");
-                break;
+                // Generate detritus
+                let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                );
+
+                // Generate rocks (excluding corn field areas)
+                let mut rock_instances = generate_rocks_for_chunk_with_exclusions(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                    &req.corn_field_exclusions,
+                );
+
+                // Generate deadwood (fallen logs) and merge with rock instances
+                let deadwood_instances = generate_deadwood_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                );
+                rock_instances.extend(deadwood_instances);
+
+                // Generate buildings
+                let building_instances = generate_buildings_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                );
+
+                // Generate ferns (forest understory)
+                let fern_result = generate_ferns_for_chunk(
+                    req.seed,
+                    chunk_world_size,
+                    offset_x as f32,
+                    offset_z as f32,
+                    1, // Currently 1 fern model variant (fern_01)
+                );
+                // Convert to named instances
+                let fern_instances: Vec<(String, Mat4)> = fern_result.by_model(1)
+                    .into_iter()
+                    .flat_map(|(name, transforms)| {
+                        transforms.into_iter().map(move |t| (name.clone(), t))
+                    })
+                    .collect();
+
+                // Send result
+                if chunk_tx.send((
+                    terrain_pos, terrain_col, terrain_nrm, terrain_idx,
+                    grass_pos, grass_col, grass_heights, grass_idx,
+                    tree_groups,
+                    shrub_groups,
+                    det_pos, det_nrm, det_uv, det_idx,
+                    rock_instances,
+                    building_instances,
+                    fern_instances,
+                    offset_x, offset_z
+                )).is_err() {
+                    println!("[GEN-{}] Receiver dropped, stopping worker.", worker_id);
+                    break;
+                }
+                println!("[GEN-{}] Chunk ({}, {}) complete!", worker_id, req.coord.x, req.coord.z);
             }
-            println!("[GEN] Chunk ({}, {}) sent successfully!", req.coord.x, req.coord.z);
-        }
-    });
+        });
+    }
+
+    // Drop original chunk_tx so channel closes when all workers finish
+    drop(chunk_tx);
 
     // Terrain Data (Protected by Mutex to allow regeneration)
     let _terrain_data = Arc::new(Mutex::new(None::<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>)>));
@@ -1462,36 +1645,20 @@ fn main() {
         }
 
         // Handle Tab key BEFORE egui (so it doesn't consume it for focus navigation)
+        // Tab now opens the unified journal menu as an overlay (game continues rendering behind)
         if let Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } = event {
             if let PhysicalKey::Code(KeyCode::Tab) = key_event.physical_key {
                 if key_event.state == ElementState::Pressed {
-                    if state.game_state == GameState::Playing {
-                        state.game_state = GameState::Paused;
-                        state.pause_menu_page = PauseMenuPage::CharacterSheet;
-                        state.character_sheet_tab = CharacterSheetTab::Inventory;
-                        println!("[MENU] Character sheet opened");
-                        return; // Don't pass Tab to egui or other handlers
-                    } else if state.game_state == GameState::Paused && state.pause_menu_page == PauseMenuPage::CharacterSheet {
-                        state.game_state = GameState::Playing;
-                        println!("[MENU] Character sheet closed");
-                        return; // Don't pass Tab to egui or other handlers
-                    }
+                    // Toggle journal overlay (stays in Playing state)
+                    state.perks_journal.is_open = !state.perks_journal.is_open;
+                    return; // Don't pass Tab to egui or other handlers
                 }
             }
-            // Handle J key for Perks Journal
+            // J key also toggles journal (alternative binding)
             if let PhysicalKey::Code(KeyCode::KeyJ) = key_event.physical_key {
-                if key_event.state == ElementState::Pressed {
-                    if state.game_state == GameState::Playing && !state.perks_journal.is_open {
-                        state.perks_journal.is_open = true;
-                        state.game_state = GameState::Paused;
-                        println!("[MENU] Perks journal opened");
-                        return;
-                    } else if state.perks_journal.is_open {
-                        state.perks_journal.is_open = false;
-                        state.game_state = GameState::Playing;
-                        println!("[MENU] Perks journal closed");
-                        return;
-                    }
+                if key_event.state == ElementState::Pressed && state.game_state == GameState::Playing {
+                    state.perks_journal.is_open = !state.perks_journal.is_open;
+                    return;
                 }
             }
         }
@@ -1506,15 +1673,18 @@ fn main() {
             }
         }
 
-        // Handle Game Input (only if Playing, not during Loading)
+        // Handle Game Input (only if Playing, not during Loading, and journal not open)
         if state.game_state == GameState::Playing {
             match event {
                 Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                    // Mouse Look - convert 0-100 scale to actual sensitivity (50 = 0.002)
-                    let sensitivity = state.mouse_sensitivity / 25000.0;
-                    state.player.yaw += delta.0 as f32 * sensitivity;
-                    state.player.pitch -= delta.1 as f32 * sensitivity;
-                    state.player.pitch = state.player.pitch.clamp(-1.5, 1.5);
+                    // Skip mouse look when journal is open
+                    if !state.perks_journal.is_open {
+                        // Mouse Look - convert 0-100 scale to actual sensitivity (50 = 0.002)
+                        let sensitivity = state.mouse_sensitivity / 25000.0;
+                        state.player.yaw += delta.0 as f32 * sensitivity;
+                        state.player.pitch -= delta.1 as f32 * sensitivity;
+                        state.player.pitch = state.player.pitch.clamp(-1.5, 1.5);
+                    }
                 }
                 Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
                     // Left mouse click triggers swing animation
@@ -1834,6 +2004,10 @@ fn main() {
                                 KeyCode::Digit8 => state.active_hotbar_slot = 7,
                                 KeyCode::Digit9 => state.active_hotbar_slot = 8,
                                 KeyCode::Digit0 => state.active_hotbar_slot = 9,
+                                // F12 = Toggle debug/performance UI
+                                KeyCode::F12 => {
+                                    state.show_debug_ui = !state.show_debug_ui;
+                                }
                                 _ => {}
                             }
                         }
@@ -2201,6 +2375,7 @@ fn main() {
                 }
 
                 // Load LOD2 meshes for very distant tree rendering
+                // Separate bark (OPAQUE) and leaves (BLEND) like LOD0/LOD1 for proper texturing
                 let lod2_tree_models = [
                     // ("tree_0_lod2", "tree_0"), // DISABLED
                     // ("tree_1_lod2", "tree_1"), // DISABLED
@@ -2213,40 +2388,79 @@ fn main() {
 
                 for (_i, (lod2_name, base_name)) in lod2_tree_models.iter().enumerate() {
                     if let Some(model) = lod2_cache.load(lod2_name) {
-                        let mut positions: Vec<[f32; 3]> = Vec::new();
-                        let mut normals: Vec<[f32; 3]> = Vec::new();
-                        let mut uvs: Vec<[f32; 2]> = Vec::new();
-                        let mut indices: Vec<u32> = Vec::new();
-                        let mut texture_bind_group = None;
+                        // Separate meshes into bark (OPAQUE) and leaves (BLEND) like LOD0/LOD1
+                        let mut bark_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut bark_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut bark_indices: Vec<u32> = Vec::new();
+                        let mut bark_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        let mut leaf_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut leaf_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut leaf_indices: Vec<u32> = Vec::new();
+                        let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
 
                         for mesh in &model.meshes {
-                            let base_idx = positions.len() as u32;
-                            positions.extend_from_slice(&mesh.positions);
-                            normals.extend_from_slice(&mesh.normals);
-                            uvs.extend_from_slice(&mesh.uvs);
-                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
-
-                            if texture_bind_group.is_none() {
-                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
-                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                        ctx.device(), ctx.queue(), tex_data,
-                                        Some(&format!("{}_lod2_texture", base_name)),
-                                    );
-                                    texture_bind_group = Some(std::sync::Arc::new(
-                                        texture_helper.create_texture_bind_group(
-                                            ctx.device(), &tex_view, Some(&format!("{}_lod2_bind", base_name)),
-                                        )
-                                    ));
+                            let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
+                            if is_leaves {
+                                let base_idx = leaf_positions.len() as u32;
+                                leaf_positions.extend_from_slice(&mesh.positions);
+                                leaf_normals.extend_from_slice(&mesh.normals);
+                                leaf_uvs.extend_from_slice(&mesh.uvs);
+                                leaf_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if leaf_texture.is_none() {
+                                    leaf_texture = mesh.material.base_color_texture_data.as_ref();
+                                }
+                            } else {
+                                let base_idx = bark_positions.len() as u32;
+                                bark_positions.extend_from_slice(&mesh.positions);
+                                bark_normals.extend_from_slice(&mesh.normals);
+                                bark_uvs.extend_from_slice(&mesh.uvs);
+                                bark_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                                if bark_texture.is_none() {
+                                    bark_texture = mesh.material.base_color_texture_data.as_ref();
                                 }
                             }
                         }
 
-                        let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
-                        );
-                        state.mesh_registry.insert(lod2_name.to_string(), gpu_mesh);
-                        println!("[LOD2] Loaded '{}' from GLB: {} verts, {} tris",
-                            lod2_name, positions.len(), indices.len() / 3);
+                        // Create bark mesh with texture
+                        if !bark_positions.is_empty() {
+                            let bark_bind_group = bark_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_lod2_bark_texture", base_name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_lod2_bark_bind", base_name)),
+                                ))
+                            });
+                            let bark_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices, bark_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_lod2_bark", base_name), bark_mesh);
+                            println!("[LOD2] Loaded '{}_bark' from GLB: {} verts, {} tris",
+                                lod2_name, bark_positions.len(), bark_indices.len() / 3);
+                        }
+
+                        // Create leaves mesh with texture
+                        if !leaf_positions.is_empty() {
+                            let leaf_bind_group = leaf_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_lod2_leaves_texture", base_name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_lod2_leaves_bind", base_name)),
+                                ))
+                            });
+                            let leaf_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices, leaf_bind_group,
+                            );
+                            state.mesh_registry.insert(format!("{}_lod2_leaves", base_name), leaf_mesh);
+                            println!("[LOD2] Loaded '{}_leaves' from GLB: {} verts, {} tris",
+                                lod2_name, leaf_positions.len(), leaf_indices.len() / 3);
+                        }
                     }
                 }
 
@@ -2962,7 +3176,8 @@ fn main() {
             }
 
             // Update Atmosphere (fog, light shafts based on time/weather)
-            // Pass render_distance so fog_end is scaled to hide object pop-in
+            // Pass max_visible_distance so fog_end hides object pop-in at LOD boundaries
+            // Trees render at 3.5x render_distance with LOD system, so fog must extend there
             let weather_fog = match state.weather.current_weather {
                 WeatherType::Foggy => 0.8,
                 WeatherType::Overcast => 0.3,
@@ -2971,8 +3186,8 @@ fn main() {
             };
             let time_of_day = state.time_of_day;
             let cloud_coverage = state.weather.cloud_coverage;
-            let render_dist = state.render_distance;
-            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, render_dist);
+            let max_visible_dist = state.render_distance * state.dither_distance_ratio * 4.0; // Match LOD2 max distance (pushed back)
+            state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, max_visible_dist);
 
             // Override fog density based on manual fog_level (\ key)
             // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
@@ -3576,16 +3791,23 @@ fn main() {
             style.visuals.window_shadow = egui::epaint::Shadow::NONE;
             ui_ctx.set_style(style);
 
-            // Sync Cursor State with Game State
+            // Sync Cursor State with Game State (show cursor when journal is open)
+            let journal_open = state.perks_journal.is_open;
             match state.game_state {
                 GameState::Menu | GameState::Loading | GameState::Paused => {
                     ctx.window.set_cursor_visible(true);
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
                 GameState::Playing => {
-                    // Lock cursor to window and hide it during gameplay
-                    ctx.window.set_cursor_visible(false);
-                    let _ = ctx.window.set_cursor_grab(CursorGrabMode::Confined);
+                    if journal_open {
+                        // Show cursor when journal overlay is open
+                        ctx.window.set_cursor_visible(true);
+                        let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
+                    } else {
+                        // Lock cursor to window and hide it during gameplay
+                        ctx.window.set_cursor_visible(false);
+                        let _ = ctx.window.set_cursor_grab(CursorGrabMode::Confined);
+                    }
                 }
             }
 
@@ -4303,79 +4525,97 @@ fn main() {
                             });
                     }
 
-                    // === Debug window (existing) ===
-                    egui::Window::new("Game Menu").show(ui_ctx, |ui| {
-                        ui.label(format!("FPS: {:.1}", state.fps));
-                        let hours = state.time_of_day as u32;
-                        let minutes = ((state.time_of_day - hours as f32) * 60.0) as u32;
-                        ui.label(format!("Time: {:02}:{:02}", hours, minutes));
-                        ui.label("T/Y keys: Change time");
-                        ui.separator();
+                    // === Debug window (F12 to toggle) ===
+                    if state.show_debug_ui {
+                        egui::Window::new("Debug").show(ui_ctx, |ui| {
+                            ui.label(format!("FPS: {:.1}", state.fps));
+                            let hours = state.time_of_day as u32;
+                            let minutes = ((state.time_of_day - hours as f32) * 60.0) as u32;
+                            ui.label(format!("Time: {:02}:{:02}", hours, minutes));
+                            ui.label("T/Y keys: Change time");
+                            ui.separator();
 
-                        // Dev Stats - Weather/Fog/Render
-                        ui.collapsing("Dev Stats", |ui| {
-                            ui.label(format!("Weather: {:?}", state.weather.current_weather));
-                            ui.label(format!("Render Dist: {:.0}", state.render_distance));
-                            let fog = state.atmosphere.fog_params();
-                            ui.label(format!("FOG: density={:.2} start={:.0} end={:.0}", fog[0], fog[1], fog[2]));
-                            let fog_color = state.atmosphere.fog_color();
-                            ui.label(format!("FOG COLOR: ({:.2}, {:.2}, {:.2})", fog_color[0], fog_color[1], fog_color[2]));
-                            if let Some(manager) = CHUNK_MANAGER.get() {
-                                if let Ok(mgr) = manager.lock() {
-                                    let (loaded, loading) = mgr.get_stats();
-                                    ui.label(format!("Chunks: {} loaded, {} loading", loaded, loading));
-                                    ui.label(format!("Load radius: {}", mgr.load_radius));
+                            // Dev Stats - Weather/Fog/Render
+                            ui.collapsing("Dev Stats", |ui| {
+                                ui.label(format!("Weather: {:?}", state.weather.current_weather));
+                                ui.label(format!("Render Dist: {:.0}", state.render_distance));
+                                let fog = state.atmosphere.fog_params();
+                                ui.label(format!("FOG: density={:.2} start={:.0} end={:.0}", fog[0], fog[1], fog[2]));
+                                let fog_color = state.atmosphere.fog_color();
+                                ui.label(format!("FOG COLOR: ({:.2}, {:.2}, {:.2})", fog_color[0], fog_color[1], fog_color[2]));
+                                if let Some(manager) = CHUNK_MANAGER.get() {
+                                    if let Ok(mgr) = manager.lock() {
+                                        let (loaded, loading) = mgr.get_stats();
+                                        ui.label(format!("Chunks: {} loaded, {} loading", loaded, loading));
+                                        ui.label(format!("Load radius: {}", mgr.load_radius));
+                                    }
                                 }
-                            }
-                            // Village System Debug
-                            ui.separator();
-                            ui.label(format!("VILLAGES: {}", state.village_manager.stats_string()));
-                            // Show nearest village
-                            for village in &state.village_manager.villages {
-                                let dist = ((village.center.x - state.player.position.x).powi(2)
-                                          + (village.center.z - state.player.position.z).powi(2)).sqrt();
-                                ui.label(format!("  {} @ {:.0}m ({} longhouses)",
-                                    village.layout.name, dist, village.layout.longhouses.len()));
-                            }
-                            // Animal System Debug
-                            ui.separator();
-                            ui.label(state.animal_manager.debug_info());
-                            // List nearby animals
-                            let nearby = state.animal_manager.animals_near(state.player.position, 50.0);
-                            if !nearby.is_empty() {
-                                ui.label(format!("Nearby (50m): {}", nearby.len()));
-                                for animal in nearby.iter().take(5) {
-                                    let dist = animal.position.distance(state.player.position);
-                                    ui.label(format!("  {} @ {:.0}m - {:?}",
-                                        animal.species.name(), dist, animal.behavior_state));
+                                // Village System Debug
+                                ui.separator();
+                                ui.label(format!("VILLAGES: {}", state.village_manager.stats_string()));
+                                // Show nearest village
+                                for village in &state.village_manager.villages {
+                                    let dist = ((village.center.x - state.player.position.x).powi(2)
+                                              + (village.center.z - state.player.position.z).powi(2)).sqrt();
+                                    ui.label(format!("  {} @ {:.0}m ({} longhouses)",
+                                        village.layout.name, dist, village.layout.longhouses.len()));
                                 }
+                                // Animal System Debug
+                                ui.separator();
+                                ui.label(state.animal_manager.debug_info());
+                                // List nearby animals
+                                let nearby = state.animal_manager.animals_near(state.player.position, 50.0);
+                                if !nearby.is_empty() {
+                                    ui.label(format!("Nearby (50m): {}", nearby.len()));
+                                    for animal in nearby.iter().take(5) {
+                                        let dist = animal.position.distance(state.player.position);
+                                        ui.label(format!("  {} @ {:.0}m - {:?}",
+                                            animal.species.name(), dist, animal.behavior_state));
+                                    }
+                                }
+                            });
+                            ui.separator();
+
+                            ui.label("Save Name:");
+                            ui.text_edit_singleline(&mut state.save_name_input);
+
+                            if ui.button("Save Game").clicked() {
+                                let data = SaveData {
+            seed: state.seed,
+            player_pos: state.player.position.to_array(),
+            player_rot: [state.player.yaw, state.player.pitch],
+            inventory: state.inventory.clone(),
+        };
+                                save_game(&state.save_name_input, &data);
                             }
+                            if ui.button("Back to Menu").clicked() {
+                                state.game_state = GameState::Menu;
+                            }
+                            ui.label(format!("Camera: {:.1?}", state.camera.position));
                         });
-                        ui.separator();
+                    }
 
-                        ui.label("Save Name:");
-                        ui.text_edit_singleline(&mut state.save_name_input);
-
-                        if ui.button("Save Game").clicked() {
-                            let data = SaveData {
-        seed: state.seed,
-        player_pos: state.player.position.to_array(),
-        player_rot: [state.player.yaw, state.player.pitch],
-        inventory: state.inventory.clone(),
-    };
-                            save_game(&state.save_name_input, &data);
-                        }
-                        if ui.button("Back to Menu").clicked() {
-                            state.game_state = GameState::Menu;
-                        }
-                        ui.label(format!("Camera: {:.1?}", state.camera.position));
-                    });
-                }
-                GameState::Paused => {
-                    // Perks Journal (takes priority when open)
+                    // === Journal Overlay (Tab to toggle) ===
                     if state.perks_journal.is_open {
                         let SharedState { perks_journal, journal_textures, .. } = &mut *state;
                         ui::render_perks_journal(ui_ctx, perks_journal, journal_textures);
+
+                        // Render settings content when Settings tab is active
+                        if perks_journal.active_section == ui::JournalSection::Settings {
+                            render_journal_settings(ui_ctx, &mut *state);
+                        }
+                    }
+                }
+                GameState::Paused => {
+                    // Perks Journal also available when paused
+                    if state.perks_journal.is_open {
+                        let SharedState { perks_journal, journal_textures, .. } = &mut *state;
+                        ui::render_perks_journal(ui_ctx, perks_journal, journal_textures);
+
+                        // Render settings content when Settings tab is active
+                        if perks_journal.active_section == ui::JournalSection::Settings {
+                            render_journal_settings(ui_ctx, &mut *state);
+                        }
                     }
                     // Character Sheet uses different layout than normal pause menu
                     else if state.pause_menu_page == PauseMenuPage::CharacterSheet {
@@ -4395,8 +4635,10 @@ fn main() {
                                         state.game_state = GameState::Playing;
                                     }
                                     ui.add_space(10.0);
-                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Settings")).clicked() {
-                                        state.pause_menu_page = PauseMenuPage::Settings;
+                                    // Settings moved to Journal (Tab key)
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Journal (Settings)")).clicked() {
+                                        state.perks_journal.is_open = true;
+                                        state.perks_journal.active_section = ui::JournalSection::Settings;
                                     }
                                     ui.add_space(10.0);
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Controls")).clicked() {
@@ -4464,6 +4706,20 @@ fn main() {
                                             }
                                         }
                                     }
+                                    ui.add_space(15.0);
+
+                                    // Dither Distance - controls when LOD fading begins
+                                    ui.label(egui::RichText::new("Dither Distance:").color(egui::Color32::BLACK));
+                                    ui.horizontal(|ui| {
+                                        ui.add_space((ui.available_width() - 300.0) / 2.0);
+                                        let effective_dist = state.render_distance * state.dither_distance_ratio;
+                                        ui.add(egui::Slider::new(&mut state.dither_distance_ratio, 0.5..=1.0)
+                                            .text("Quality")
+                                            .custom_formatter(move |n, _| format!("{:.0}% ({:.0}m)", n * 100.0, effective_dist)));
+                                    });
+                                    ui.label(egui::RichText::new("Lower = better FPS, shorter sight distance")
+                                        .small()
+                                        .color(egui::Color32::GRAY));
                                     ui.add_space(15.0);
 
                                     // Audio Settings Header
@@ -4580,7 +4836,8 @@ fn main() {
 
                                     ui.label(egui::RichText::new("Game Controls:").size(18.0).strong().color(egui::Color32::BLACK));
                                     ui.label("ESC - Pause Menu");
-                                    ui.label("Tab - Character Sheet (Inventory/Skills/Commendations)");
+                                    ui.label("Tab/J - Journal (Perks/Stats/Encyclopedia/Settings)");
+                                    ui.label("F12 - Toggle Debug UI");
                                     ui.label("T/Y - Change Time of Day (+/- 1 hour)");
                                     ui.label("M - Toggle Audio On/Off");
                                     ui.add_space(10.0);
@@ -4715,7 +4972,8 @@ fn main() {
             if state.game_state == GameState::Loading || state.game_state == GameState::Playing {
                 let village_centers = state.village_manager.get_village_centers();
                 let corn_field_exclusions = state.village_manager.get_corn_field_bounds();
-                let requests = manager.update(state.player.position, state.seed, &village_centers, &corn_field_exclusions);
+                let camera_forward = state.camera.forward();
+                let requests = manager.update(state.player.position, camera_forward, state.seed, &village_centers, &corn_field_exclusions);
                 for req in requests {
                     let _ = request_tx.send(req);
                 }
@@ -4937,6 +5195,42 @@ fn main() {
                             drop(shadow_map_lod1);
                             println!("[CHUNK] Foliage LOD1: {} pipelines", foliage_pipelines_lod1.len());
 
+                            // Create LOD2 pipelines (billboard/simplified for distant rendering)
+                            // LOD2 now uses separate bark/leaves meshes like LOD0/LOD1 for proper texturing
+                            let mut foliage_pipelines_lod2: Vec<TreePipeline> = Vec::new();
+                            let shadow_map_lod2 = shadow_map_mutex.safe_lock();
+                            for (name, transforms) in &tree_groups {
+                                // Scale down LOD2 trees to 50% size for distant silhouettes
+                                let scaled_transforms: Vec<Mat4> = transforms.iter().map(|t| {
+                                    let (scale, rot, trans) = t.to_scale_rotation_translation();
+                                    Mat4::from_scale_rotation_translation(scale * 0.5, rot, trans)
+                                }).collect();
+
+                                // LOD2 uses separate bark and leaves meshes (e.g., "birch_0_lod2_bark", "birch_0_lod2_leaves")
+                                let bark_name = format!("{}_lod2_bark", name);
+                                let leaves_name = format!("{}_lod2_leaves", name);
+
+                                // Create bark pipeline if mesh exists
+                                if let Some(mesh) = state.mesh_registry.get(&bark_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_lod2);
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), &scaled_transforms);
+                                    foliage_pipelines_lod2.push(tp);
+                                }
+
+                                // Create leaves pipeline if mesh exists
+                                if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
+                                    let mut tp = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_lod2);
+                                    tp.set_mesh(mesh.clone());
+                                    tp.upload_instances(ctx.device(), &scaled_transforms);
+                                    foliage_pipelines_lod2.push(tp);
+                                }
+
+                                println!("[LOD2] Tree '{}': {} instances (bark+leaves)", name, transforms.len());
+                            }
+                            drop(shadow_map_lod2);
+                            println!("[CHUNK] Foliage LOD2: {} pipelines", foliage_pipelines_lod2.len());
+
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
                                 let mut dp = DetritusPipeline::new(ctx.device(), ctx.surface_format());
@@ -5131,6 +5425,7 @@ fn main() {
                                 grass: grass_pipeline,
                                 trees: foliage_pipelines,
                                 trees_lod1: foliage_pipelines_lod1,
+                                trees_lod2: foliage_pipelines_lod2,
                                 ferns: fern_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
@@ -5177,9 +5472,10 @@ fn main() {
                             // For streaming, "complete" just means "initial batch done"
                             if state.game_state == GameState::Loading {
                                 let (loaded, _loading) = manager.get_stats();
-                                // Start playing after 5 chunks loaded (don't wait for all)
+                                // Start playing after 13 chunks loaded (3x3 core + 4 cardinal)
+                                // This ensures terrain exists in all directions around player
                                 // Remaining chunks will stream in while playing
-                                if loaded >= 5 {
+                                if loaded >= 13 {
                                     println!("[LOAD] Initial {} chunks loaded! Transitioning to Playing...", loaded);
                                     state.loading_progress.current_status = "Ready!".to_string();
                                     state.game_state = GameState::Playing;
@@ -5586,6 +5882,7 @@ fn main() {
                 let mut grass_rendered = 0;
                 let mut trees_rendered = 0;
                 let mut trees_lod1_rendered = 0;
+                let mut trees_lod2_rendered = 0;
                 let mut rocks_rendered: usize = 0;
                 let mut boulders_rendered: usize = 0;
                 let mut shrubs_rendered: usize = 0;
@@ -5600,17 +5897,29 @@ fn main() {
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
-                // LOD distance configuration for trees
-                // LOD0 (full detail): 0-700 units, fade out 600-700
-                // LOD1 (simplified): 600-1200+ units, fade in 600-700
-                // Extended LOD0 range for higher visual quality at distance
-                // Performance impact: ~50% more high-poly trees in typical view
-                // LOD1 max should be tied to render distance, not infinitely far
-                // Beyond dither fade, nothing should render
+                // LOD distance configuration for trees (3-tier with extended back distance)
+                // Distances scale with dither_distance_ratio for player-controlled performance
+                // Lower ratio = closer dither = better FPS, shorter sight
+                let dither_base = state.render_distance * state.dither_distance_ratio;
+                let _fade_width = state.dither_fade_width; // Reserved for future fine-tuning
+
+                // 3-tier LOD with dither pushed FAR back to prevent pop-ins:
+                // LOD0 solid: 0-400 (full detail visible much longer)
+                // LOD0->LOD1 transition: 400-600 (200 units crossfade)
+                // LOD1 solid: 600-850 (stable mid-range)
+                // LOD1->LOD2 transition: 850-1020 (170 units crossfade)
+                // LOD2 solid: 1020+ (distant silhouettes fade into fog only)
+                let lod0_fade_start = dither_base * 1.2;    // ~400 @ default (pushed way back)
+                let lod0_fade_end = dither_base * 1.8;      // ~600 @ default (LOD0 fully faded)
+                let lod1_fade_start = dither_base * 2.5;    // ~850 @ default (LOD1 starts fading)
+                let lod1_fade_end = dither_base * 3.0;      // ~1020 @ default (LOD1 fully faded)
+                let lod2_max = dither_base * 4.0;           // ~1360 @ default (extended for fog fade)
                 let lod_config = TreeLODConfig {
-                    lod0_fade_start: 600.0,  // was 400 - extended high detail range
-                    lod0_fade_end: 700.0,    // was 500 - keeps 100 unit transition zone
-                    lod1_max_distance: state.render_distance * 1.8, // Strict cutoff - saves FPS
+                    lod0_fade_start,                        // ~400: LOD0 starts fading (pushed back)
+                    lod0_fade_end,                          // ~600: LOD0 fully faded, LOD1 solid
+                    lod1_fade_start,                        // ~850: LOD1 starts fading
+                    lod1_fade_end,                          // ~1020: LOD1 fully faded, LOD2 solid
+                    lod2_max_distance: lod2_max,            // ~1360: LOD2 fades into fog
                 };
 
                 for (_coord, chunk) in manager.iter_chunks() {
@@ -5647,26 +5956,27 @@ fn main() {
                         }
                     }
 
-                    // Trees with LOD system - dithered fade between detail levels
-                    // LOD0 (full detail): visible 0-700 units, fade out 600-700
-                    // LOD1 (simplified ~18 tris): visible 600-1200+ units, fade in 600-700
+                    // Trees with 3-tier LOD system - dithered transitions pushed FAR back
+                    // LOD0 (full detail): 0-600, dither out at 400-600 (no pop-ins visible)
+                    // LOD1 (simplified): 400-1020, dither in at 400-600, solid 600-850, dither out 850-1020
+                    // LOD2 (billboard): 850-1360+, dither in at 850-1020, solid into fog
 
-                    // Determine LOD mode based on distance
+                    // Determine LOD ranges and transition zones
                     let in_lod0_range = dist <= lod_config.lod0_fade_end;
-                    let in_lod1_range = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod1_max_distance;
-                    let in_transition = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod0_fade_end;
+                    let in_lod1_range = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod1_fade_end;
+                    let in_lod2_range = dist >= lod_config.lod1_fade_start && dist <= lod_config.lod2_max_distance;
+                    let in_near_transition = dist >= lod_config.lod0_fade_start && dist <= lod_config.lod0_fade_end;
+                    let in_mid_transition = dist >= lod_config.lod1_fade_start && dist <= lod_config.lod1_fade_end;
 
                     // Render LOD0 (full detail) when in range
                     if in_lod0_range {
                         for trees in &chunk.trees {
-                            // Use fade mode if in transition zone
-                            // LOD0 trees are GLTF models - use_texture=1.0 to sample textures
-                            if in_transition {
+                            if in_near_transition {
                                 trees.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, // alpha_cutoff for leaves, USE TEXTURE for GLTF models
+                                    0.5, 1.0,
                                     LODFadeMode::LOD0FadeOut,
                                     lod_config.lod0_fade_start,
                                     lod_config.lod0_fade_end,
@@ -5676,7 +5986,7 @@ fn main() {
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, // alpha_cutoff, USE TEXTURE for GLTF models
+                                    0.5, 1.0,
                                 );
                             }
                             trees_rendered += 1;
@@ -5685,17 +5995,27 @@ fn main() {
                     }
 
                     // Render LOD1 (simplified) when in range
+                    // Mid transition (to LOD2) takes priority over near transition
                     if in_lod1_range {
                         for trees_lod1 in &chunk.trees_lod1 {
-                            // Always use texture mode with alpha cutoff for clean foliage edges
-                            // (all LOD1 GLBs have embedded textures)
-                            // Use fade mode if in transition zone
-                            if in_transition {
+                            if in_mid_transition {
+                                // Fading OUT to LOD2 (far end of LOD1)
                                 trees_lod1.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, // alpha_cutoff, use_texture
+                                    0.5, 1.0,
+                                    LODFadeMode::LOD1FadeOut,
+                                    lod_config.lod1_fade_start,
+                                    lod_config.lod1_fade_end,
+                                );
+                            } else if in_near_transition {
+                                // Fading IN from LOD0 (near end)
+                                trees_lod1.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0,
                                     LODFadeMode::LOD1FadeIn,
                                     lod_config.lod0_fade_start,
                                     lod_config.lod0_fade_end,
@@ -5705,11 +6025,40 @@ fn main() {
                                     ctx.queue(), &view_proj, &light_view_proj,
                                     sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                     fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, // alpha_cutoff, use_texture
+                                    0.5, 1.0,
                                 );
                             }
                             trees_lod1_rendered += 1;
                             trees_lod1.render(&mut render_pass);
+                        }
+                    }
+
+                    // Render LOD2 (distant billboards) when in range
+                    // Fades in from LOD1 at mid transition, solid beyond into fog
+                    if in_lod2_range {
+                        for trees_lod2 in &chunk.trees_lod2 {
+                            if in_mid_transition {
+                                // Fading IN from LOD1
+                                trees_lod2.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0,
+                                    LODFadeMode::LOD2FadeIn,
+                                    lod_config.lod1_fade_start,
+                                    lod_config.lod1_fade_end,
+                                );
+                            } else {
+                                // Solid LOD2 (650+), let fog handle the fade-out
+                                trees_lod2.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0,
+                                );
+                            }
+                            trees_lod2_rendered += 1;
+                            trees_lod2.render(&mut render_pass);
                         }
                     }
 
@@ -5720,9 +6069,9 @@ fn main() {
                         }
                     }
 
-                    // Rocks (non-boulder, same max distance as LOD1 trees)
+                    // Rocks (non-boulder, same max distance as LOD2 trees)
                     for rock in &chunk.rocks {
-                        if dist <= lod_config.lod1_max_distance {
+                        if dist <= lod_config.lod2_max_distance {
                             rock.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -5926,9 +6275,9 @@ fn main() {
                         }
                     }
 
-                    // Ferns (forest understory - same max distance as LOD1 trees)
+                    // Ferns (forest understory - same max distance as LOD2 trees)
                     for fern in &chunk.ferns {
-                        if dist <= lod_config.lod1_max_distance {
+                        if dist <= lod_config.lod2_max_distance {
                             ferns_rendered += fern.instance_count() as usize;
                             fern.render(&mut render_pass);
                         }

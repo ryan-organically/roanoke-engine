@@ -28,7 +28,8 @@ pub struct LoadedChunk {
     pub terrain: TerrainPipeline,
     pub grass: Option<GrassPipeline>,
     pub trees: Vec<TreePipeline>, // Foliage: trees + shrubs (LOD0 - full detail)
-    pub trees_lod1: Vec<TreePipeline>, // LOD1 simplified trees for distant rendering
+    pub trees_lod1: Vec<TreePipeline>, // LOD1 simplified trees for mid-range rendering
+    pub trees_lod2: Vec<TreePipeline>, // LOD2 billboard trees for distant rendering
     pub ferns: Vec<TreePipeline>, // Forest understory ferns
     pub detritus: Option<DetritusPipeline>,
     pub rocks: Vec<TreePipeline>, // Non-boulder rocks (pebble, small, medium, flat, mossy)
@@ -79,11 +80,12 @@ impl ChunkManager {
         }
     }
 
-    /// Update which chunks should be loaded based on player position
+    /// Update which chunks should be loaded based on player position and camera direction
     /// Returns chunks to request for generation
     /// `village_centers` is used for tree clearing around settlements
     /// `corn_field_exclusions` prevents rocks from spawning in crop fields
-    pub fn update(&mut self, player_pos: Vec3, seed: u32, village_centers: &[Vec3], corn_field_exclusions: &[CornFieldBounds]) -> Vec<ChunkRequest> {
+    /// `camera_forward` is used to prioritize chunks in front of the camera
+    pub fn update(&mut self, player_pos: Vec3, camera_forward: Vec3, seed: u32, village_centers: &[Vec3], corn_field_exclusions: &[CornFieldBounds]) -> Vec<ChunkRequest> {
         let new_player_chunk = ChunkCoord::from_world_pos(player_pos, self.chunk_size);
 
         // Debug: Track calls to update
@@ -121,7 +123,11 @@ impl ChunkManager {
             println!("[CHUNK] Unloaded chunk ({}, {})", coord.x, coord.z);
         }
 
-        // Request new chunks that should be loaded, sorted by distance (closest first)
+        // Normalize camera forward on XZ plane for chunk priority
+        let cam_fwd_xz = Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize_or_zero();
+
+        // Request new chunks that should be loaded, sorted by priority
+        // Priority = distance + penalty for being behind camera
         let mut pending_coords: Vec<(ChunkCoord, i32)> = Vec::new();
 
         for dz in -self.load_radius..=self.load_radius {
@@ -136,14 +142,32 @@ impl ChunkManager {
                     continue;
                 }
 
-                // Calculate squared distance for sorting (no sqrt needed)
+                // Calculate base priority from distance squared
                 let dist_sq = dx * dx + dz * dz;
-                pending_coords.push((coord, dist_sq));
+
+                // Calculate direction to chunk (normalized)
+                let chunk_dir = Vec3::new(dx as f32, 0.0, dz as f32).normalize_or_zero();
+
+                // Dot product: 1.0 = in front, -1.0 = behind
+                let dot = cam_fwd_xz.dot(chunk_dir);
+
+                // Priority score: lower = higher priority
+                // Forward chunks (dot > 0): use base distance
+                // Behind chunks (dot < 0): penalize by adding distance
+                // This makes forward chunks load ~2x faster than behind
+                let priority = if dot < 0.0 {
+                    // Behind camera: double the effective distance
+                    dist_sq * 2
+                } else {
+                    dist_sq
+                };
+
+                pending_coords.push((coord, priority));
             }
         }
 
-        // Sort by distance (closest chunks first)
-        pending_coords.sort_by_key(|(_, dist_sq)| *dist_sq);
+        // Sort by priority (lowest first = closest + forward)
+        pending_coords.sort_by_key(|(_, priority)| *priority);
 
         // Mark as loading and create requests
         for (coord, _) in pending_coords {
@@ -186,21 +210,21 @@ impl ChunkManager {
     }
 
     /// Update load/unload radii based on render distance
-    /// Trees render at 1.5x render_distance with LOD system, so we need chunks loaded for that
+    /// LOD2 trees render at 4.0x render_distance (pushed far back), so we need chunks loaded for that
     pub fn update_radius_for_render_distance(&mut self, render_distance: f32) {
         // Validate input - clamp to sane range
         let render_distance = render_distance.clamp(100.0, 1000.0);
 
-        // Trees visible at 1.5x render distance (LOD1 extends further)
-        // Buildings at 1.0x, so trees are the furthest-visible objects
-        let max_visible_distance = render_distance * 1.5;
+        // LOD2 trees visible at 4.0x render distance (dither pushed far back)
+        // With dither_distance_ratio of 0.85, that's render_distance * 0.85 * 4.0 = ~3.4x render_distance
+        let max_visible_distance = render_distance * 3.4;
         // Convert to chunk units and round up, ensure chunk_size is valid
         let chunk_size = self.chunk_size.max(1.0);
         let needed_radius = (max_visible_distance / chunk_size).ceil() as i32;
-        // Allow up to 4 chunks for extended render distance with LOD system
-        // 1-2 chunks: 150-400 render distance
-        // 3-4 chunks: 400-1000 render distance (LOD1 trees fill the extra distance)
-        self.load_radius = needed_radius.clamp(1, 4);
+        // Allow up to 7 chunks for extended LOD2 render distance (pushed back)
+        // 4-5 chunks: 400 render distance (~1360 max LOD2)
+        // 6-7 chunks: 600+ render distance for extended views
+        self.load_radius = needed_radius.clamp(1, 7);
         // Unload radius should be 1 chunk beyond load radius for hysteresis
         self.unload_radius = self.load_radius + 1;
 

@@ -46,23 +46,33 @@ struct CameraUniform {
     _padding2: f32,                 // 4 bytes (204-208) - 16-byte struct alignment
 }
 
-/// Configuration for tree LOD distance bands
+/// Configuration for tree LOD distance bands (3-tier system)
+/// LOD0 (full detail) → LOD1 (medium) → LOD2 (billboard/simple)
 #[derive(Clone, Copy, Debug)]
 pub struct TreeLODConfig {
     /// Distance at which LOD0 starts fading out (full detail)
     pub lod0_fade_start: f32,
     /// Distance at which LOD0 is fully faded (switch to LOD1)
     pub lod0_fade_end: f32,
-    /// Maximum distance for LOD1 rendering
-    pub lod1_max_distance: f32,
+    /// Distance at which LOD1 starts fading out
+    pub lod1_fade_start: f32,
+    /// Distance at which LOD1 is fully faded (switch to LOD2)
+    pub lod1_fade_end: f32,
+    /// Maximum distance for LOD2 rendering
+    pub lod2_max_distance: f32,
 }
 
 impl Default for TreeLODConfig {
     fn default() -> Self {
         Self {
-            lod0_fade_start: 600.0,  // Extended for better visuals
-            lod0_fade_end: 700.0,    // 100 unit transition zone
-            lod1_max_distance: 1200.0,
+            // LOD0→LOD1 transition: pushed FAR back to prevent pop-ins
+            lod0_fade_start: 400.0,
+            lod0_fade_end: 600.0,
+            // LOD1→LOD2 transition: distant, LOD2 only appears near fog
+            lod1_fade_start: 850.0,
+            lod1_fade_end: 1020.0,
+            // LOD2 max: extended into fog zone only
+            lod2_max_distance: 1360.0,
         }
     }
 }
@@ -72,10 +82,14 @@ impl Default for TreeLODConfig {
 pub enum LODFadeMode {
     /// No dither fade (fully visible)
     Disabled,
-    /// LOD0: fade OUT as distance increases
+    /// LOD0: fade OUT as distance increases (LOD0→LOD1 transition)
     LOD0FadeOut,
-    /// LOD1: fade IN as distance increases
+    /// LOD1: fade IN as distance increases (LOD0→LOD1 transition)
     LOD1FadeIn,
+    /// LOD1: fade OUT as distance increases (LOD1→LOD2 transition)
+    LOD1FadeOut,
+    /// LOD2: fade IN as distance increases (LOD1→LOD2 transition)
+    LOD2FadeIn,
 }
 
 #[repr(C)]
@@ -605,10 +619,13 @@ impl TreePipeline {
         fade_start: f32,
         fade_end: f32,
     ) {
+        // Shader fade modes: 0=disabled, 1=fade out, 2=fade in
+        // LOD0FadeOut and LOD1FadeOut both use "fade out" (1.0)
+        // LOD1FadeIn and LOD2FadeIn both use "fade in" (2.0)
         let lod_fade_mode = match lod_mode {
             LODFadeMode::Disabled => 0.0,
-            LODFadeMode::LOD0FadeOut => 1.0,
-            LODFadeMode::LOD1FadeIn => 2.0,
+            LODFadeMode::LOD0FadeOut | LODFadeMode::LOD1FadeOut => 1.0,
+            LODFadeMode::LOD1FadeIn | LODFadeMode::LOD2FadeIn => 2.0,
         };
 
         let uniform = CameraUniform {

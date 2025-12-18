@@ -25,6 +25,7 @@ pub enum JournalSection {
     Perks,
     Stats,
     Encyclopedia,
+    Settings,
 }
 
 impl JournalSection {
@@ -33,11 +34,12 @@ impl JournalSection {
             Self::Perks => "Perks",
             Self::Stats => "Stats",
             Self::Encyclopedia => "Encyclopedia",
+            Self::Settings => "Settings",
         }
     }
 
     pub fn all() -> &'static [JournalSection] {
-        &[Self::Perks, Self::Stats, Self::Encyclopedia]
+        &[Self::Perks, Self::Stats, Self::Encyclopedia, Self::Settings]
     }
 }
 
@@ -269,7 +271,7 @@ impl CommendationLevel {
 /// State for the journal UI
 #[derive(Debug, Clone)]
 pub struct PerksJournalState {
-    /// Current main section (top tabs)
+    /// Current main section (sidebar selection)
     pub active_section: JournalSection,
     /// Current perk tree (when in Perks section)
     pub active_perk_tree: PerkTree,
@@ -283,6 +285,12 @@ pub struct PerksJournalState {
     pub selected_item: Option<(JournalSection, usize, usize, usize)>,
     /// Whether the journal is open
     pub is_open: bool,
+    /// Animation progress for page transitions (0.0 to 1.0)
+    pub transition_progress: f32,
+    /// Previous section (for transition animation)
+    pub previous_section: Option<JournalSection>,
+    /// Sidebar hover state for smooth highlights
+    pub sidebar_hover_index: Option<usize>,
 }
 
 impl Default for PerksJournalState {
@@ -295,6 +303,9 @@ impl Default for PerksJournalState {
             active_inner_tab: 0,
             selected_item: None,
             is_open: false,
+            transition_progress: 1.0,
+            previous_section: None,
+            sidebar_hover_index: None,
         }
     }
 }
@@ -440,6 +451,24 @@ impl Default for JournalColors {
 }
 
 // ============================================================================
+// EASING FUNCTIONS
+// ============================================================================
+
+/// Smooth ease-out cubic for animations
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Smooth ease-in-out for hover effects
+fn ease_in_out(t: f32) -> f32 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+// ============================================================================
 // MAIN RENDER FUNCTION
 // ============================================================================
 
@@ -458,237 +487,295 @@ pub fn render_perks_journal(
     let screen_width = screen_rect.width();
     let screen_height = screen_rect.height();
 
-    let journal_width = (screen_width * 0.85).min(1200.0);
-    let journal_height = (screen_height * 0.85).min(800.0);
-    let journal_left = (screen_width - journal_width) / 2.0;
-    let journal_top = (screen_height - journal_height) / 2.0;
+    // Update transition animation
+    if state.transition_progress < 1.0 {
+        state.transition_progress = (state.transition_progress + 0.06).min(1.0);
+        ui_ctx.request_repaint();
+    }
 
-    // Left emblem tabs
-    let emblem_width = 70.0;
-    let emblem_height = 70.0;
-    let emblem_spacing = 8.0;
-    let emblems_left = journal_left - emblem_width - 10.0;
+    // Layout: centered journal with left tabs, right content
+    let journal_width = (screen_width * 0.75).min(1000.0);
+    let journal_height = (screen_height * 0.80).min(700.0);
+    // Use screen_rect min position for proper centering
+    let journal_left = screen_rect.min.x + (screen_width - journal_width) / 2.0;
+    let journal_top = screen_rect.min.y + (screen_height - journal_height) / 2.0;
 
-    // Dark overlay
+    // Tab dimensions (left side book tabs)
+    let tab_width = 140.0;
+    let content_width = journal_width - tab_width;
+
+    // Semi-transparent overlay with click-to-close
     egui::Area::new(egui::Id::new("journal_overlay"))
         .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Background)
+        .order(egui::Order::Middle)
+        .interactable(true)
         .show(ui_ctx, |ui| {
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(screen_width, screen_height));
-            ui.painter().rect_filled(rect, 0.0, colors.overlay);
-        });
+            ui.painter().rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 140));
 
-    // === LEFT EMBLEM TABS ===
-    let mut clicked_perk: Option<PerkTree> = None;
-    let mut clicked_stat: Option<StatCategory> = None;
-    let mut clicked_enc: Option<EncyclopediaCategory> = None;
-
-    egui::Area::new(egui::Id::new("journal_emblems"))
-        .fixed_pos(egui::pos2(emblems_left, journal_top + 60.0))
-        .order(egui::Order::Foreground)
-        .show(ui_ctx, |ui| {
-            match state.active_section {
-                JournalSection::Perks => {
-                    clicked_perk = render_emblem_tabs_perk(ui, PerkTree::all(), state.active_perk_tree, textures, emblem_width, emblem_height, emblem_spacing, &colors);
-                }
-                JournalSection::Stats => {
-                    clicked_stat = render_emblem_tabs_stat(ui, StatCategory::all(), state.active_stat_category, textures, emblem_width, emblem_height, emblem_spacing, &colors);
-                }
-                JournalSection::Encyclopedia => {
-                    clicked_enc = render_emblem_tabs_encyclopedia(ui, EncyclopediaCategory::all(), state.active_encyclopedia, textures, emblem_width, emblem_height, emblem_spacing, &colors);
+            // Click outside journal to close
+            let response = ui.allocate_rect(rect, egui::Sense::click());
+            if response.clicked() {
+                // Only close if click is outside the journal bounds
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let journal_rect = egui::Rect::from_min_size(
+                        egui::pos2(journal_left, journal_top),
+                        egui::vec2(journal_width, journal_height),
+                    );
+                    if !journal_rect.contains(pos) {
+                        state.is_open = false;
+                    }
                 }
             }
         });
 
-    // Handle emblem clicks after the area
-    if let Some(tree) = clicked_perk {
-        state.active_perk_tree = tree;
-        state.active_inner_tab = 0;
-        state.selected_item = None;
-    }
-    if let Some(cat) = clicked_stat {
-        state.active_stat_category = cat;
-        state.active_inner_tab = 0;
-        state.selected_item = None;
-    }
-    if let Some(cat) = clicked_enc {
-        state.active_encyclopedia = cat;
-        state.active_inner_tab = 0;
-        state.selected_item = None;
-    }
-
-    // === MAIN BOOK ===
-    egui::Area::new(egui::Id::new("journal_book"))
+    // === MAIN JOURNAL PANEL ===
+    egui::Area::new(egui::Id::new("journal_main"))
         .fixed_pos(egui::pos2(journal_left, journal_top))
         .order(egui::Order::Foreground)
+        .interactable(true)
         .show(ui_ctx, |ui| {
-            let book_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(journal_width, journal_height));
+            // Consume clicks within journal area
+            let journal_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(journal_width, journal_height));
+            ui.allocate_rect(journal_rect, egui::Sense::click());
 
-            // Leather binding
-            ui.painter().rect_filled(book_rect, egui::Rounding::same(12.0), colors.leather);
+            // === LEFT SIDE: NAVIGATION TABS ===
+            let tab_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(tab_width, journal_height));
 
-            // Paper interior
-            let paper_margin = 15.0;
-            let paper_rect = book_rect.shrink(paper_margin);
-            ui.painter().rect_filled(paper_rect, egui::Rounding::same(6.0), colors.paper);
-
-            // Center spine
-            let spine_x = journal_width / 2.0;
-            ui.painter().line_segment(
-                [egui::pos2(spine_x, paper_margin + 10.0), egui::pos2(spine_x, journal_height - paper_margin - 10.0)],
-                egui::Stroke::new(3.0, colors.leather),
+            // Dark leather background for tabs
+            ui.painter().rect_filled(
+                tab_rect,
+                egui::Rounding { nw: 12.0, sw: 12.0, ne: 0.0, se: 0.0 },
+                Color32::from_rgb(50, 40, 30),
             );
 
-            // === TOP SECTION TABS (Perks / Stats / Encyclopedia) ===
-            let section_tab_y = paper_margin + 12.0;
-            let section_tab_width = 120.0;
-            let section_tab_height = 32.0;
-            let section_spacing = 15.0;
-            let sections = JournalSection::all();
-            let total_section_width = (sections.len() as f32) * section_tab_width + ((sections.len() - 1) as f32) * section_spacing;
-            let section_start_x = (journal_width - total_section_width) / 2.0;
+            // Navigation items
+            let nav_items = [
+                (JournalSection::Perks, "Journal", "📖"),
+                (JournalSection::Stats, "Stats", "📊"),
+                (JournalSection::Encyclopedia, "Encyclopedia", "🔍"),
+            ];
 
-            for (i, section) in sections.iter().enumerate() {
-                let tab_x = section_start_x + (i as f32) * (section_tab_width + section_spacing);
-                let tab_rect = egui::Rect::from_min_size(
-                    egui::pos2(tab_x, section_tab_y),
-                    egui::vec2(section_tab_width, section_tab_height),
+            let item_height = 50.0;
+            let mut y = 20.0;
+
+            for (section, label, icon) in nav_items.iter() {
+                let item_rect = egui::Rect::from_min_size(
+                    egui::pos2(8.0, y),
+                    egui::vec2(tab_width - 16.0, item_height),
                 );
 
                 let is_active = state.active_section == *section;
-                let response = ui.allocate_rect(tab_rect, egui::Sense::click());
+                let response = ui.allocate_rect(item_rect, egui::Sense::click());
 
-                let tab_color = if is_active {
-                    colors.section_active
-                } else if response.hovered() {
-                    colors.tab_hover
+                let hover_t = ui_ctx.animate_bool(
+                    egui::Id::new(format!("nav_{:?}", section)),
+                    response.hovered() || is_active,
+                );
+
+                // Background with hover/active effect
+                let bg_alpha = (hover_t * 180.0) as u8;
+                let bg_color = if is_active {
+                    Color32::from_rgb(139, 90, 43)
                 } else {
-                    colors.section_inactive
+                    Color32::from_rgba_unmultiplied(100, 80, 60, bg_alpha)
                 };
+                ui.painter().rect_filled(item_rect, egui::Rounding::same(6.0), bg_color);
 
-                ui.painter().rect_filled(tab_rect, egui::Rounding::same(6.0), tab_color);
-                ui.painter().rect_stroke(tab_rect, egui::Rounding::same(6.0), egui::Stroke::new(2.0, colors.leather));
-
-                // For Perks tab, show small naturalist badge icon + text
-                if *section == JournalSection::Perks {
-                    if let Some(badge_id) = textures.get_naturalist_badge() {
-                        let icon_size = 24.0;
-                        let icon_rect = egui::Rect::from_min_size(
-                            egui::pos2(tab_rect.min.x + 8.0, tab_rect.center().y - icon_size / 2.0),
-                            egui::vec2(icon_size, icon_size),
-                        );
-                        ui.painter().image(badge_id, icon_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                        ui.painter().text(
-                            egui::pos2(tab_rect.center().x + 10.0, tab_rect.center().y),
-                            egui::Align2::CENTER_CENTER,
-                            section.name(),
-                            egui::FontId::proportional(15.0),
-                            colors.ink,
-                        );
-                    } else {
-                        ui.painter().text(tab_rect.center(), egui::Align2::CENTER_CENTER, section.name(), egui::FontId::proportional(16.0), colors.ink);
-                    }
-                } else {
-                    ui.painter().text(tab_rect.center(), egui::Align2::CENTER_CENTER, section.name(), egui::FontId::proportional(16.0), colors.ink);
+                // Active indicator
+                if is_active {
+                    let indicator = egui::Rect::from_min_size(
+                        egui::pos2(0.0, y + 12.0),
+                        egui::vec2(4.0, item_height - 24.0),
+                    );
+                    ui.painter().rect_filled(indicator, egui::Rounding::same(2.0), Color32::from_rgb(255, 200, 100));
                 }
 
-                if response.clicked() {
+                // Icon and label
+                let text_color = if is_active { Color32::WHITE } else { Color32::from_rgb(200, 180, 160) };
+                ui.painter().text(
+                    egui::pos2(item_rect.min.x + 15.0, item_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    *icon,
+                    egui::FontId::proportional(20.0),
+                    text_color,
+                );
+                ui.painter().text(
+                    egui::pos2(item_rect.min.x + 45.0, item_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    *label,
+                    egui::FontId::proportional(14.0),
+                    text_color,
+                );
+
+                if response.clicked() && !is_active {
+                    state.previous_section = Some(state.active_section);
                     state.active_section = *section;
+                    state.transition_progress = 0.0;
                     state.active_inner_tab = 0;
                     state.selected_item = None;
                 }
+
+                y += item_height + 6.0;
             }
 
-            // === SECTION EMBLEM (large badge for Perks) ===
-            let emblem_y = section_tab_y + section_tab_height + 15.0;
-            let header_y;
-            if state.active_section == JournalSection::Perks {
-                if let Some(badge_id) = textures.get_naturalist_badge() {
-                    let emblem_size = 80.0;
-                    let emblem_rect = egui::Rect::from_min_size(
-                        egui::pos2(journal_width / 2.0 - emblem_size / 2.0, emblem_y),
-                        egui::vec2(emblem_size, emblem_size),
-                    );
-                    ui.painter().image(badge_id, emblem_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                    header_y = emblem_y + emblem_size + 10.0;
-                } else {
-                    header_y = emblem_y + 5.0;
-                }
-            } else {
-                header_y = emblem_y + 5.0;
-            }
+            // Separator
+            y += 10.0;
+            ui.painter().line_segment(
+                [egui::pos2(20.0, y), egui::pos2(tab_width - 20.0, y)],
+                egui::Stroke::new(1.0, Color32::from_rgb(80, 65, 50)),
+            );
+            y += 15.0;
 
-            // === CATEGORY HEADER ===
-            let category_name = match state.active_section {
-                JournalSection::Perks => state.active_perk_tree.name(),
-                JournalSection::Stats => state.active_stat_category.name(),
-                JournalSection::Encyclopedia => state.active_encyclopedia.name(),
-            };
-            ui.painter().text(
-                egui::pos2(journal_width / 2.0, header_y),
-                egui::Align2::CENTER_CENTER,
-                category_name.to_uppercase(),
-                egui::FontId::proportional(22.0),
-                colors.ink,
+            // Settings at bottom
+            let settings_y = journal_height - item_height - 20.0;
+            let settings_rect = egui::Rect::from_min_size(
+                egui::pos2(8.0, settings_y),
+                egui::vec2(tab_width - 16.0, item_height),
             );
 
-            // === INNER TABS (below header) - only for Perks section ===
-            let content_top;
-            if state.active_section == JournalSection::Perks {
-                let inner_tab_y = header_y + 30.0;
-                let inner_tabs = state.active_perk_tree.inner_tabs();
-                let inner_tab_width = 90.0;
-                let inner_tab_height = 26.0;
-                let inner_spacing = 6.0;
-                let total_inner = (inner_tabs.len() as f32) * inner_tab_width + ((inner_tabs.len() - 1) as f32) * inner_spacing;
-                let inner_start_x = (journal_width - total_inner) / 2.0;
+            let is_settings_active = state.active_section == JournalSection::Settings;
+            let settings_response = ui.allocate_rect(settings_rect, egui::Sense::click());
 
-                for (i, tab_name) in inner_tabs.iter().enumerate() {
-                    let tab_x = inner_start_x + (i as f32) * (inner_tab_width + inner_spacing);
-                    let tab_rect = egui::Rect::from_min_size(
-                        egui::pos2(tab_x, inner_tab_y),
-                        egui::vec2(inner_tab_width, inner_tab_height),
-                    );
+            let settings_hover_t = ui_ctx.animate_bool(
+                egui::Id::new("nav_settings"),
+                settings_response.hovered() || is_settings_active,
+            );
 
-                    let is_active = state.active_inner_tab == i;
-                    let response = ui.allocate_rect(tab_rect, egui::Sense::click());
-
-                    let tab_color = if is_active {
-                        colors.tab_active
-                    } else if response.hovered() {
-                        colors.tab_hover
-                    } else {
-                        colors.tab_inactive
-                    };
-
-                    ui.painter().rect_filled(tab_rect, egui::Rounding::same(4.0), tab_color);
-                    ui.painter().rect_stroke(tab_rect, egui::Rounding::same(4.0), egui::Stroke::new(1.0, colors.leather));
-                    ui.painter().text(
-                        tab_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        *tab_name,
-                        egui::FontId::proportional(12.0),
-                        colors.ink,
-                    );
-
-                    if response.clicked() {
-                        state.active_inner_tab = i;
-                        state.selected_item = None;
-                    }
-                }
-                content_top = inner_tab_y + inner_tab_height + 15.0;
+            let settings_bg = if is_settings_active {
+                Color32::from_rgb(139, 90, 43)
             } else {
-                content_top = header_y + 40.0;
+                Color32::from_rgba_unmultiplied(100, 80, 60, (settings_hover_t * 180.0) as u8)
+            };
+            ui.painter().rect_filled(settings_rect, egui::Rounding::same(6.0), settings_bg);
+
+            if is_settings_active {
+                let indicator = egui::Rect::from_min_size(
+                    egui::pos2(0.0, settings_y + 12.0),
+                    egui::vec2(4.0, item_height - 24.0),
+                );
+                ui.painter().rect_filled(indicator, egui::Rounding::same(2.0), Color32::from_rgb(255, 200, 100));
             }
 
-            // === CONTENT AREA ===
-            let content_height = journal_height - content_top - paper_margin - 20.0;
-            let page_width = (journal_width / 2.0) - paper_margin - 20.0;
-            let left_page_x = paper_margin + 15.0;
-            let right_page_x = journal_width / 2.0 + 15.0;
+            let settings_text_color = if is_settings_active { Color32::WHITE } else { Color32::from_rgb(200, 180, 160) };
+            ui.painter().text(
+                egui::pos2(settings_rect.min.x + 15.0, settings_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "⚙",
+                egui::FontId::proportional(20.0),
+                settings_text_color,
+            );
+            ui.painter().text(
+                egui::pos2(settings_rect.min.x + 45.0, settings_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "Settings",
+                egui::FontId::proportional(14.0),
+                settings_text_color,
+            );
 
-            let left_rect = egui::Rect::from_min_size(egui::pos2(left_page_x, content_top), egui::vec2(page_width, content_height));
-            let right_rect = egui::Rect::from_min_size(egui::pos2(right_page_x, content_top), egui::vec2(page_width, content_height));
+            if settings_response.clicked() && !is_settings_active {
+                state.previous_section = Some(state.active_section);
+                state.active_section = JournalSection::Settings;
+                state.transition_progress = 0.0;
+            }
+
+            // === RIGHT SIDE: CONTENT AREA (Book Pages) ===
+            let content_rect = egui::Rect::from_min_size(
+                egui::pos2(tab_width, 0.0),
+                egui::vec2(content_width, journal_height),
+            );
+
+            // Paper background
+            ui.painter().rect_filled(
+                content_rect,
+                egui::Rounding { nw: 0.0, sw: 0.0, ne: 12.0, se: 12.0 },
+                colors.paper,
+            );
+
+            // Leather border
+            ui.painter().rect_stroke(
+                content_rect,
+                egui::Rounding { nw: 0.0, sw: 0.0, ne: 12.0, se: 12.0 },
+                egui::Stroke::new(3.0, colors.leather),
+            );
+
+            // Page transition effect
+            let transition_t = ease_out_cubic(state.transition_progress);
+            let content_alpha = (transition_t * 255.0) as u8;
+            let slide_offset = (1.0 - transition_t) * 15.0;
+
+            // Content area margins
+            let margin = 20.0;
+            let header_y = margin + slide_offset;
+
+            // Section title
+            let section_title = match state.active_section {
+                JournalSection::Perks => "NATURALIST JOURNAL",
+                JournalSection::Stats => "STATISTICS",
+                JournalSection::Encyclopedia => "ENCYCLOPEDIA",
+                JournalSection::Settings => "SETTINGS",
+            };
+
+            ui.painter().text(
+                egui::pos2(tab_width + content_width / 2.0, header_y + 15.0),
+                egui::Align2::CENTER_CENTER,
+                section_title,
+                egui::FontId::proportional(22.0),
+                Color32::from_rgba_unmultiplied(colors.ink.r(), colors.ink.g(), colors.ink.b(), content_alpha),
+            );
+
+            // Decorative underline
+            ui.painter().line_segment(
+                [
+                    egui::pos2(tab_width + content_width * 0.2, header_y + 35.0),
+                    egui::pos2(tab_width + content_width * 0.8, header_y + 35.0),
+                ],
+                egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(colors.leather.r(), colors.leather.g(), colors.leather.b(), content_alpha)),
+            );
+
+            // Subsection tabs for applicable sections
+            let mut content_top = header_y + 50.0;
+
+            match state.active_section {
+                JournalSection::Perks => {
+                    let tabs = PerkTree::all();
+                    content_top = render_content_tabs(ui, ui_ctx, tabs.iter().map(|t| t.name()),
+                        tabs.iter().position(|t| *t == state.active_perk_tree).unwrap_or(0),
+                        content_top, tab_width, content_width, &colors, content_alpha,
+                        |i| { state.active_perk_tree = tabs[i]; state.selected_item = None; });
+                }
+                JournalSection::Stats => {
+                    let tabs = StatCategory::all();
+                    content_top = render_content_tabs(ui, ui_ctx, tabs.iter().map(|t| t.name()),
+                        tabs.iter().position(|t| *t == state.active_stat_category).unwrap_or(0),
+                        content_top, tab_width, content_width, &colors, content_alpha,
+                        |i| { state.active_stat_category = tabs[i]; });
+                }
+                JournalSection::Encyclopedia => {
+                    let tabs = EncyclopediaCategory::all();
+                    content_top = render_content_tabs(ui, ui_ctx, tabs.iter().map(|t| t.name()),
+                        tabs.iter().position(|t| *t == state.active_encyclopedia).unwrap_or(0),
+                        content_top, tab_width, content_width, &colors, content_alpha,
+                        |i| { state.active_encyclopedia = tabs[i]; });
+                }
+                JournalSection::Settings => {}
+            }
+
+            // Main content
+            let content_height = journal_height - content_top - margin;
+            let half_width = (content_width - margin * 3.0) / 2.0;
+            let left_x = tab_width + margin;
+            let right_x = tab_width + margin * 2.0 + half_width;
+
+            let left_rect = egui::Rect::from_min_size(egui::pos2(left_x, content_top), egui::vec2(half_width, content_height));
+            let right_rect = egui::Rect::from_min_size(egui::pos2(right_x, content_top), egui::vec2(half_width, content_height));
+
+            // Center spine line
+            let spine_x = tab_width + content_width / 2.0;
+            ui.painter().line_segment(
+                [egui::pos2(spine_x, content_top - 10.0), egui::pos2(spine_x, journal_height - margin)],
+                egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(colors.leather.r(), colors.leather.g(), colors.leather.b(), 100)),
+            );
 
             match state.active_section {
                 JournalSection::Perks => {
@@ -701,26 +788,109 @@ pub fn render_perks_journal(
                 JournalSection::Encyclopedia => {
                     render_encyclopedia_content(ui, left_rect, right_rect, state, &colors);
                 }
+                JournalSection::Settings => {
+                    // Rendered in main.rs with SharedState access
+                }
             }
 
-            // === CLOSE BUTTON ===
-            let close_rect = egui::Rect::from_min_size(egui::pos2(journal_width - 40.0, 5.0), egui::vec2(30.0, 30.0));
+            // Close button
+            let close_rect = egui::Rect::from_min_size(
+                egui::pos2(journal_width - 35.0, 10.0),
+                egui::vec2(25.0, 25.0),
+            );
             let close_response = ui.allocate_rect(close_rect, egui::Sense::click());
+            let close_hover = ui_ctx.animate_bool(egui::Id::new("close_btn"), close_response.hovered());
+
             ui.painter().text(
                 close_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "X",
-                egui::FontId::proportional(20.0),
-                if close_response.hovered() { Color32::WHITE } else { colors.paper },
+                "✕",
+                egui::FontId::proportional(16.0),
+                Color32::from_rgba_unmultiplied(80, 60, 40, (150.0 + close_hover * 105.0) as u8),
             );
+
             if close_response.clicked() {
                 state.is_open = false;
             }
         });
 }
 
+/// Render horizontal content tabs with click handling
+fn render_content_tabs<'a, F>(
+    ui: &mut egui::Ui,
+    ui_ctx: &egui::Context,
+    tabs: impl Iterator<Item = &'a str>,
+    active_index: usize,
+    y_pos: f32,
+    left_offset: f32,
+    content_width: f32,
+    colors: &JournalColors,
+    alpha: u8,
+    mut on_click: F,
+) -> f32
+where
+    F: FnMut(usize),
+{
+    let tabs: Vec<&str> = tabs.collect();
+    let tab_height = 26.0;
+    let tab_spacing = 8.0;
+    let tab_width = 75.0;
+    let total_width = (tabs.len() as f32) * tab_width + ((tabs.len() - 1) as f32) * tab_spacing;
+    let start_x = left_offset + (content_width - total_width) / 2.0;
+
+    for (i, tab_name) in tabs.iter().enumerate() {
+        let tab_x = start_x + (i as f32) * (tab_width + tab_spacing);
+        let tab_rect = egui::Rect::from_min_size(
+            egui::pos2(tab_x, y_pos),
+            egui::vec2(tab_width, tab_height),
+        );
+
+        let is_active = i == active_index;
+        let response = ui.allocate_rect(tab_rect, egui::Sense::click());
+        let hover_t = ui_ctx.animate_bool(egui::Id::new(format!("ctab_{}_{}", y_pos as i32, i)), response.hovered());
+
+        let tab_color = if is_active {
+            Color32::from_rgba_unmultiplied(colors.tab_active.r(), colors.tab_active.g(), colors.tab_active.b(), alpha)
+        } else {
+            let base = colors.tab_inactive;
+            let hover = colors.tab_hover;
+            Color32::from_rgba_unmultiplied(
+                (base.r() as f32 + (hover.r() as f32 - base.r() as f32) * hover_t) as u8,
+                (base.g() as f32 + (hover.g() as f32 - base.g() as f32) * hover_t) as u8,
+                (base.b() as f32 + (hover.b() as f32 - base.b() as f32) * hover_t) as u8,
+                alpha,
+            )
+        };
+
+        ui.painter().rect_filled(tab_rect, egui::Rounding::same(4.0), tab_color);
+
+        if is_active {
+            let underline = egui::Rect::from_min_size(
+                egui::pos2(tab_x + 8.0, y_pos + tab_height - 3.0),
+                egui::vec2(tab_width - 16.0, 2.0),
+            );
+            ui.painter().rect_filled(underline, egui::Rounding::same(1.0),
+                Color32::from_rgba_unmultiplied(colors.accent.r(), colors.accent.g(), colors.accent.b(), alpha));
+        }
+
+        ui.painter().text(
+            tab_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            *tab_name,
+            egui::FontId::proportional(11.0),
+            Color32::from_rgba_unmultiplied(colors.ink.r(), colors.ink.g(), colors.ink.b(), alpha),
+        );
+
+        if response.clicked() {
+            on_click(i);
+        }
+    }
+
+    y_pos + tab_height + 12.0
+}
+
 // ============================================================================
-// EMBLEM TAB RENDERER (Returns clicked index)
+// EMBLEM TAB RENDERER (Returns clicked index) - Legacy, kept for compatibility
 // ============================================================================
 
 fn render_emblem_tabs_perk(
