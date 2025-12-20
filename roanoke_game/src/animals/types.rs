@@ -23,6 +23,8 @@ pub enum AnimalSpecies {
     Donkey,
     Fox,
     Husky,
+    // Birds
+    RingNeckedPheasant,
 }
 
 impl AnimalSpecies {
@@ -45,6 +47,7 @@ impl AnimalSpecies {
             Self::Donkey => "Donkey",
             Self::Fox => "Fox",
             Self::Husky => "Husky",
+            Self::RingNeckedPheasant => "Ring-Necked Pheasant",
         }
     }
 
@@ -60,6 +63,7 @@ impl AnimalSpecies {
             Self::Fox => Some("Fox"),
             Self::Husky => Some("Husky"),
             Self::Bobcat => Some("Fox"), // Use fox as placeholder
+            Self::RingNeckedPheasant => Some("ring_necked_pheasant"),
             // No models available for these yet
             Self::BlackBear => None,
             Self::EasternCougar => None,
@@ -75,7 +79,7 @@ impl AnimalSpecies {
     pub fn is_docile(&self) -> bool {
         matches!(
             self,
-            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey | Self::Fox | Self::Husky
+            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey | Self::Fox | Self::Husky | Self::RingNeckedPheasant
         )
     }
 
@@ -98,6 +102,7 @@ impl AnimalSpecies {
             "donkey" => Some(Self::Donkey),
             "fox" => Some(Self::Fox),
             "husky" | "dog" => Some(Self::Husky),
+            "ring-necked pheasant" | "ringneckedpheasant" | "pheasant" => Some(Self::RingNeckedPheasant),
             _ => None,
         }
     }
@@ -234,6 +239,14 @@ impl AnimalSpecies {
                 detection_range: 35.0,
                 attack_range: 1.5,
             },
+            Self::RingNeckedPheasant => AnimalStats {
+                health: 15.0,
+                damage: 2.0,
+                speed: 25.0,
+                speed_in_water: None,
+                detection_range: 20.0,
+                attack_range: 0.5,
+            },
         }
     }
 
@@ -250,6 +263,7 @@ impl AnimalSpecies {
             // Docile animals - flee behavior
             Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey => BehaviorType::Hidden,
             Self::Husky => BehaviorType::Territorial, // Protective when tamed
+            Self::RingNeckedPheasant => BehaviorType::Hidden, // Flees when detected
         }
     }
 
@@ -267,6 +281,7 @@ impl AnimalSpecies {
             Self::WhitetailDeer | Self::Horse | Self::Donkey => AggressionType::Defensive,
             Self::Stag => AggressionType::Territorial, // Will charge if cornered
             Self::Husky => AggressionType::Defensive,
+            Self::RingNeckedPheasant => AggressionType::Cautious, // Flees quickly
         }
     }
 
@@ -289,6 +304,7 @@ impl AnimalSpecies {
             Self::Horse => 1,
             Self::Fox => 1,
             Self::Husky => 1,
+            Self::RingNeckedPheasant => 0,
         }
     }
 
@@ -312,6 +328,7 @@ impl AnimalSpecies {
             Self::Donkey => 0.08,
             Self::Fox => 0.25,
             Self::Husky => 0.05, // Very rare wild husky
+            Self::RingNeckedPheasant => 0.50, // Common ground bird
         }
     }
 
@@ -335,6 +352,7 @@ impl AnimalSpecies {
             Self::Donkey => 80.0,
             Self::Fox => 35.0,
             Self::Husky => 50.0,
+            Self::RingNeckedPheasant => 14.0, // Flees almost immediately
         }
     }
 
@@ -399,6 +417,7 @@ impl AnimalSpecies {
             Self::Donkey => &[Habitat::Plains, Habitat::Mountains, Habitat::Fields],
             Self::Fox => &[Habitat::Forests, Habitat::Fields, Habitat::Meadows],
             Self::Husky => &[Habitat::Mountains, Habitat::Forests, Habitat::Plains],
+            Self::RingNeckedPheasant => &[Habitat::Fields, Habitat::Meadows, Habitat::Forests],
         }
     }
 
@@ -420,6 +439,7 @@ impl AnimalSpecies {
             Self::Horse | Self::Donkey => &[TimeOfDay::Day, TimeOfDay::Dawn, TimeOfDay::Dusk],
             Self::Fox => &[TimeOfDay::Night, TimeOfDay::Dawn, TimeOfDay::Dusk],
             Self::Husky => &[TimeOfDay::Any],
+            Self::RingNeckedPheasant => &[TimeOfDay::Day, TimeOfDay::Dawn],
         }
     }
 
@@ -437,6 +457,7 @@ impl AnimalSpecies {
             Self::WhitetailDeer | Self::Stag => Weakness::LoudNoises,
             Self::Horse | Self::Donkey => Weakness::Fire,
             Self::Husky => Weakness::Cold, // Ironically weak to cold when not in pack
+            Self::RingNeckedPheasant => Weakness::Dogs,
         }
     }
 
@@ -642,6 +663,12 @@ impl AnimalSpecies {
                     effect: Some(StatusEffectType::Fear),
                 },
             ],
+            Self::RingNeckedPheasant => &[AttackDef {
+                name: "peck",
+                damage: 2.0,
+                cooldown: 1.0,
+                effect: None,
+            }],
         }
     }
 
@@ -665,6 +692,7 @@ impl AnimalSpecies {
             Self::Donkey => &["donkey_hide", "donkey_meat"],
             Self::Fox => &["fox_pelt", "fox_meat"],
             Self::Husky => &["dog_pelt", "dog_meat"], // Harsh survival loot
+            Self::RingNeckedPheasant => &["pheasant_feathers", "pheasant_meat"],
         }
     }
 
@@ -687,6 +715,7 @@ impl AnimalSpecies {
             Self::Donkey,
             Self::Fox,
             Self::Husky,
+            Self::RingNeckedPheasant,
         ]
         .into_iter()
     }
@@ -739,6 +768,8 @@ impl AnimalSpecies {
             Self::Fox => [0.85, 0.45, 0.20],
             // Black and white - Husky
             Self::Husky => [0.70, 0.70, 0.75],
+            // Rich bronze/copper - Ring-Necked Pheasant (colorful game bird)
+            Self::RingNeckedPheasant => [0.75, 0.50, 0.25],
         }
     }
 
@@ -763,6 +794,7 @@ impl AnimalSpecies {
             Self::Donkey => 1.1,
             Self::Fox => 0.5,
             Self::Husky => 0.7,
+            Self::RingNeckedPheasant => 0.3, // Small ground bird
         }
     }
 
@@ -779,6 +811,7 @@ impl AnimalSpecies {
             Self::Fox => 0.6,
             Self::Husky => 0.7,
             Self::Bobcat => 0.6,
+            Self::RingNeckedPheasant => 0.002, // Mesh spans ~380 units, need tiny scale for ~0.75m bird
             // Default for species without models
             _ => 1.0,
         }
@@ -791,6 +824,7 @@ impl AnimalSpecies {
             // Stag model has antlers anchored at bottom, need to lift model
             Self::Stag => 1.0,
             Self::WhitetailDeer => 0.3,
+            Self::RingNeckedPheasant => 0.0, // Ground bird, no offset needed at tiny scale
             _ => 0.0,
         }
     }

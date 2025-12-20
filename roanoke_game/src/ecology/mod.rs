@@ -527,6 +527,7 @@ impl AnimalSpecies {
             Self::Donkey => 10,
             Self::Fox => 20,
             Self::Husky => 5,
+            Self::RingNeckedPheasant => 40, // Common game bird
         };
 
         // Adjust by biome suitability
@@ -558,6 +559,7 @@ impl AnimalSpecies {
             Self::Donkey => 0.05,
             Self::Fox => 0.14,
             Self::Husky => 0.1,
+            Self::RingNeckedPheasant => 0.2, // Fast breeding bird
         }
     }
 
@@ -580,6 +582,7 @@ impl AnimalSpecies {
             Self::Donkey => 0.06,
             Self::Fox => 0.18,
             Self::Husky => 0.1,
+            Self::RingNeckedPheasant => 0.25, // Short-lived but numerous
         }
     }
 }

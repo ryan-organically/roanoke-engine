@@ -582,6 +582,64 @@ fn spawn_beach_horses(
     }
 }
 
+/// Spawn ring-necked pheasants near player spawn location
+/// Creates a flock of 30-40 pheasants in the area around (0, 0) for immediate wildlife encounters
+fn spawn_pheasants_at_spawn(
+    animal_manager: &mut animals::AnimalManager,
+    seed: u32,
+) {
+    use croatoan_wfc::get_height_at;
+    use rand::SeedableRng;
+    use rand::Rng;
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64 + 7777); // Different seed offset for variety
+
+    // Spawn 30-40 pheasants in a 200m radius around spawn point (0, 0)
+    let spawn_center = glam::Vec3::new(0.0, 0.0, 0.0);
+    let spawn_radius = 200.0;
+    let num_pheasants = 30 + rng.gen_range(0..11); // 30-40 pheasants
+
+    let mut spawned_count = 0;
+    for _ in 0..num_pheasants {
+        // Random position within spawn radius
+        let angle: f32 = rng.gen::<f32>() * std::f32::consts::TAU;
+        let distance: f32 = rng.gen::<f32>().sqrt() * spawn_radius; // sqrt for uniform distribution
+
+        let x = spawn_center.x + angle.cos() * distance;
+        let z = spawn_center.z + angle.sin() * distance;
+        let height = get_height_at(x, z, seed).0;
+
+        // Only spawn on reasonable terrain (not underwater, not too steep)
+        if height > 1.0 {
+            let pos = glam::Vec3::new(x, height, z);
+
+            // Create small groups (flocks of 3-6)
+            let pack_id = if rng.gen_bool(0.3) {
+                Some(animal_manager.create_pack(animals::AnimalSpecies::RingNeckedPheasant))
+            } else {
+                None
+            };
+
+            let id = animal_manager.spawn(
+                animals::AnimalSpecies::RingNeckedPheasant,
+                pos,
+                (0, 0),
+                pack_id,
+            );
+
+            // Set home position and small territory
+            if let Some(pheasant) = animal_manager.get_mut(id) {
+                pheasant.home_position = pos;
+                pheasant.territory_radius = 50.0 + rng.gen::<f32>() * 50.0; // 50-100m territory
+            }
+
+            spawned_count += 1;
+        }
+    }
+
+    println!("[ANIMALS] Spawned {} ring-necked pheasants near spawn point", spawned_count);
+}
+
 /// Register village factions with player progression
 /// Uses collect_faction_data to avoid borrow conflicts
 fn register_village_factions(state: &mut SharedState) {
@@ -2705,6 +2763,58 @@ fn main() {
                     }
                 }
 
+                // Load dead grass chunk models from assets/models/grass/
+                // These are larger grass clump models meant to replace procedural grass
+                // LOD0: high detail, LOD1: simplified for distance
+                let dead_grass_lods = ["dead_grass_lod0", "dead_grass_lod1"];
+                let mut dead_grass_cache = gltf_loader::ModelCache::new("assets/models/grass");
+                for name in &dead_grass_lods {
+                    if let Some(model) = dead_grass_cache.load(name) {
+                        // Dead grass is single mesh with MASK alpha
+                        let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut all_indices: Vec<u32> = Vec::new();
+                        let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = all_positions.len() as u32;
+                            all_positions.extend_from_slice(&mesh.positions);
+                            all_normals.extend_from_slice(&mesh.normals);
+                            all_uvs.extend_from_slice(&mesh.uvs);
+                            all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                            if grass_texture.is_none() {
+                                grass_texture = mesh.material.base_color_texture_data.as_ref();
+                            }
+                        }
+
+                        if !all_positions.is_empty() {
+                            let texture_bind_group = grass_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &all_positions,
+                                &all_normals,
+                                &all_uvs,
+                                &all_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[DEAD_GRASS] Registered '{}': {} verts, {} tris",
+                                name, all_positions.len(), all_indices.len() / 3);
+                        }
+                    } else {
+                        println!("[DEAD_GRASS] WARNING: Model '{}' not found", name);
+                    }
+                }
+
                 // 2. Rocks - Procedural types (pebble, small, medium, flat, mossy)
                 let rock_types: Vec<(RockRecipe, &str)> = vec![
                     (RockRecipe::pebble(), "rock_pebble"),
@@ -3020,7 +3130,7 @@ fn main() {
         let animal_model_cache_mutex = ANIMAL_MODEL_CACHE.get_or_init(|| {
             let mut cache = gltf_loader::ModelCache::new("assets/models/animals");
             // Preload available models
-            cache.preload(&["Wolf", "Deer", "Stag", "Horse", "Donkey", "Fox", "Husky"]);
+            cache.preload(&["Wolf", "Deer", "Stag", "Horse", "Donkey", "Fox", "Husky", "ring_necked_pheasant"]);
             Mutex::new(cache)
         });
 
@@ -3567,11 +3677,13 @@ fn main() {
                                     all_indices.push(*idx + vertex_offset);
                                 }
 
-                                // Get texture from first mesh that has one
+                                // Prefer OPAQUE textures over BLEND (body over feathers/fur)
                                 // Uses get_or_create_texture() which creates synthetic texture
                                 // from baseColorFactor if no embedded texture exists
-                                if texture_data.is_none() {
-                                    texture_data = mesh.material.get_or_create_texture();
+                                if let Some(tex) = mesh.material.get_or_create_texture() {
+                                    if texture_data.is_none() || mesh.material.alpha_mode == "OPAQUE" {
+                                        texture_data = Some(tex);
+                                    }
                                 }
                             }
 
@@ -3672,14 +3784,23 @@ fn main() {
                     // Upload instances for this species
                     model_pipeline.upload_instances(ctx.device(), model_name, instances);
 
-                    // Update skeletal animation for this species (if animated and has idle horses)
-                    if *model_name == "Horse" && model_pipeline.has_animations(model_name) {
+                    // Update skeletal animation for animated species
+                    if model_pipeline.has_animations(model_name) {
                         // Use time_of_day as animation time (cycles every 24 hours = 86400 secs)
-                        // Scale to get reasonable animation speed
-                        let anim_time = state.time_of_day * 150.0; // ~1 animation cycle per minute of game time
+                        // Scale to get reasonable animation speed - faster for birds
+                        let anim_speed = if *model_name == "ring_necked_pheasant" { 300.0 } else { 150.0 };
+                        let anim_time = state.time_of_day * anim_speed;
+
+                        // Try to find an idle/default animation
+                        let anim_name = if *model_name == "ring_necked_pheasant" {
+                            "Take 001" // Pheasant animation name
+                        } else {
+                            "Idle"
+                        };
+
                         if let Some(joint_matrices) = model_pipeline.compute_animation_matrices(
                             model_name,
-                            "Idle",  // Use Idle animation for idle horses
+                            anim_name,
                             anim_time,
                         ) {
                             model_pipeline.update_joint_matrices(
@@ -4035,6 +4156,8 @@ fn main() {
                                                 }
                                                 // Spawn wild horse herds on beaches
                                                 spawn_beach_horses(&mut state.animal_manager, data.seed);
+                                                // Spawn pheasants near player spawn for early wildlife encounters
+                                                spawn_pheasants_at_spawn(&mut state.animal_manager, data.seed);
                                                 // Register village factions
                                                 register_village_factions(&mut *state);
                                             }
@@ -4083,6 +4206,8 @@ fn main() {
                                         }
                                         // Spawn wild horse herds on beaches
                                         spawn_beach_horses(&mut state.animal_manager, seed);
+                                        // Spawn pheasants near player spawn for early wildlife encounters
+                                        spawn_pheasants_at_spawn(&mut state.animal_manager, seed);
                                         // Register village factions
                                         register_village_factions(&mut *state);
                                     }
@@ -5419,6 +5544,97 @@ fn main() {
                             }
                             drop(shadow_map_for_ferns);
 
+                            // Generate dead grass clump instances across the chunk
+                            // These replace procedural grass with larger clump models
+                            let mut dead_grass_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut dead_grass_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+
+                            // Generate dead grass clumps - sparse coverage, accent rather than dominant
+                            let mut dead_grass_transforms: Vec<Mat4> = Vec::new();
+
+                            // Use deterministic seed based on chunk position
+                            let grass_seed = state.seed ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            use rand::SeedableRng;
+                            let mut rng_grass = rand::rngs::StdRng::seed_from_u64(grass_seed as u64);
+
+                            // Sparse spacing - dead grass as accent, not dominant feature
+                            let base_spacing = 18.0; // Reduced density (was 6.0)
+
+                            // Use base spacing for the grid
+                            let steps = (chunk_size / base_spacing) as i32;
+                            for gz in 0..steps {
+                                for gx in 0..steps {
+                                    use rand::Rng;
+                                    // Jitter for natural placement
+                                    let jitter_x = (rng_grass.gen::<f32>() - 0.5) * base_spacing * 0.7;
+                                    let jitter_z = (rng_grass.gen::<f32>() - 0.5) * base_spacing * 0.7;
+
+                                    let world_x = offset_x as f32 + (gx as f32 * base_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (gz as f32 * base_spacing) + jitter_z;
+
+                                    // Sample terrain height and biome
+                                    let (height, _color) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Skip if underwater
+                                    if height < 1.5 {
+                                        continue;
+                                    }
+
+                                    // Beach zone: height 1.5-8, biome_t < 0.65 (beach/treeline per foliage_gen)
+                                    let is_beach = height < 8.0 && biome_t < 0.65;
+
+                                    // Beaches: keep ~40% (was 100%), inland: keep ~10%
+                                    if is_beach {
+                                        if rng_grass.gen::<f32>() > 0.40 {
+                                            continue;
+                                        }
+                                    } else {
+                                        // Keep ~1 in 10 for inland
+                                        if rng_grass.gen::<f32>() > 0.10 {
+                                            continue;
+                                        }
+                                    }
+
+                                    // Random rotation
+                                    let rotation = rng_grass.gen::<f32>() * std::f32::consts::TAU;
+                                    // Moderate scale - smaller than before
+                                    let scale = 1.0 + rng_grass.gen::<f32>() * 0.8; // 1.0-1.8 scale (was 1.5-2.5)
+
+                                    // Sink into ground
+                                    let y_offset = -1.5 * scale;
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height + y_offset, world_z),
+                                    );
+                                    dead_grass_transforms.push(transform);
+                                }
+                            }
+
+                            // Create LOD0 and LOD1 pipelines for dead grass
+                            if !dead_grass_transforms.is_empty() {
+                                let shadow_map_dg = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("dead_grass_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_dg);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &dead_grass_transforms);
+                                    dead_grass_lod0_pipelines.push(p);
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("dead_grass_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_dg);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &dead_grass_transforms);
+                                    dead_grass_lod1_pipelines.push(p);
+                                }
+
+                                drop(shadow_map_dg);
+                                println!("[DEAD_GRASS] Created {} instances for chunk", dead_grass_transforms.len());
+                            }
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
@@ -5427,6 +5643,8 @@ fn main() {
                                 trees_lod1: foliage_pipelines_lod1,
                                 trees_lod2: foliage_pipelines_lod2,
                                 ferns: fern_pipelines,
+                                dead_grass_lod0: dead_grass_lod0_pipelines,
+                                dead_grass_lod1: dead_grass_lod1_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
                                 boulders_lod0,
@@ -5893,7 +6111,7 @@ fn main() {
                 // Use render distance setting from pause menu
                 // Distance is to chunk CENTER (not edge), so with 256-unit chunks,
                 // player can be up to 181 units from center (corner to center diagonal)
-                let grass_max_distance = 250.0;  // Grass visible within 250 units (increased for visibility)
+                let grass_max_distance = 250.0;  // Grass visible within 250 units
                 let detritus_max_distance = 0.0; // DISABLED - detritus is FPS killer
                 let building_max_distance = state.render_distance * 1.0; // Buildings visible at render dist
 
@@ -6280,6 +6498,62 @@ fn main() {
                         if dist <= lod_config.lod2_max_distance {
                             ferns_rendered += fern.instance_count() as usize;
                             fern.render(&mut render_pass);
+                        }
+                    }
+
+                    // Dead grass clumps with LOD system
+                    // LOD0: 0-150, LOD1: 100-400
+                    let dead_grass_lod0_end = 150.0;
+                    let dead_grass_lod0_fade_start = 100.0;
+                    let dead_grass_lod1_end = 400.0;
+
+                    let in_dead_grass_lod0 = dist <= dead_grass_lod0_end;
+                    let in_dead_grass_lod1 = dist >= dead_grass_lod0_fade_start && dist <= dead_grass_lod1_end;
+                    let dead_grass_transition = dist >= dead_grass_lod0_fade_start && dist <= dead_grass_lod0_end;
+
+                    // Render LOD0 (high detail)
+                    if in_dead_grass_lod0 {
+                        for dg in &chunk.dead_grass_lod0 {
+                            if dead_grass_transition {
+                                dg.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0, LODFadeMode::LOD0FadeOut,
+                                    dead_grass_lod0_fade_start, dead_grass_lod0_end,
+                                );
+                            } else {
+                                dg.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0,
+                                );
+                            }
+                            dg.render(&mut render_pass);
+                        }
+                    }
+
+                    // Render LOD1 (simplified)
+                    if in_dead_grass_lod1 {
+                        for dg in &chunk.dead_grass_lod1 {
+                            if dead_grass_transition {
+                                dg.update_camera_with_lod(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0, LODFadeMode::LOD1FadeIn,
+                                    dead_grass_lod0_fade_start, dead_grass_lod0_end,
+                                );
+                            } else {
+                                dg.update_camera_full(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density,
+                                    0.5, 1.0,
+                                );
+                            }
+                            dg.render(&mut render_pass);
                         }
                     }
 

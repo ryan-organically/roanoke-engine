@@ -31,6 +31,8 @@ pub struct LoadedChunk {
     pub trees_lod1: Vec<TreePipeline>, // LOD1 simplified trees for mid-range rendering
     pub trees_lod2: Vec<TreePipeline>, // LOD2 billboard trees for distant rendering
     pub ferns: Vec<TreePipeline>, // Forest understory ferns
+    pub dead_grass_lod0: Vec<TreePipeline>, // Dead grass clumps LOD0 (0-150 units)
+    pub dead_grass_lod1: Vec<TreePipeline>, // Dead grass clumps LOD1 (100-400 units)
     pub detritus: Option<DetritusPipeline>,
     pub rocks: Vec<TreePipeline>, // Non-boulder rocks (pebble, small, medium, flat, mossy)
     pub boulders_lod0: Vec<TreePipeline>, // Boulder LOD0 (0-200 units)

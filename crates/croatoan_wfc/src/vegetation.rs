@@ -60,9 +60,9 @@ pub fn generate_vegetation_for_chunk(
     let noise = Perlin::new(seed + 999);
 
     // Maximum density for sampling positions
-    // Higher density for bushier grass - must stay under 500K vertex limit
-    // 2.5 * 256 * 256 = ~164K potential blades × 10 verts = ~1.6M, filtered to ~400K
-    let max_density = 2.5;
+    // Reduced density for cleaner look - toned down from 2.5
+    // 1.5 * 256 * 256 = ~98K potential blades × 10 verts = ~1M, filtered to ~250K
+    let max_density = 1.5;
     let blade_count = (chunk_size * chunk_size * max_density) as u32;
 
     let mut all_positions = Vec::new();

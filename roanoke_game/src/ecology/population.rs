@@ -244,6 +244,7 @@ impl AnimalSpecies {
             Self::Donkey => (1.0, 0.8, 0.92, 4),
             Self::Fox => (5.0, 0.4, 0.7, 3),
             Self::Husky => (6.0, 0.7, 0.85, 4),
+            Self::RingNeckedPheasant => (12.0, 0.3, 0.6, 6), // High fecundity bird
         }
     }
 }

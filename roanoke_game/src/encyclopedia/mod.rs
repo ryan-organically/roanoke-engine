@@ -904,7 +904,7 @@ impl Default for FloraKnowledge {
 impl AnimalSpecies {
     pub fn size_category(&self) -> SizeCategory {
         match self {
-            Self::Copperhead | Self::Cottonmouth | Self::TimberRattlesnake => SizeCategory::Small,
+            Self::Copperhead | Self::Cottonmouth | Self::TimberRattlesnake | Self::RingNeckedPheasant => SizeCategory::Small,
             Self::Bobcat | Self::Fox => SizeCategory::Medium,
             Self::GrayWolf | Self::RedWolf | Self::WildBoar | Self::Husky | Self::WhitetailDeer => SizeCategory::Large,
             Self::BlackBear | Self::EasternCougar | Self::Stag | Self::Donkey => SizeCategory::VeryLarge,
@@ -948,6 +948,7 @@ impl AnimalSpecies {
             Self::Donkey => "Equus asinus",
             Self::Fox => "Vulpes vulpes",
             Self::Husky => "Canis lupus familiaris",
+            Self::RingNeckedPheasant => "Phasianus colchicus",
         }
     }
 
@@ -970,6 +971,7 @@ impl AnimalSpecies {
             Self::Donkey => "Hardy and sure-footed pack animal. Intelligent and stubborn. Forms strong bonds with herd mates. Can defend against predators with powerful kicks.",
             Self::Fox => "Opportunistic omnivore and clever hunter. Caches food for later consumption. Solitary except during mating season. Known for intelligence and adaptability.",
             Self::Husky => "Pack-oriented working dog. Loyal and energetic. Excellent endurance for long journeys. Thick coat provides protection against harsh weather.",
+            Self::RingNeckedPheasant => "Ground-dwelling game bird. Males have distinctive colorful plumage. Bursts into explosive flight when startled. Feeds on seeds, insects, and berries.",
         }
     }
 }

@@ -266,6 +266,7 @@ pub fn get_fauna_location_hint(species: AnimalSpecies) -> &'static str {
         AnimalSpecies::Donkey => "Wanders rocky terrain and mountain trails",
         AnimalSpecies::Fox => "Hunts small prey in forests and field edges",
         AnimalSpecies::Husky => "Rare; found in mountainous regions and northern forests",
+        AnimalSpecies::RingNeckedPheasant => "Forages in fields and meadows, bursts into flight when startled",
     }
 }
 
@@ -281,6 +282,7 @@ pub fn get_mystery_silhouette(species: AnimalSpecies) -> &'static str {
         AnimalSpecies::WhitetailDeer | AnimalSpecies::Stag => "deer",
         AnimalSpecies::Horse | AnimalSpecies::Donkey => "equine",
         AnimalSpecies::Fox => "canine",
+        AnimalSpecies::RingNeckedPheasant => "bird",
     }
 }
 

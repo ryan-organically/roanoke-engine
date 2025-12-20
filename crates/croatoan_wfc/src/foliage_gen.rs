@@ -305,16 +305,16 @@ pub fn generate_foliage_for_chunk(
             let local_seed = seed.wrapping_add((world_x as u32) ^ (world_z as u32).rotate_left(16));
             let local_noise = Perlin::new(local_seed);
 
-            // SHRUBS (understory) - more in treeline zone (defines the forest edge)
-            // Treeline (t 0.65-0.72): 4-7 shrubs per area (very dense)
-            // Regular forest: 1-3 shrubs per area
-            let base_shrubs = if biome_t < 0.72 { 4 } else { 1 };
-            let shrub_variation = if biome_t < 0.72 { 3.0 } else { 1.0 };
+            // SHRUBS (understory) - dense throughout forest
+            // Treeline (t 0.65-0.72): 8-14 shrubs per area (very dense)
+            // Regular forest: 5-9 shrubs per area
+            let base_shrubs = if biome_t < 0.72 { 8 } else { 5 };
+            let shrub_variation = if biome_t < 0.72 { 6.0 } else { 4.0 };
             let shrub_local = base_shrubs + ((local_noise.get([local_seed as f64 * 0.1, 60.0]) + 1.0) * shrub_variation) as u32;
             for i in 0..shrub_local {
                 // Fully random placement within a wide radius, not orbiting center
-                let shrub_offset_x = local_noise.get([local_seed as f64 * 0.5, i as f64 * 7.3]) as f32 * 20.0;
-                let shrub_offset_z = local_noise.get([local_seed as f64 * 0.7, i as f64 * 11.1]) as f32 * 20.0;
+                let shrub_offset_x = local_noise.get([local_seed as f64 * 0.5, i as f64 * 7.3]) as f32 * 25.0;
+                let shrub_offset_z = local_noise.get([local_seed as f64 * 0.7, i as f64 * 11.1]) as f32 * 25.0;
                 let sx = world_x + shrub_offset_x;
                 let sz = world_z + shrub_offset_z;
                 let (sh, _) = get_height_at(sx, sz, seed);
@@ -322,8 +322,9 @@ pub fn generate_foliage_for_chunk(
                     continue;
                 }
 
+                // Greatly varied scale: tiny 0.3 to large 2.5
                 let shrub_scale =
-                    0.8 + local_noise.get([sx as f64 * 0.2, sz as f64 * 0.2]).abs() as f32 * 0.6;
+                    0.3 + local_noise.get([sx as f64 * 0.2, sz as f64 * 0.2]).abs() as f32 * 2.2;
                 let shrub_rot =
                     local_noise.get([sx as f64 * 0.5, sz as f64 * 0.5]) as f32 * std::f32::consts::TAU;
                 let model_idx = ((sx.abs() as u32).wrapping_mul(73856093)
