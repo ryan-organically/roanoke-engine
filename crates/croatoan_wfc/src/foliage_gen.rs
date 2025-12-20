@@ -335,7 +335,7 @@ pub fn generate_foliage_for_chunk(
                     transform: Mat4::from_scale_rotation_translation(
                         Vec3::splat(shrub_scale),
                         Quat::from_rotation_y(shrub_rot),
-                        Vec3::new(sx, sh - 0.1, sz),
+                        Vec3::new(sx, sh, sz),
                     ),
                     model_index: model_idx,
                     is_megaflora: false,
@@ -443,38 +443,34 @@ pub fn generate_foliage_for_chunk(
             scale *= 4.0;
         }
 
-        // Y-anchor: proportional sink to prevent floating
-        let sink_amount = ((height - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
-
         result.trees.push(FoliageInstance {
             transform: Mat4::from_scale_rotation_translation(
                 Vec3::splat(scale),
                 Quat::from_rotation_y(angle),
-                Vec3::new(world_x, height - sink_amount, world_z),
+                Vec3::new(world_x, height, world_z),
             ),
             model_index: model_idx,
             is_megaflora: mega,
         });
     }
 
-    // Phase 3: Beach grass on upper beach (height 2.0-5.0m)
-    // Sparse near water, denser toward treeline
-    let beach_grass_count = generate_beach_grass_for_chunk(
-        &mut result,
-        seed,
-        chunk_size,
-        offset_x,
-        offset_z,
-        &noise,
-    );
+    // Phase 3: Beach grass - DISABLED, replaced by grass3 LOD system in main.rs
+    // The old beach_grass_0 model caused performance issues
+    // let beach_grass_count = generate_beach_grass_for_chunk(
+    //     &mut result,
+    //     seed,
+    //     chunk_size,
+    //     offset_x,
+    //     offset_z,
+    //     &noise,
+    // );
 
     println!(
-        "[FOLIAGE] Chunk ({}, {}): {} trees, {} shrubs ({} beach grass)",
+        "[FOLIAGE] Chunk ({}, {}): {} trees, {} shrubs",
         offset_x,
         offset_z,
         result.trees.len(),
-        result.shrubs.len(),
-        beach_grass_count
+        result.shrubs.len()
     );
     result
 }

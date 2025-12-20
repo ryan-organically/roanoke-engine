@@ -6,6 +6,13 @@
 - Before implementing a feature, ask if another terminal is already working on it
 - If the user mentions another terminal is handling something, stop immediately and defer
 
+## Investigation Before Action
+
+- When the user asks to **analyze**, **investigate**, **locate**, or **find out why** something isn't working, **STOP and REPORT BACK** before making any changes
+- Do not assume you know the fix. Present findings first, wait for approval
+- Failed fixes compound problems. Humility > confidence when debugging
+- If a fix didn't work, the next attempt requires **deeper investigation**, not another quick patch
+
 ## Blender Asset Workflow
 
 **When preparing any new asset for Blender export, read `docs/guides/BLENDER_ASSET_WORKFLOW.md` first.**

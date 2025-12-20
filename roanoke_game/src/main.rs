@@ -1519,10 +1519,10 @@ fn main() {
     }));
 
     // ... (Channel setup) ...
-    // Response Data: (Terrain, Grass, Trees, Shrubs, Detritus, Rocks, Buildings, Ferns, Coord X, Coord Z)
+    // Response Data: (Terrain, Trees, Shrubs, Detritus, Rocks, Buildings, Ferns, Coord X, Coord Z)
+    // NOTE: Grass data removed - using grass2/grass3 model LOD system instead
     type ChunkData = (
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<u32>, // Terrain
-        Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<f32>, Vec<u32>, // Grass (pos, col, local_height, idx)
         std::collections::HashMap<String, Vec<Mat4>>, // Trees (Named + Grouped)
         std::collections::HashMap<String, Vec<Mat4>>, // Shrubs (Named + Grouped)
         Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>, // Detritus
@@ -1580,13 +1580,9 @@ fn main() {
                 let (terrain_pos, terrain_col, terrain_nrm, terrain_idx) =
                     generate_terrain_chunk(req.seed, chunk_resolution, offset_x, offset_z, scale);
 
-                // Generate grass
-                let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(
-                    req.seed,
-                    chunk_world_size,
-                    offset_x as f32,
-                    offset_z as f32,
-                );
+                // Procedural grass DISABLED - replaced by grass2/grass3 model LOD system
+                // See docs/archive/PROCEDURAL_GRASS_SYSTEM.md for details
+                // let (grass_pos, grass_col, grass_heights, grass_idx) = generate_vegetation_for_chunk(...);
 
                 // Generate trees (with birch/pine communities via foliage system)
                 let foliage = generate_foliage_for_chunk(
@@ -1595,10 +1591,10 @@ fn main() {
                     offset_x as f32,
                     offset_z as f32,
                     4, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0
-                    2, // shrub model count: beach_grass_0, conifer_shrub_0
+                    1, // shrub model count: conifer_shrub_0 (beach_grass_0 disabled - using grass3 LOD)
                 );
                 let tree_groups = foliage.trees_by_model(4);
-                let shrub_groups = foliage.shrubs_by_model(2);
+                let shrub_groups = foliage.shrubs_by_model(1);
 
                 // Generate detritus
                 let (det_pos, det_nrm, det_uv, det_idx) = generate_detritus_for_chunk(
@@ -1650,10 +1646,9 @@ fn main() {
                     })
                     .collect();
 
-                // Send result
+                // Send result (grass data removed - using grass2/grass3 models instead)
                 if chunk_tx.send((
                     terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                    grass_pos, grass_col, grass_heights, grass_idx,
                     tree_groups,
                     shrub_groups,
                     det_pos, det_nrm, det_uv, det_idx,
@@ -2525,10 +2520,10 @@ fn main() {
                 // Load shrub/bush models from assets/models/shrubs/
                 // Same pattern as trees: separate bark and leaves meshes
                 // Includes beach grass (low-poly clumps for upper beach)
-                // NOTE: shrub_0, bush_0, grass_0 are single-LOD placeholders - disabled for now
+                // NOTE: shrub_0, bush_0, grass_0, beach_grass_0 disabled - using grass3 LOD system
                 let shrub_models = [
                     // "shrub_0", "bush_0", "grass_0", // DISABLED - single LOD placeholders
-                    "beach_grass_0",
+                    // "beach_grass_0", // DISABLED - replaced by grass3 LOD system
                     "conifer_shrub_0", // New 3-LOD shrub
                 ];
                 let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
@@ -2764,13 +2759,14 @@ fn main() {
                 }
 
                 // Load dead grass chunk models from assets/models/grass/
-                // These are larger grass clump models meant to replace procedural grass
-                // LOD0: high detail, LOD1: simplified for distance
-                let dead_grass_lods = ["dead_grass_lod0", "dead_grass_lod1"];
-                let mut dead_grass_cache = gltf_loader::ModelCache::new("assets/models/grass");
-                for name in &dead_grass_lods {
-                    if let Some(model) = dead_grass_cache.load(name) {
-                        // Dead grass is single mesh with MASK alpha
+                // dead_grass DISABLED - replaced by grass2/grass3 system
+
+                // Load grass2 LOD models (inland/meadow/forest ground cover)
+                // LOD0: 55 tris (close), LOD1: 18 tris (mid), LOD2: 12 tris (far)
+                let grass2_lods = ["grass2_lod0", "grass2_lod1", "grass2_lod2"];
+                let mut grass2_cache = gltf_loader::ModelCache::new("assets/models/grass");
+                for name in &grass2_lods {
+                    if let Some(model) = grass2_cache.load(name) {
                         let mut all_positions: Vec<[f32; 3]> = Vec::new();
                         let mut all_normals: Vec<[f32; 3]> = Vec::new();
                         let mut all_uvs: Vec<[f32; 2]> = Vec::new();
@@ -2807,11 +2803,63 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[DEAD_GRASS] Registered '{}': {} verts, {} tris",
+                            println!("[GRASS2] Registered '{}': {} verts, {} tris",
                                 name, all_positions.len(), all_indices.len() / 3);
                         }
                     } else {
-                        println!("[DEAD_GRASS] WARNING: Model '{}' not found", name);
+                        println!("[GRASS2] Model '{}' not found - export from Blender to assets/models/grass/", name);
+                    }
+                }
+
+                // Load grass3 LOD models from assets/models/grass/
+                // Simple crossed-planes grass clumps for dense instancing
+                // LOD0: 24 tris (close), LOD1: 12 tris (mid), LOD2: 8 tris (far)
+                let grass3_lods = ["grass3_lod0", "grass3_lod1", "grass3_lod2"];
+                let mut grass3_cache = gltf_loader::ModelCache::new("assets/models/grass");
+                for name in &grass3_lods {
+                    if let Some(model) = grass3_cache.load(name) {
+                        // Grass3 is single mesh with MASK/BLEND alpha
+                        let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                        let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                        let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut all_indices: Vec<u32> = Vec::new();
+                        let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = all_positions.len() as u32;
+                            all_positions.extend_from_slice(&mesh.positions);
+                            all_normals.extend_from_slice(&mesh.normals);
+                            all_uvs.extend_from_slice(&mesh.uvs);
+                            all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                            if grass_texture.is_none() {
+                                grass_texture = mesh.material.base_color_texture_data.as_ref();
+                            }
+                        }
+
+                        if !all_positions.is_empty() {
+                            let texture_bind_group = grass_texture.map(|tex_data| {
+                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                    ctx.device(), ctx.queue(), tex_data,
+                                    Some(&format!("{}_texture", name)),
+                                );
+                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                    ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                ))
+                            });
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(),
+                                &all_positions,
+                                &all_normals,
+                                &all_uvs,
+                                &all_indices,
+                                texture_bind_group,
+                            );
+                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
+                            println!("[GRASS3] Registered '{}': {} verts, {} tris",
+                                name, all_positions.len(), all_indices.len() / 3);
+                        }
+                    } else {
+                        println!("[GRASS3] Model '{}' not found - export from Blender to assets/models/grass/", name);
                     }
                 }
 
@@ -5115,7 +5163,6 @@ fn main() {
                 for _ in 0..chunks_per_frame {
                     match rx.try_recv() {
                         Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
-                            grass_pos, grass_col, grass_heights, grass_idx,
                             tree_groups,
                             shrub_groups,
                             det_pos, det_nrm, det_uv, det_idx,
@@ -5165,18 +5212,8 @@ fn main() {
                                 )
                             };
 
-                            let mut grass_pipeline = None;
-                            if !grass_pos.is_empty() {
-                                let shadow_map = shadow_map_mutex.safe_lock();
-                                let mut gp = GrassPipeline::new(ctx.device(), ctx.surface_format(), &shadow_map);
-                                drop(shadow_map);
-                                gp.upload_mesh(ctx.device(), ctx.queue(), &grass_pos, &grass_col, &grass_heights, &grass_idx);
-                                println!("[GRASS] Chunk ({}, {}): {} blades uploaded (is_ready={})",
-                                    offset_x, offset_z, grass_pos.len() / 10, gp.is_ready());
-                                grass_pipeline = Some(gp);
-                            } else {
-                                println!("[GRASS] Chunk ({}, {}): NO grass generated", offset_x, offset_z);
-                            }
+                            // Procedural grass pipeline DISABLED - using grass2/grass3 models instead
+                            let grass_pipeline: Option<GrassPipeline> = None;
 
                             // FOLIAGE: Create pipelines for trees and shrubs
                             let mut foliage_pipelines: Vec<TreePipeline> = Vec::new();
@@ -5544,95 +5581,205 @@ fn main() {
                             }
                             drop(shadow_map_for_ferns);
 
-                            // Generate dead grass clump instances across the chunk
-                            // These replace procedural grass with larger clump models
-                            let mut dead_grass_lod0_pipelines: Vec<TreePipeline> = Vec::new();
-                            let mut dead_grass_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            // ================================================================
+                            // GRASS2: Inland/meadow/forest ground cover
+                            // ================================================================
+                            let mut grass2_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut grass2_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut grass2_lod2_pipelines: Vec<TreePipeline> = Vec::new();
 
-                            // Generate dead grass clumps - sparse coverage, accent rather than dominant
-                            let mut dead_grass_transforms: Vec<Mat4> = Vec::new();
+                            let mut grass2_transforms: Vec<Mat4> = Vec::new();
 
                             // Use deterministic seed based on chunk position
-                            let grass_seed = state.seed ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let grass2_seed = state.seed.wrapping_add(5555) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
                             use rand::SeedableRng;
-                            let mut rng_grass = rand::rngs::StdRng::seed_from_u64(grass_seed as u64);
+                            let mut rng_grass2 = rand::rngs::StdRng::seed_from_u64(grass2_seed as u64);
 
-                            // Sparse spacing - dead grass as accent, not dominant feature
-                            let base_spacing = 18.0; // Reduced density (was 6.0)
+                            // Ground cover spacing (wider = fewer instances = better perf)
+                            let grass2_spacing = 4.0;
 
-                            // Use base spacing for the grid
-                            let steps = (chunk_size / base_spacing) as i32;
-                            for gz in 0..steps {
-                                for gx in 0..steps {
+                            let grass2_steps = (chunk_size / grass2_spacing) as i32;
+                            for gz in 0..grass2_steps {
+                                for gx in 0..grass2_steps {
                                     use rand::Rng;
-                                    // Jitter for natural placement
-                                    let jitter_x = (rng_grass.gen::<f32>() - 0.5) * base_spacing * 0.7;
-                                    let jitter_z = (rng_grass.gen::<f32>() - 0.5) * base_spacing * 0.7;
+                                    let jitter_x = (rng_grass2.gen::<f32>() - 0.5) * grass2_spacing * 0.8;
+                                    let jitter_z = (rng_grass2.gen::<f32>() - 0.5) * grass2_spacing * 0.8;
 
-                                    let world_x = offset_x as f32 + (gx as f32 * base_spacing) + jitter_x;
-                                    let world_z = offset_z as f32 + (gz as f32 * base_spacing) + jitter_z;
+                                    let world_x = offset_x as f32 + (gx as f32 * grass2_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (gz as f32 * grass2_spacing) + jitter_z;
 
-                                    // Sample terrain height and biome
                                     let (height, _color) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
                                     let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
 
-                                    // Skip if underwater
-                                    if height < 1.5 {
+                                    // Skip underwater and beach (grass3 handles beach)
+                                    if height < 2.5 || biome_t < 0.60 {
                                         continue;
                                     }
 
-                                    // Beach zone: height 1.5-8, biome_t < 0.65 (beach/treeline per foliage_gen)
-                                    let is_beach = height < 8.0 && biome_t < 0.65;
-
-                                    // Beaches: keep ~40% (was 100%), inland: keep ~10%
-                                    if is_beach {
-                                        if rng_grass.gen::<f32>() > 0.40 {
-                                            continue;
-                                        }
+                                    // Density by zone - sparse near beach, denser inland:
+                                    // Near beach (0.60-0.68): gradient 20-60%
+                                    // Meadow/treeline (0.68-0.72): 70% density
+                                    // Forest floor (0.72+): 50% density (shade)
+                                    let spawn_chance = if biome_t < 0.68 {
+                                        // Gradient: 20% at 0.60, 60% at 0.68
+                                        let t = (biome_t - 0.60) / 0.08;
+                                        0.20 + t * 0.40
+                                    } else if biome_t < 0.72 {
+                                        0.70
                                     } else {
-                                        // Keep ~1 in 10 for inland
-                                        if rng_grass.gen::<f32>() > 0.10 {
-                                            continue;
-                                        }
+                                        0.50
+                                    };
+
+                                    if rng_grass2.gen::<f32>() > spawn_chance {
+                                        continue;
                                     }
 
-                                    // Random rotation
-                                    let rotation = rng_grass.gen::<f32>() * std::f32::consts::TAU;
-                                    // Moderate scale - smaller than before
-                                    let scale = 1.0 + rng_grass.gen::<f32>() * 0.8; // 1.0-1.8 scale (was 1.5-2.5)
-
-                                    // Sink into ground
-                                    let y_offset = -1.5 * scale;
+                                    let rotation = rng_grass2.gen::<f32>() * std::f32::consts::TAU;
+                                    let scale = 1.4 + rng_grass2.gen::<f32>() * 0.8; // 1.4-2.2 (larger clumps)
 
                                     let transform = Mat4::from_scale_rotation_translation(
                                         Vec3::splat(scale),
                                         glam::Quat::from_rotation_y(rotation),
-                                        Vec3::new(world_x, height + y_offset, world_z),
+                                        Vec3::new(world_x, height, world_z),
                                     );
-                                    dead_grass_transforms.push(transform);
+                                    grass2_transforms.push(transform);
                                 }
                             }
 
-                            // Create LOD0 and LOD1 pipelines for dead grass
-                            if !dead_grass_transforms.is_empty() {
-                                let shadow_map_dg = shadow_map_mutex.safe_lock();
+                            // Create LOD pipelines for grass2
+                            if !grass2_transforms.is_empty() {
+                                let shadow_map_g2 = shadow_map_mutex.safe_lock();
 
-                                if let Some(lod0_mesh) = state.mesh_registry.get("dead_grass_lod0") {
-                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_dg);
+                                if let Some(lod0_mesh) = state.mesh_registry.get("grass2_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g2);
                                     p.set_mesh(lod0_mesh.clone());
-                                    p.upload_instances(ctx.device(), &dead_grass_transforms);
-                                    dead_grass_lod0_pipelines.push(p);
+                                    p.upload_instances(ctx.device(), &grass2_transforms);
+                                    grass2_lod0_pipelines.push(p);
                                 }
 
-                                if let Some(lod1_mesh) = state.mesh_registry.get("dead_grass_lod1") {
-                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_dg);
+                                if let Some(lod1_mesh) = state.mesh_registry.get("grass2_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g2);
                                     p.set_mesh(lod1_mesh.clone());
-                                    p.upload_instances(ctx.device(), &dead_grass_transforms);
-                                    dead_grass_lod1_pipelines.push(p);
+                                    p.upload_instances(ctx.device(), &grass2_transforms);
+                                    grass2_lod1_pipelines.push(p);
                                 }
 
-                                drop(shadow_map_dg);
-                                println!("[DEAD_GRASS] Created {} instances for chunk", dead_grass_transforms.len());
+                                if let Some(lod2_mesh) = state.mesh_registry.get("grass2_lod2") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g2);
+                                    p.set_mesh(lod2_mesh.clone());
+                                    p.upload_instances(ctx.device(), &grass2_transforms);
+                                    grass2_lod2_pipelines.push(p);
+                                }
+
+                                drop(shadow_map_g2);
+                                println!("[GRASS2] Created {} instances for chunk", grass2_transforms.len());
+                            }
+
+                            // ================================================================
+                            // GRASS3: Tall wispy grass (beach + riverbanks)
+                            // ================================================================
+                            let mut grass3_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut grass3_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut grass3_lod2_pipelines: Vec<TreePipeline> = Vec::new();
+
+                            let mut grass3_transforms: Vec<Mat4> = Vec::new();
+
+                            // Use different seed for grass3
+                            let grass3_seed = state.seed.wrapping_add(7777) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let mut rng_grass3 = rand::rngs::StdRng::seed_from_u64(grass3_seed as u64);
+
+                            // Sparse spacing - larger clumps, fewer instances
+                            let grass3_spacing = 8.0;
+
+                            // Clumping noise for natural clustering
+                            let clump_noise = noise::Perlin::new(grass3_seed);
+
+                            let grass3_steps = (chunk_size / grass3_spacing) as i32;
+                            for gz in 0..grass3_steps {
+                                for gx in 0..grass3_steps {
+                                    use rand::Rng;
+                                    use noise::NoiseFn;
+
+                                    let jitter_x = (rng_grass3.gen::<f32>() - 0.5) * grass3_spacing * 0.9;
+                                    let jitter_z = (rng_grass3.gen::<f32>() - 0.5) * grass3_spacing * 0.9;
+
+                                    let world_x = offset_x as f32 + (gx as f32 * grass3_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (gz as f32 * grass3_spacing) + jitter_z;
+
+                                    let (height, _color) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Skip if underwater
+                                    if height < 1.0 {
+                                        continue;
+                                    }
+
+                                    // Check river proximity for inland spawning
+                                    let river_depth = croatoan_wfc::calculate_river_depth(world_x, world_z, state.seed);
+                                    let near_river = river_depth > 0.05 && river_depth < 0.6; // Near but not in river
+
+                                    // Spawn on beach (0.48-0.62) OR near rivers inland
+                                    let is_beach = biome_t >= 0.48 && biome_t <= 0.62;
+                                    if !is_beach && !near_river {
+                                        continue;
+                                    }
+
+                                    // Clumping: use noise to create sparse clusters
+                                    let clump_val = clump_noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]);
+                                    let clump_threshold = if near_river { 0.1 } else { 0.25 }; // Denser near rivers
+                                    if clump_val < clump_threshold {
+                                        continue;
+                                    }
+
+                                    // Low base density, boosted by clump strength
+                                    let base_chance = if near_river { 0.45 } else { 0.30 };
+                                    let clump_boost = ((clump_val - clump_threshold) * 0.5).min(0.3) as f32;
+                                    let spawn_chance = base_chance + clump_boost;
+
+                                    if rng_grass3.gen::<f32>() > spawn_chance {
+                                        continue;
+                                    }
+
+                                    let rotation = rng_grass3.gen::<f32>() * std::f32::consts::TAU;
+                                    // Very tall wispy beach grass with high variation
+                                    let scale = 4.0 + rng_grass3.gen::<f32>() * 4.0; // 4.0-8.0 scale
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height, world_z),
+                                    );
+                                    grass3_transforms.push(transform);
+                                }
+                            }
+
+                            // Create LOD pipelines for grass3
+                            if !grass3_transforms.is_empty() {
+                                let shadow_map_g3 = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("grass3_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g3);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &grass3_transforms);
+                                    grass3_lod0_pipelines.push(p);
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("grass3_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g3);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &grass3_transforms);
+                                    grass3_lod1_pipelines.push(p);
+                                }
+
+                                if let Some(lod2_mesh) = state.mesh_registry.get("grass3_lod2") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_g3);
+                                    p.set_mesh(lod2_mesh.clone());
+                                    p.upload_instances(ctx.device(), &grass3_transforms);
+                                    grass3_lod2_pipelines.push(p);
+                                }
+
+                                drop(shadow_map_g3);
+                                println!("[GRASS3] Created {} instances for chunk", grass3_transforms.len());
                             }
 
                             // Add to Manager
@@ -5643,8 +5790,12 @@ fn main() {
                                 trees_lod1: foliage_pipelines_lod1,
                                 trees_lod2: foliage_pipelines_lod2,
                                 ferns: fern_pipelines,
-                                dead_grass_lod0: dead_grass_lod0_pipelines,
-                                dead_grass_lod1: dead_grass_lod1_pipelines,
+                                grass2_lod0: grass2_lod0_pipelines,
+                                grass2_lod1: grass2_lod1_pipelines,
+                                grass2_lod2: grass2_lod2_pipelines,
+                                grass3_lod0: grass3_lod0_pipelines,
+                                grass3_lod1: grass3_lod1_pipelines,
+                                grass3_lod2: grass3_lod2_pipelines,
                                 detritus: detritus_pipeline,
                                 rocks: rock_pipelines,
                                 boulders_lod0,
@@ -5779,23 +5930,8 @@ fn main() {
 
             {
                 for (_coord, chunk) in manager.iter_chunks() {
-                    if let Some(grass) = &chunk.grass {
-                        // Pass sun_dir (not light_dir) so shader can detect day/night properly
-                        // At night, light_dir is moon_dir which has negative y (moon above)
-                        // This confuses the shader into thinking it's daytime
-                        grass.update_camera(
-                            ctx.queue(),
-                            &view_proj,
-                            &light_view_proj,
-                            sun_dir.to_array(),
-                            elapsed,
-                            state.camera.position.to_array(),
-                            fog_color,
-                            fog_start,
-                            fog_end,
-                            fog_density,
-                        );
-                    }
+                    // Procedural grass update DISABLED - using grass2/grass3 models instead
+
                     for trees in &chunk.trees {
                         // Textured foliage from GLTF - enable texture sampling + alpha discard
                         trees.update_camera_full(
@@ -6166,13 +6302,7 @@ fn main() {
 
                     let dist = (chunk.bounds.center - state.camera.position).length();
 
-                    // Grass
-                    if let Some(grass) = &chunk.grass {
-                        if dist <= grass_max_distance {
-                            grass_rendered += 1;
-                            grass.render(&mut render_pass);
-                        }
-                    }
+                    // Procedural grass render DISABLED - using grass2/grass3 models instead
 
                     // Trees with 3-tier LOD system - dithered transitions pushed FAR back
                     // LOD0 (full detail): 0-600, dither out at 400-600 (no pop-ins visible)
@@ -6501,59 +6631,105 @@ fn main() {
                         }
                     }
 
-                    // Dead grass clumps with LOD system
-                    // LOD0: 0-150, LOD1: 100-400
-                    let dead_grass_lod0_end = 150.0;
-                    let dead_grass_lod0_fade_start = 100.0;
-                    let dead_grass_lod1_end = 400.0;
+                    // ================================================================
+                    // GRASS2: Inland/meadow/forest ground cover with 3 LOD levels
+                    // ================================================================
+                    // LOD0: 0-50, LOD1: 40-120, LOD2: 100-250
+                    let grass2_lod0_end = 50.0;
+                    let grass2_lod1_end = 120.0;
+                    let grass2_lod1_fade_start = 100.0;
+                    let grass2_lod2_end = 250.0;
 
-                    let in_dead_grass_lod0 = dist <= dead_grass_lod0_end;
-                    let in_dead_grass_lod1 = dist >= dead_grass_lod0_fade_start && dist <= dead_grass_lod1_end;
-                    let dead_grass_transition = dist >= dead_grass_lod0_fade_start && dist <= dead_grass_lod0_end;
+                    let in_grass2_lod0 = dist <= grass2_lod0_end;
+                    let in_grass2_lod1 = dist > grass2_lod0_end && dist <= grass2_lod1_end;
+                    let in_grass2_lod2 = dist >= grass2_lod1_fade_start && dist <= grass2_lod2_end;
 
-                    // Render LOD0 (high detail)
-                    if in_dead_grass_lod0 {
-                        for dg in &chunk.dead_grass_lod0 {
-                            if dead_grass_transition {
-                                dg.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, LODFadeMode::LOD0FadeOut,
-                                    dead_grass_lod0_fade_start, dead_grass_lod0_end,
-                                );
-                            } else {
-                                dg.update_camera_full(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0,
-                                );
-                            }
-                            dg.render(&mut render_pass);
+                    if in_grass2_lod0 {
+                        for g2 in &chunk.grass2_lod0 {
+                            g2.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g2.render(&mut render_pass);
                         }
                     }
 
-                    // Render LOD1 (simplified)
-                    if in_dead_grass_lod1 {
-                        for dg in &chunk.dead_grass_lod1 {
-                            if dead_grass_transition {
-                                dg.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0, LODFadeMode::LOD1FadeIn,
-                                    dead_grass_lod0_fade_start, dead_grass_lod0_end,
-                                );
-                            } else {
-                                dg.update_camera_full(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.5, 1.0,
-                                );
-                            }
-                            dg.render(&mut render_pass);
+                    if in_grass2_lod1 {
+                        for g2 in &chunk.grass2_lod1 {
+                            g2.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g2.render(&mut render_pass);
+                        }
+                    }
+
+                    if in_grass2_lod2 {
+                        for g2 in &chunk.grass2_lod2 {
+                            g2.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g2.render(&mut render_pass);
+                        }
+                    }
+
+                    // ================================================================
+                    // GRASS3: Beach grass with 3 LOD levels
+                    // ================================================================
+                    // LOD0: 0-40, LOD1: 30-100, LOD2: 80-200
+                    let grass3_lod0_end = 40.0;
+                    let grass3_lod0_fade_start = 30.0;
+                    let grass3_lod1_end = 100.0;
+                    let grass3_lod1_fade_start = 80.0;
+                    let grass3_lod2_end = 200.0;
+
+                    let in_grass3_lod0 = dist <= grass3_lod0_end;
+                    let in_grass3_lod1 = dist >= grass3_lod0_fade_start && dist <= grass3_lod1_end;
+                    let in_grass3_lod2 = dist >= grass3_lod1_fade_start && dist <= grass3_lod2_end;
+
+                    // Render grass3 LOD0 (highest detail, close range)
+                    if in_grass3_lod0 {
+                        for g3 in &chunk.grass3_lod0 {
+                            g3.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g3.render(&mut render_pass);
+                        }
+                    }
+
+                    // Render grass3 LOD1 (mid-range)
+                    if in_grass3_lod1 {
+                        for g3 in &chunk.grass3_lod1 {
+                            g3.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g3.render(&mut render_pass);
+                        }
+                    }
+
+                    // Render grass3 LOD2 (far range, lowest detail)
+                    if in_grass3_lod2 {
+                        for g3 in &chunk.grass3_lod2 {
+                            g3.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            g3.render(&mut render_pass);
                         }
                     }
 

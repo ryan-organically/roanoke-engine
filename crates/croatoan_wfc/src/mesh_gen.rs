@@ -1,6 +1,184 @@
 use crate::noise_util;
 use glam::{Vec2, Vec3};
 
+// ============================================================================
+// SPAWN AREA TERRAIN FEATURES
+// Large-scale river valley system with natural elevation gradients
+// ============================================================================
+
+/// Calculate marsh zone influence south of spawn
+/// Returns 0.0 outside marsh, up to 1.0 at marsh center
+fn calculate_marsh_zone(x: f32, z: f32) -> f32 {
+    // Marsh centered at (0, -150) with ~250m radius
+    let marsh_center = Vec2::new(0.0, -150.0);
+    let dist = Vec2::new(x, z).distance(marsh_center);
+    let marsh_radius = 250.0;
+
+    if dist < marsh_radius {
+        // Smooth quadratic falloff at edges
+        let factor = 1.0 - (dist / marsh_radius);
+        factor * factor
+    } else {
+        0.0
+    }
+}
+
+/// River valley terrain system
+/// Creates a natural river flowing from inland highlands to the ocean
+/// with gradual elevation changes over thousands of units
+struct RiverValleyResult {
+    /// Height modification from the valley/ridge system
+    height_mod: f32,
+    /// River proximity (0.0 = not in river, 1.0 = river center)
+    river_factor: f32,
+    /// Current terrain slope (for waterfall detection)
+    slope: f32,
+    /// Whether this is a waterfall zone
+    is_waterfall: bool,
+    /// Whether this is rocky rapids
+    is_rocky: bool,
+}
+
+/// Calculate the main river valley system
+/// This creates an E-W oriented valley with the river flowing toward the ocean
+fn calculate_river_valley(x: f32, z: f32, seed: u32) -> RiverValleyResult {
+    // River flows from west (inland, high) to east (ocean, low)
+    // Origin around x = -800 (headwaters), mouth around x = 300 (beach)
+
+    let river_start_x = -800.0;
+    let river_end_x = 350.0;
+    let river_length = river_end_x - river_start_x;
+
+    // Progress along river (0.0 = headwaters, 1.0 = mouth)
+    let river_progress = ((x - river_start_x) / river_length).clamp(0.0, 1.0);
+
+    // River path - meanders using low-frequency noise
+    // More meandering in the middle section, straighter at ends
+    let meander_strength = (river_progress * (1.0 - river_progress) * 4.0).sqrt() * 80.0;
+    let meander = noise_util::fbm(
+        Vec2::new(x * 0.002, 0.0),
+        3, 2.0, 0.5, seed.wrapping_add(800)
+    ) * meander_strength;
+
+    let river_center_z = meander;
+
+    // River width: narrow creek at start, wider toward mouth
+    // Logarithmic growth for natural feel
+    let base_width = 4.0 + (1.0 + river_progress * 10.0).ln() * 12.0;
+    let width_noise = noise_util::fbm(
+        Vec2::new(x * 0.01, z * 0.01),
+        2, 2.0, 0.5, seed.wrapping_add(801)
+    );
+    let river_width = base_width * (0.8 + width_noise.abs() * 0.4);
+
+    let dist_from_river = (z - river_center_z).abs();
+
+    // =========================================================================
+    // ELEVATION PROFILE (logarithmic descent with local variations)
+    // =========================================================================
+
+    // Base elevation: high inland, low at coast
+    // Using logarithmic curve for natural river gradient
+    let elevation_at_start = 45.0;  // Headwaters elevation
+    let elevation_at_end = 2.0;     // Near sea level at mouth
+
+    // Logarithmic interpolation for gentle gradient that steepens at drops
+    let log_progress = if river_progress > 0.01 {
+        river_progress.ln().abs() / 5.0_f32.ln()  // Normalized log curve
+    } else {
+        0.0
+    };
+    let base_elevation = lerp(elevation_at_start, elevation_at_end, river_progress.sqrt());
+
+    // Add terrain undulations - gentle rolling hills along the valley
+    let terrain_undulation = noise_util::fbm(
+        Vec2::new(x * 0.0008, z * 0.0008),
+        4, 2.0, 0.5, seed.wrapping_add(802)
+    ) * 8.0;
+
+    // Valley walls - terrain rises away from river
+    let valley_width = 200.0 + river_progress * 150.0;  // Valley widens downstream
+    let valley_factor = (dist_from_river / valley_width).clamp(0.0, 1.0);
+    let valley_wall_height = valley_factor * valley_factor * 15.0;
+
+    // =========================================================================
+    // SLOPE AND WATERFALL DETECTION
+    // =========================================================================
+
+    // Calculate local slope by sampling nearby
+    let slope_sample_dist = 20.0;
+    let height_here = base_elevation;
+    let height_downstream = {
+        let downstream_progress = ((x + slope_sample_dist - river_start_x) / river_length).clamp(0.0, 1.0);
+        lerp(elevation_at_start, elevation_at_end, downstream_progress.sqrt())
+    };
+    let slope = (height_here - height_downstream) / slope_sample_dist;
+
+    // Add occasional steeper sections (potential waterfalls/rapids)
+    let steep_noise = noise_util::fbm(
+        Vec2::new(x * 0.003, 0.0),
+        2, 2.0, 0.5, seed.wrapping_add(803)
+    );
+
+    // Waterfalls occur where slope is steep AND we're in the right progress zone
+    let waterfall_zones = [0.15, 0.35, 0.55];  // Three potential waterfall locations
+    let mut is_waterfall = false;
+    let mut waterfall_drop = 0.0;
+
+    for &wf_progress in &waterfall_zones {
+        let wf_dist = (river_progress - wf_progress).abs();
+        if wf_dist < 0.03 && steep_noise > 0.3 {
+            is_waterfall = dist_from_river < river_width * 1.5;
+            if is_waterfall {
+                // Sharp drop at waterfall
+                let wf_factor = 1.0 - (wf_dist / 0.03);
+                waterfall_drop = wf_factor * wf_factor * 8.0;
+            }
+        }
+    }
+
+    // Rocky sections - mid-river where gradient is moderate
+    let rocky_noise = noise_util::turbulence(
+        Vec2::new(x * 0.008, z * 0.008),
+        3, 2.0, 0.5, seed.wrapping_add(804)
+    );
+    let is_rocky = rocky_noise > 0.6
+        && river_progress > 0.1
+        && river_progress < 0.7
+        && dist_from_river < river_width * 0.8;
+
+    // =========================================================================
+    // FINAL HEIGHT CALCULATION
+    // =========================================================================
+
+    let mut height_mod = base_elevation + terrain_undulation + valley_wall_height - waterfall_drop;
+
+    // River bed depression
+    let river_factor = if dist_from_river < river_width && x > river_start_x && x < river_end_x {
+        let raw_factor = 1.0 - (dist_from_river / river_width);
+        raw_factor * raw_factor
+    } else {
+        0.0
+    };
+
+    // Add rocky bed texture
+    if is_rocky && river_factor > 0.3 {
+        let rock_bumps = noise_util::fbm(
+            Vec2::new(x * 0.05, z * 0.05),
+            3, 2.5, 0.6, seed.wrapping_add(805)
+        );
+        height_mod += rock_bumps.abs() * 0.8;
+    }
+
+    RiverValleyResult {
+        height_mod,
+        river_factor,
+        slope,
+        is_waterfall,
+        is_rocky,
+    }
+}
+
 /// Generate a procedural terrain chunk mesh
 /// Returns (positions, colors, normals, indices)
 pub fn generate_terrain_chunk(
@@ -245,6 +423,75 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
     if mine_entrance > 0.0 {
         height = lerp(height, -4.0, mine_entrance);
         base_color = lerp_color(base_color, [0.25, 0.20, 0.15], mine_entrance);
+    }
+
+    // ========================================================================
+    // SPAWN AREA TERRAIN FEATURES
+    // Large-scale river valley with natural gradients
+    // ========================================================================
+
+    // 1. Marsh zone south of spawn - forces low wet terrain
+    let marsh_factor = calculate_marsh_zone(x, z);
+    if marsh_factor > 0.0 {
+        // Force height to marsh level (0.5-2.0m)
+        let marsh_height = lerp(2.0, 0.5, marsh_factor);
+        height = lerp(height, marsh_height, marsh_factor);
+        // Override color to marsh green-brown
+        base_color = lerp_color(base_color, [0.35, 0.42, 0.28], marsh_factor * 0.8);
+    }
+
+    // 2. River valley system (large-scale, gradual terrain)
+    // ONLY apply to land areas (t > 0.45 means not ocean)
+    let valley = calculate_river_valley(x, z, seed);
+
+    // Valley influence: only on land, fades near coast
+    let land_factor = ((t - 0.45) / 0.20).clamp(0.0, 1.0);  // 0 at ocean, 1 well inland
+
+    if land_factor > 0.0 {
+        // Blend valley elevation with existing terrain
+        // Valley influence is strongest near the river, fades with distance
+        let valley_influence = if valley.river_factor > 0.0 {
+            0.7 * land_factor  // Strong influence in river, but respect coastline
+        } else {
+            // Gradual influence based on distance from river center
+            let dist_factor = 1.0 - (valley.height_mod / 60.0).clamp(0.0, 1.0);
+            dist_factor * 0.3 * land_factor
+        };
+
+        // Apply valley terrain modification
+        height = lerp(height, valley.height_mod, valley_influence);
+    }
+
+    // River bed carving (only on land)
+    if valley.river_factor > 0.0 && land_factor > 0.5 {
+        // River depth: deeper in middle, shallow at edges
+        let river_depth = valley.river_factor * 2.5;
+        height -= river_depth;
+
+        // River coloring based on type
+        if valley.is_waterfall {
+            // White churning water
+            base_color = lerp_color(base_color, [0.75, 0.85, 0.90], valley.river_factor * 0.7);
+        } else if valley.is_rocky {
+            // Rocky bed visible through shallow water
+            let rock_color = [0.35, 0.32, 0.28];
+            let water_color = [0.15, 0.30, 0.38];
+            let blended = lerp_color(rock_color, water_color, valley.river_factor);
+            base_color = lerp_color(base_color, blended, valley.river_factor * 0.8);
+        } else {
+            // Normal river water - deeper = darker
+            let shallow_color = [0.20, 0.38, 0.42];
+            let deep_color = [0.10, 0.25, 0.35];
+            let water_color = lerp_color(shallow_color, deep_color, valley.river_factor);
+            base_color = lerp_color(base_color, water_color, valley.river_factor * 0.9);
+        }
+    }
+
+    // Valley walls get slightly different coloring (exposed earth/rock) - only on land
+    if land_factor > 0.5 && valley.height_mod > 20.0 && valley.river_factor < 0.1 {
+        let elevation_factor = ((valley.height_mod - 20.0) / 30.0).clamp(0.0, 1.0);
+        // Rocky outcrops on higher elevations
+        base_color = lerp_color(base_color, [0.42, 0.40, 0.35], elevation_factor * 0.3);
     }
 
     (height, base_color)

@@ -276,20 +276,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n_dot_l = dot(normalize(in.world_normal), -light_dir);
     let diffuse = pow(n_dot_l * 0.5 + 0.5, 2.0);
 
-    // Ambient - moonlit night, greener for canopy
-    let night_ambient = vec3<f32>(0.05, 0.07, 0.10); // Soft moonlit blue
-    var day_ambient = vec3<f32>(0.20, 0.18, 0.15);
+    // Bright ambient - grass and foliage catch lots of sky light
+    let night_ambient = vec3<f32>(0.08, 0.10, 0.14); // Soft moonlit blue
+    var day_ambient = vec3<f32>(0.45, 0.42, 0.35); // Bright base ambient
     if (is_canopy) {
-        day_ambient = vec3<f32>(0.15, 0.22, 0.12); // Greener ambient for foliage
+        day_ambient = vec3<f32>(0.40, 0.50, 0.32); // Greener/brighter for foliage
     }
     let ambient = mix(night_ambient, day_ambient, day_factor);
 
-    // Sun color
-    let sunrise_color = vec3<f32>(1.3, 0.6, 0.3);
-    let midday_color = vec3<f32>(1.1, 1.05, 0.95);
+    // Sun color - warm and strong
+    let sunrise_color = vec3<f32>(1.4, 0.7, 0.4);
+    let midday_color = vec3<f32>(1.2, 1.15, 1.05);
     let sun_color = mix(sunrise_color, midday_color, saturate(sun_elevation * 2.0));
 
-    let diffuse_strength = mix(0.1, 0.7, day_factor);
+    // Strong diffuse during day, shadow provides contrast
+    let diffuse_strength = mix(0.15, 0.9, day_factor);
     let lighting = ambient + sun_color * diffuse * diffuse_strength * shadow;
 
     var final_color = base_color * lighting;

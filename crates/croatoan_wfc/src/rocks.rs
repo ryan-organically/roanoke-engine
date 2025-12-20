@@ -138,12 +138,13 @@ impl RockType {
     }
 
     /// Scale variation range (multiplier applied to base_scale)
+    /// LargeBoulder has massive 10x variation for dramatic size differences
     pub fn scale_variation(&self) -> (f32, f32) {
         match self {
             RockType::Pebble => (0.5, 1.5),      // High variation for visual interest
             RockType::SmallRock => (0.7, 1.3),
-            RockType::MediumRock => (0.8, 1.2),
-            RockType::LargeBoulder => (0.85, 1.15),
+            RockType::MediumRock => (0.8, 2.5),  // Can get fairly large
+            RockType::LargeBoulder => (0.8, 8.0), // HUGE variation: 1.44 to 14.4 scale
             RockType::FlatRock => (0.7, 1.3),
             RockType::MossyRock => (0.8, 1.2),
         }
@@ -344,15 +345,19 @@ pub fn generate_rocks_for_chunk_with_exclusions(
 
         let angle = pebble_noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) as f32 * std::f32::consts::TAU;
         let scale_t = (pebble_noise.get([world_x as f64 * 0.15, world_z as f64 * 0.15]) + 1.0) * 0.5;
-        let scale = 1.8 * (0.85 + scale_t as f32 * 0.3); // 1.53 - 2.07 scale range
+        // Massive 10x scale variation: 1.5 to 15.0
+        let scale = 1.5 + scale_t as f32 * 13.5;
 
         let tilt_x = pebble_noise.get([world_x as f64 * 0.6, 110.0]) as f32 * 0.15;
         let tilt_z = pebble_noise.get([world_z as f64 * 0.6, 160.0]) as f32 * 0.15;
 
+        // Bigger boulders sink more
+        let sink = 0.25 + scale * 0.08;
+
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
             Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
-            Vec3::new(world_x, height - 0.25, world_z),
+            Vec3::new(world_x, height - sink, world_z),
         );
 
         instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
@@ -430,16 +435,11 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
     }
 
-    let _ = pebble_noise; // Silence unused warning
-    let _ = cluster_noise;
-
     //=========================================================================
-    // PHASE 5: Large Beach Boulders
+    // PHASE 5: Beach Boulders (very sparse, mostly small, rare large)
     //=========================================================================
-    // Prominent boulders scattered on the beach for visual interest
-    // These are larger rocks that break up the beach landscape
 
-    let beach_boulder_density = 0.08;
+    let beach_boulder_density = 0.008; // Very sparse
     let potential_boulders = (chunk_size * chunk_size * beach_boulder_density) as u32;
 
     for i in 0..potential_boulders {
@@ -452,7 +452,6 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         let world_x = offset_x + local_x;
         let world_z = offset_z + local_z;
 
-        // Skip boulders inside corn fields
         if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
             continue;
         }
@@ -460,48 +459,87 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         let (height, _color) = get_height_at(world_x, world_z, seed);
         let biome_t = get_biome_t(world_x, world_z, seed);
 
-        // Beach and upper beach zone (t 0.45-0.60) from waterline to scrub edge
-        if biome_t < 0.44 || biome_t > 0.60 {
+        if biome_t < 0.44 || biome_t > 0.60 || height < 0.5 || height > 4.0 {
             continue;
         }
-        if height < 0.5 || height > 4.0 {
-            continue;
-        }
-
-        // Clustering - some areas have boulder clusters
-        let boulder_cluster = cluster_noise.get([world_x as f64 * 0.04, world_z as f64 * 0.04]) as f32;
-        let spawn_threshold = if boulder_cluster > 0.2 { 0.6 } else { 0.25 };
-        let roll = (noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]) + 1.0) * 0.5;
-        if roll > spawn_threshold as f64 {
-            continue;
-        }
-
-        // Mix of boulder sizes - favor larger on the beach
-        let type_noise = noise.get([world_x as f64 * 0.4, world_z as f64 * 0.4]) as f32;
-        let rock_type = if type_noise > 0.3 {
-            RockType::LargeBoulder
-        } else if type_noise > -0.2 {
-            RockType::MediumRock
-        } else {
-            RockType::FlatRock
-        };
 
         let angle = noise.get([world_x as f64 * 0.6, world_z as f64 * 0.6]) as f32 * std::f32::consts::TAU;
-        let (scale_min, scale_max) = rock_type.scale_variation();
-        let scale_t = (noise.get([world_x as f64 * 0.25, world_z as f64 * 0.25]) + 1.0) * 0.5;
-        let scale = rock_type.base_scale() * (scale_min + scale_t as f32 * (scale_max - scale_min));
 
-        // Slight tilt for natural look
+        // Mostly small (1-3), seldom large (6-10)
+        let size_roll = noise.get([world_x as f64 * 0.08, world_z as f64 * 0.08]) as f32;
+        let scale = if size_roll > 0.85 {
+            // ~7% chance of large beach boulder
+            6.0 + (size_roll - 0.85) * 26.0 // 6-10 scale
+        } else {
+            // Small to medium
+            1.0 + (size_roll + 1.0) * 1.0 // 1-3 scale
+        };
+
         let tilt_x = noise.get([world_x as f64 * 0.8, 120.0]) as f32 * 0.1;
         let tilt_z = noise.get([world_z as f64 * 0.8, 170.0]) as f32 * 0.1;
+        let sink = 0.15 + scale * 0.04;
 
         let transform = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
             Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
-            Vec3::new(world_x, height - rock_type.sink_amount(), world_z),
+            Vec3::new(world_x, height - sink, world_z),
         );
 
-        instances.push((rock_type.mesh_name().to_string(), transform));
+        instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
+    }
+
+    //=========================================================================
+    // PHASE 6: FOREST BOULDERS (sparse, mostly small, rare huge taiga style)
+    //=========================================================================
+
+    let forest_boulder_density = 0.004; // Very rare
+    let potential_forest_boulders = (chunk_size * chunk_size * forest_boulder_density) as u32;
+
+    for i in 0..potential_forest_boulders {
+        let rand_x = noise.get([i as f64 * 0.19, 1100.0]) as f32;
+        let rand_z = noise.get([i as f64 * 0.19, 1200.0]) as f32;
+
+        let local_x = (rand_x + 1.0) * 0.5 * chunk_size;
+        let local_z = (rand_z + 1.0) * 0.5 * chunk_size;
+
+        let world_x = offset_x + local_x;
+        let world_z = offset_z + local_z;
+
+        if is_in_corn_field(world_x, world_z, corn_field_exclusions) {
+            continue;
+        }
+
+        let (height, _color) = get_height_at(world_x, world_z, seed);
+        let biome_t = get_biome_t(world_x, world_z, seed);
+
+        // Forest zone
+        if biome_t < 0.68 || height < 6.0 || height > 45.0 {
+            continue;
+        }
+
+        let angle = noise.get([world_x as f64 * 0.5, world_z as f64 * 0.5]) as f32 * std::f32::consts::TAU;
+
+        // Mostly small (1.5-4), seldom huge taiga boulders (10-18)
+        let size_roll = noise.get([world_x as f64 * 0.06, world_z as f64 * 0.06]) as f32;
+        let scale = if size_roll > 0.88 {
+            // ~6% chance of massive taiga boulder
+            10.0 + (size_roll - 0.88) * 66.0 // 10-18 scale
+        } else {
+            // Small forest rocks
+            1.5 + (size_roll + 1.0) * 1.25 // 1.5-4 scale
+        };
+
+        let tilt_x = noise.get([world_x as f64 * 0.4, 130.0]) as f32 * 0.12;
+        let tilt_z = noise.get([world_z as f64 * 0.4, 180.0]) as f32 * 0.12;
+        let sink = 0.3 + scale * 0.06;
+
+        let transform = Mat4::from_scale_rotation_translation(
+            Vec3::splat(scale),
+            Quat::from_euler(glam::EulerRot::XYZ, tilt_x, angle, tilt_z),
+            Vec3::new(world_x, height - sink, world_z),
+        );
+
+        instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
     }
 
     instances

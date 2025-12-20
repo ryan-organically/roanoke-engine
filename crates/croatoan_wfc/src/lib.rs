@@ -89,6 +89,7 @@ pub use mesh_gen::generate_terrain_chunk;
 pub use mesh_gen::get_height_at;
 pub use mesh_gen::distance_to_shoreline;
 pub use mesh_gen::get_biome_t;
+pub use mesh_gen::calculate_river_depth;
 
 // New terrain system
 pub use terrain::{
