@@ -200,6 +200,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var surface_color = input.color;
 
     // Beach: Override with higher contrast sand colors
+    // Wet sand near waves has reflective shine
+    var wet_sand_factor = 0.0;
     if (is_beach) {
         // Use noise for sand variation
         let sand_noise = fract(sin(dot(input.world_pos.xz * 0.3, vec2<f32>(12.9898, 78.233))) * 43758.5453);
@@ -218,6 +220,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Add variation
         let sand_variation = mix(base_sand * 0.9, base_sand * 1.1, sand_noise * 0.6 + sand_noise2 * 0.4);
         surface_color = sand_variation;
+
+        // Wet sand zone: height 0.5 - 1.2 (close to waves)
+        // 1.0 = fully wet at waterline, 0.0 = dry at height 1.2+
+        wet_sand_factor = 1.0 - clamp((height - 0.5) / 0.7, 0.0, 1.0);
     }
 
     // Apply lighting to surface color
@@ -244,6 +250,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Brighter sparkles for distance visibility
         let specular = 1.8 * spec * sun_color * shadow;
         final_color += specular;
+    }
+
+    // Wet Sand Specular Highlight (reflective shine near waves)
+    if (wet_sand_factor > 0.01) {
+        // Use mostly-up normal for wet sand (flat, reflective surface)
+        let wet_normal = normalize(vec3<f32>(normal.x * 0.1, 1.0, normal.z * 0.1));
+        let reflect_dir = reflect(-light_dir, wet_normal);
+
+        // Softer specular than water (wet sand, not mirror)
+        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 32.0);
+
+        // Subtle but visible shine, scaled by wetness
+        let wet_specular = 0.6 * spec * sun_color * shadow * wet_sand_factor * day_factor;
+        final_color += wet_specular;
     }
 
     // FOG CALCULATION - Controlled by fog_density uniform (\ key cycles 0-4)

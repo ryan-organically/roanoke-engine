@@ -54,14 +54,23 @@ struct VertexOutput {
 }
 
 // Tree wind animation - slower and more subtle than grass
+// Beach grass at low elevations gets stronger, faster wind (coastal breeze)
 fn apply_tree_wind(world_pos: vec3<f32>, local_height: f32, time: f32) -> vec3<f32> {
-    // Wind is subtle for trees - they sway slowly
-    let wind_strength = 0.08;
+    // Beach wind boost: stronger wind at low world Y (beach/coastal)
+    // World Y < 5m gets up to 2.5x wind boost (coastal breeze effect)
+    let beach_boost = mix(2.5, 1.0, saturate((world_pos.y - 2.0) / 8.0));
+
+    // Base wind strength - boosted at beach level
+    let wind_strength = 0.08 * beach_boost;
     let wind_direction = vec2<f32>(1.0, 0.3);
 
-    // Slow sine waves for tree sway
-    let wave1 = sin(time * 0.8 + world_pos.x * 0.1) * wind_strength;
-    let wave2 = sin(time * 0.5 + world_pos.z * 0.15) * wind_strength * 0.6;
+    // Wind speed also increases at beach level (faster oscillation)
+    let time_mult = mix(1.6, 1.0, saturate((world_pos.y - 2.0) / 8.0));
+    let anim_time = time * time_mult;
+
+    // Slow sine waves for tree sway (faster at beach)
+    let wave1 = sin(anim_time * 0.8 + world_pos.x * 0.1) * wind_strength;
+    let wave2 = sin(anim_time * 0.5 + world_pos.z * 0.15) * wind_strength * 0.6;
 
     // Height-based influence: trunk stays still, branches sway more
     // local_height is in model space (0 = base, higher = branches)

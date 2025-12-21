@@ -12,6 +12,7 @@
 - Do not assume you know the fix. Present findings first, wait for approval
 - Failed fixes compound problems. Humility > confidence when debugging
 - If a fix didn't work, the next attempt requires **deeper investigation**, not another quick patch
+- **Succeeding "quick fixes" without addressing root causes compounds problems** — each workaround adds technical debt and makes the real fix harder to identify
 
 ## Blender Asset Workflow
 

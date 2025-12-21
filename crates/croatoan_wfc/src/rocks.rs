@@ -439,7 +439,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     // PHASE 5: Beach Boulders (very sparse, mostly small, rare large)
     //=========================================================================
 
-    let beach_boulder_density = 0.008; // Very sparse
+    let beach_boulder_density = 0.004; // Very sparse (halved from 0.008)
     let potential_boulders = (chunk_size * chunk_size * beach_boulder_density) as u32;
 
     for i in 0..potential_boulders {
