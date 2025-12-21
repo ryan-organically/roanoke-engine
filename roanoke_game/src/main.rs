@@ -4108,7 +4108,7 @@ fn main() {
                         ui.painter().text(
                             egui::pos2(menu_x + menu_width - 10.0, menu_y - 45.0),
                             egui::Align2::RIGHT_CENTER,
-                            "v0.0.2",
+                            "v0.0.3",
                             egui::FontId::new(28.0, egui::FontFamily::Proportional),
                             egui::Color32::from_rgb(120, 90, 60),
                         );

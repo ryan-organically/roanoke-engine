@@ -1,6 +1,6 @@
 # Roanoke Version History
 
-**Current**: v0.0.1
+**Current**: v0.0.3
 **Code Location**: `main.rs:862` (menu display)
 
 <!-- AGENT: When releasing a new version:
