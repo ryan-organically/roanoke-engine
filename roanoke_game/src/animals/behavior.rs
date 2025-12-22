@@ -1154,6 +1154,133 @@ fn update_curious_state(
     }
 }
 
+/// Pheasant behavior - ground bird that flees short distances when startled
+/// Stays near home territory, can be domesticated with patience
+pub fn update_pheasant_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
+    let stats = animal.species.base_stats();
+    let to_player = ctx.player_pos - animal.position;
+    let player_dist = to_player.length();
+    let player_in_detection = player_dist < stats.detection_range;
+
+    // Update awareness
+    update_awareness(animal, player_in_detection, ctx.dt);
+
+    // Domesticated pheasants don't flee
+    if animal.is_tamed() {
+        // Tamed pheasant follows player loosely, forages nearby
+        let follow_dist = 8.0;
+        if player_dist > follow_dist * 2.0 {
+            animal.target = Some(Target::Position(ctx.player_pos));
+            animal.behavior_state = BehaviorState::Patrol;
+        } else if player_dist < follow_dist {
+            animal.target = None;
+            animal.behavior_state = BehaviorState::Idle;
+        }
+        execute_state(animal, ctx);
+        return;
+    }
+
+    // Short flee distance for pheasants - 15-25 meters, never more than 30m from home
+    let max_flee_distance = 25.0;
+    let home_dist = animal.position.distance(animal.home_position);
+
+    let new_state = match animal.behavior_state {
+        BehaviorState::Idle => {
+            if player_in_detection && animal.awareness > 0.4 {
+                // Player detected - burst flee!
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            } else if rand_chance(0.005 * ctx.dt) {
+                // Occasionally forage around
+                BehaviorState::Patrol
+            } else {
+                BehaviorState::Idle
+            }
+        }
+
+        BehaviorState::Patrol => {
+            if player_in_detection && animal.awareness > 0.3 {
+                // Startle and flee
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            } else if home_dist > animal.territory_radius {
+                // Return home
+                animal.target = Some(Target::Position(animal.home_position));
+                BehaviorState::Patrol
+            } else {
+                BehaviorState::Patrol
+            }
+        }
+
+        BehaviorState::Alert(_) => {
+            if animal.awareness > 0.5 {
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            } else if animal.awareness < 0.2 {
+                BehaviorState::Idle
+            } else {
+                BehaviorState::Alert(AlertState::Looking)
+            }
+        }
+
+        BehaviorState::Flee(FleeState::Running) => {
+            // Pheasants only flee a short distance
+            let flee_dist = animal.position.distance(ctx.player_pos);
+
+            if flee_dist > max_flee_distance {
+                // Far enough, stop and hide
+                BehaviorState::Flee(FleeState::Hiding)
+            } else if home_dist > animal.territory_radius * 1.5 {
+                // Getting too far from home - stop fleeing, crouch/hide
+                BehaviorState::Flee(FleeState::Hiding)
+            } else {
+                // Keep fleeing but limit distance
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            }
+        }
+
+        BehaviorState::Flee(FleeState::Hiding) => {
+            // Crouching/hiding - pheasants freeze when hiding
+            animal.velocity = Vec3::ZERO;
+            animal.awareness = (animal.awareness - 0.15 * ctx.dt).max(0.0);
+
+            if player_dist < stats.detection_range * 0.5 {
+                // Player got too close while hiding - burst flee again
+                animal.target = Some(Target::FleeFrom(ctx.player_pos));
+                BehaviorState::Flee(FleeState::Running)
+            } else if animal.awareness < 0.1 {
+                // Calmed down
+                if home_dist > animal.territory_radius * 0.5 {
+                    // Return toward home
+                    animal.target = Some(Target::Position(animal.home_position));
+                    BehaviorState::Patrol
+                } else {
+                    BehaviorState::Idle
+                }
+            } else {
+                BehaviorState::Flee(FleeState::Hiding)
+            }
+        }
+
+        BehaviorState::Flee(FleeState::Cornered) => {
+            // Pheasants don't fight back, they just freeze
+            BehaviorState::Flee(FleeState::Hiding)
+        }
+
+        _ => BehaviorState::Idle,
+    };
+
+    animal.behavior_state = new_state;
+
+    // Pheasants advance taming when player is nearby and they're calm
+    if player_dist < 10.0 && animal.awareness < 0.3 && !matches!(animal.behavior_state, BehaviorState::Flee(_)) {
+        animal.advance_taming(0.005 * ctx.dt);
+    }
+
+    execute_state(animal, ctx);
+}
+
 /// Wolf pair behavior - usually flee, sometimes aggressive
 /// Pairs are skittish but can be dangerous if they decide to attack
 fn update_wolf_pair_behavior(animal: &mut Animal, ctx: &BehaviorContext) {

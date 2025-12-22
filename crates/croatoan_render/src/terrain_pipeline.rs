@@ -151,6 +151,9 @@ const MAX_TERRAIN_VERTICES: usize = 100_000;
 /// Maximum indices per terrain chunk (safety limit)
 const MAX_TERRAIN_INDICES: usize = 600_000;
 
+/// Maximum number of campfire lights supported
+pub const MAX_CAMPFIRE_LIGHTS: usize = 4;
+
 /// Uniform data structure matching WGSL layout
 /// Must match the shader struct exactly!
 #[repr(C)]
@@ -167,7 +170,13 @@ struct Uniforms {
     sun_dir: [f32; 3],              // 12 bytes (160-172)
     _padding2: f32,                 // 4 bytes (172-176)
     view_pos: [f32; 3],             // 12 bytes (176-188)
-    _padding3: f32,                 // 4 bytes (188-192) -> Total 192 bytes
+    _padding3: f32,                 // 4 bytes (188-192)
+    flash_pos: [f32; 3],            // 12 bytes (192-204) - muzzle flash world position
+    flash_intensity: f32,           // 4 bytes (204-208)
+    // Campfire point lights (up to 4)
+    campfire_lights: [[f32; 4]; MAX_CAMPFIRE_LIGHTS],  // 64 bytes (208-272) - xyz=position, w=intensity
+    campfire_count: u32,            // 4 bytes (272-276)
+    _padding4: [f32; 3],            // 12 bytes (276-288) -> Total 288 bytes
 }
 
 // SAFETY: Uniforms is repr(C) and contains only f32, which is Pod
@@ -482,8 +491,31 @@ impl TerrainPipeline {
         (vertex_buffer, index_buffer)
     }
 
-    /// Update uniform buffer with camera, time, fog, and light matrix
-    pub fn update_uniforms(&self, queue: &wgpu::Queue, view_proj: &Mat4, light_view_proj: &Mat4, time: f32, fog_color: [f32; 3], fog_start: f32, fog_end: f32, fog_density: f32, sun_dir: [f32; 3], view_pos: [f32; 3], _camera_pos: [f32; 3]) {
+    /// Update uniform buffer with camera, time, fog, light matrix, muzzle flash, and campfire lights
+    pub fn update_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        time: f32,
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+        sun_dir: [f32; 3],
+        view_pos: [f32; 3],
+        _camera_pos: [f32; 3],
+        flash_pos: [f32; 3],
+        flash_intensity: f32,
+        campfire_lights: &[[f32; 4]],  // Up to 4 lights, each is [x, y, z, intensity]
+    ) {
+        // Pack campfire lights into fixed array
+        let mut lights_array = [[0.0f32; 4]; MAX_CAMPFIRE_LIGHTS];
+        let count = campfire_lights.len().min(MAX_CAMPFIRE_LIGHTS);
+        for (i, light) in campfire_lights.iter().take(MAX_CAMPFIRE_LIGHTS).enumerate() {
+            lights_array[i] = *light;
+        }
+
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
             light_view_proj: light_view_proj.to_cols_array_2d(),
@@ -497,6 +529,11 @@ impl TerrainPipeline {
             _padding2: 0.0,
             view_pos,
             _padding3: 0.0,
+            flash_pos,
+            flash_intensity,
+            campfire_lights: lights_array,
+            campfire_count: count as u32,
+            _padding4: [0.0; 3],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }

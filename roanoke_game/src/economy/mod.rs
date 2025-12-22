@@ -11,6 +11,7 @@
 //! - `integration` - Connects economy to combat, trading, progression
 //! - `pipeline` - Data validation, transactions, analytics, persistence
 //! - `drops` - Dropped item entities in the world
+//! - `storage` - World-placed storage containers (chests, crates, barrels)
 
 pub mod item;
 pub mod inventory;
@@ -19,6 +20,7 @@ pub mod loot;
 pub mod integration;
 pub mod pipeline;
 pub mod drops;
+pub mod storage;
 
 // Core exports
 pub use item::*;
@@ -39,6 +41,9 @@ pub use integration::trading_bridge;
 
 // Drops exports
 pub use drops::{DroppedItem, DroppedItemManager, DropId};
+
+// Storage exports
+pub use storage::{StorageContainer, StorageManager, ContainerId, ContainerType, StorageError};
 
 // Pipeline exports
 pub use pipeline::{

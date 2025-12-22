@@ -393,7 +393,7 @@ impl AnimalSpecies {
     pub fn is_tameable(&self) -> bool {
         matches!(
             self,
-            Self::GrayWolf | Self::RedWolf | Self::Horse | Self::Donkey | Self::Husky
+            Self::GrayWolf | Self::RedWolf | Self::Horse | Self::Donkey | Self::Husky | Self::RingNeckedPheasant
         )
     }
 
@@ -811,7 +811,7 @@ impl AnimalSpecies {
             Self::Fox => 0.6,
             Self::Husky => 0.7,
             Self::Bobcat => 0.6,
-            Self::RingNeckedPheasant => 0.002, // Mesh spans ~380 units, need tiny scale for ~0.75m bird
+            Self::RingNeckedPheasant => 0.005, // Body mesh is ~127 units tall, scale for ~60cm bird
             // Default for species without models
             _ => 1.0,
         }

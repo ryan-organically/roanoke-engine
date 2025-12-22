@@ -13,6 +13,14 @@ struct Uniforms {
     padding2: f32,
     view_pos: vec3<f32>,
     padding3: f32,
+    flash_pos: vec3<f32>,      // Muzzle flash world position
+    flash_intensity: f32,      // Muzzle flash intensity (0-1)
+    // Campfire point lights (up to 4)
+    campfire_lights: array<vec4<f32>, 4>,  // xyz = position, w = intensity
+    campfire_count: u32,
+    padding4a: f32,
+    padding4b: f32,
+    padding4c: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -264,6 +272,56 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Subtle but visible shine, scaled by wetness
         let wet_specular = 0.6 * spec * sun_color * shadow * wet_sand_factor * day_factor;
         final_color += wet_specular;
+    }
+
+    // MUZZLE FLASH POINT LIGHT - Illuminates nearby terrain when gun fires
+    if (uniforms.flash_intensity > 0.0) {
+        let flash_to_surface = input.world_pos - uniforms.flash_pos;
+        let flash_dist = length(flash_to_surface);
+        let flash_dir = flash_to_surface / max(flash_dist, 0.001);
+
+        // Point light attenuation (inverse square falloff)
+        let flash_radius = 15.0; // Light reaches ~15 units
+        let attenuation = 1.0 / (1.0 + flash_dist * 0.3 + flash_dist * flash_dist * 0.05);
+        let range_falloff = max(0.0, 1.0 - flash_dist / flash_radius);
+
+        // Diffuse lighting from flash
+        let flash_n_dot_l = max(dot(normal, -flash_dir), 0.0);
+
+        // Warm orange muzzle flash color
+        let flash_color = vec3<f32>(1.0, 0.6, 0.2);
+
+        // Apply flash lighting
+        let flash_contribution = flash_color * flash_n_dot_l * attenuation * range_falloff * uniforms.flash_intensity * 8.0;
+        final_color += flash_contribution;
+    }
+
+    // CAMPFIRE POINT LIGHTS - Flickering warm light from campfires
+    for (var i = 0u; i < uniforms.campfire_count; i++) {
+        let light = uniforms.campfire_lights[i];
+        let light_pos = light.xyz;
+        let light_intensity = light.w;
+
+        if (light_intensity > 0.0) {
+            let light_to_surface = input.world_pos - light_pos;
+            let light_dist = length(light_to_surface);
+            let light_dir = light_to_surface / max(light_dist, 0.001);
+
+            // Campfire light properties - softer falloff than muzzle flash
+            let campfire_radius = 12.0;
+            let attenuation = 1.0 / (1.0 + light_dist * 0.2 + light_dist * light_dist * 0.02);
+            let range_falloff = max(0.0, 1.0 - light_dist / campfire_radius);
+
+            // Diffuse lighting from campfire
+            let n_dot_l = max(dot(normal, -light_dir), 0.0);
+
+            // Warm orange campfire color (slightly more saturated than muzzle flash)
+            let campfire_color = vec3<f32>(1.0, 0.5, 0.15);
+
+            // Apply campfire lighting
+            let contribution = campfire_color * n_dot_l * attenuation * range_falloff * light_intensity * 5.0;
+            final_color += contribution;
+        }
     }
 
     // FOG CALCULATION - Controlled by fog_density uniform (\ key cycles 0-4)

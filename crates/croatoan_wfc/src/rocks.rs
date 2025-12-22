@@ -263,12 +263,12 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         // Spawn conditions:
         // - Steep slopes (slope > 0.25)
         // - Rocky biome areas (rocky_noise > 0.15)
-        // - Beach edges (biome_t 0.5-0.58, height 0.5-3)
+        // - Beach edges DISABLED - PHASE 5 handles beach boulders at lower density
         let is_steep = slope > 0.25;
         let is_rocky_biome = rocky_noise_val > 0.15;
-        let is_beach_edge = biome_t > 0.48 && biome_t < 0.58 && height > 0.5 && height < 3.0;
+        // let is_beach_edge = biome_t > 0.48 && biome_t < 0.58 && height > 0.5 && height < 3.0;
 
-        if !is_steep && !is_rocky_biome && !is_beach_edge {
+        if !is_steep && !is_rocky_biome {
             continue;
         }
 
@@ -280,10 +280,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
 
         // Select rock type based on conditions - BOULDERS ARE PRIMARY
         let type_noise = noise.get([world_x as f64 * 0.3, world_z as f64 * 0.3]) as f32;
-        let rock_type = if is_beach_edge {
-            // Beach gets flat rocks and small rocks
-            if type_noise > 0.3 { RockType::FlatRock } else { RockType::SmallRock }
-        } else if type_noise > -0.2 {
+        let rock_type = if type_noise > -0.2 {
             // ~60% of non-beach rocks are now boulders (was 20% at > 0.6)
             RockType::LargeBoulder
         } else if type_noise > -0.6 {
@@ -337,9 +334,11 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         }
 
         let (height, _color) = get_height_at(world_x, world_z, seed);
+        let biome_t = get_biome_t(world_x, world_z, seed);
 
-        // Skip water and very high altitudes
-        if height < 1.0 || height > 50.0 {
+        // Skip water, beach zones (handled by PHASE 5), and very high altitudes
+        // Beach zone: biome_t 0.44-0.65
+        if height < 1.0 || height > 50.0 || (biome_t > 0.44 && biome_t < 0.65) {
             continue;
         }
 
@@ -439,7 +438,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     // PHASE 5: Beach Boulders (very sparse, mostly small, rare large)
     //=========================================================================
 
-    let beach_boulder_density = 0.004; // Very sparse (halved from 0.008)
+    let beach_boulder_density = 0.001; // Very sparse (halved from 0.002)
     let potential_boulders = (chunk_size * chunk_size * beach_boulder_density) as u32;
 
     for i in 0..potential_boulders {
@@ -492,7 +491,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     // PHASE 6: FOREST BOULDERS (sparse, mostly small, rare huge taiga style)
     //=========================================================================
 
-    let forest_boulder_density = 0.004; // Very rare
+    let forest_boulder_density = 0.002; // Very rare (halved from 0.004)
     let potential_forest_boulders = (chunk_size * chunk_size * forest_boulder_density) as u32;
 
     for i in 0..potential_forest_boulders {

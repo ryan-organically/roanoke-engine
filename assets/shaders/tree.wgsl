@@ -14,7 +14,7 @@ struct CameraUniform {
     lod_fade_start: f32, // Distance where fade begins
     lod_fade_end: f32,   // Distance where fade ends
     lod_fade_mode: f32,  // 0.0 = disabled, 1.0 = LOD0 (fade out), 2.0 = LOD1 (fade in)
-    _padding: f32,       // Padding
+    wind_enabled: f32,   // 1.0 = wind on, 0.0 = wind off (for boulders)
     _padding2: f32,      // 16-byte struct alignment (208 bytes total)
 }
 
@@ -53,34 +53,94 @@ struct VertexOutput {
     @location(5) distance_to_camera: f32, // For LOD dither fade
 }
 
-// Tree wind animation - slower and more subtle than grass
-// Beach grass at low elevations gets stronger, faster wind (coastal breeze)
+// Tree/foliage wind animation
+// CRITICAL: Wind must ONLY affect HIGH local_height (tips), NEVER low (bases)
+// local_height = vertex Y in model space (0 = base, higher = tips/canopy)
 fn apply_tree_wind(world_pos: vec3<f32>, local_height: f32, time: f32) -> vec3<f32> {
-    // Beach wind boost: stronger wind at low world Y (beach/coastal)
-    // World Y < 5m gets up to 2.5x wind boost (coastal breeze effect)
-    let beach_boost = mix(2.5, 1.0, saturate((world_pos.y - 2.0) / 8.0));
+    // If this vertex is at the base (low local_height), no wind at all
+    // This excludes boulder bases and tree trunks
+    if (local_height < 0.2) {
+        return world_pos;
+    }
 
-    // Base wind strength - boosted at beach level
-    let wind_strength = 0.08 * beach_boost;
+    // Height-based influence: tips move most
+    let grass_factor = saturate(local_height / 1.2); // Grass tips at 1-2 units
+    let tree_factor = saturate(local_height / 5.0);  // Tree canopy at 5+ units
+
+    // Quadratic falloff
+    let grass_wind = grass_factor * grass_factor;
+    let tree_wind = tree_factor * tree_factor;
+
+    // Determine if this is beach-level based on world position
+    let is_beach = world_pos.y < 10.0;
+
+    // BOULDER EXCLUSION: At beach level, skip wind for solid objects
+    // Boulders have vertices at low-to-moderate local_height (0.2-2.0) sitting at ground level
+    // Only apply beach wind to grass tips (local_height 0.5-2.5) or tree canopy (3.0+)
+    if (is_beach && local_height < 0.5) {
+        return world_pos; // Skip - likely boulder or solid object base
+    }
+
+    // Spatial coherence: nearby grass moves together with slight offset
+    let cell_size = 8.0; // 8 meter cells for larger, more spread out wave motion
+    let cell_x = floor(world_pos.x / cell_size);
+    let cell_z = floor(world_pos.z / cell_size);
+    let cell_phase = fract(sin(cell_x * 12.9898 + cell_z * 78.233) * 43758.5453) * 6.28;
+    let local_offset = fract(sin(world_pos.x * 0.5 + world_pos.z * 0.3) * 1000.0) * 0.4;
+
+    // Base wind parameters
     let wind_direction = vec2<f32>(1.0, 0.3);
+    var wind_strength = 0.08;
+    var time_mult = 1.0;
+    var wind_amount = tree_wind;
 
-    // Wind speed also increases at beach level (faster oscillation)
-    let time_mult = mix(1.6, 1.0, saturate((world_pos.y - 2.0) / 8.0));
+    if (is_beach) {
+        if (local_height < 3.0) {
+            // Beach grass: gentle but visible swaying
+            wind_amount = grass_wind;
+            wind_strength = 0.7;  // Moderate - visible but gentle
+            time_mult = 2.0;      // Slower, more graceful motion
+        } else {
+            // Beach tree canopy: strong coastal wind
+            wind_amount = tree_wind;
+            wind_strength = 0.22;
+            time_mult = 1.5;
+        }
+    }
+
+    // Skip if wind amount is negligible
+    if (wind_amount < 0.01) {
+        return world_pos;
+    }
+
+    // Wind waves with spatial coherence
     let anim_time = time * time_mult;
+    let coherent_time = anim_time + cell_phase + local_offset;
 
-    // Slow sine waves for tree sway (faster at beach)
-    let wave1 = sin(anim_time * 0.8 + world_pos.x * 0.1) * wind_strength;
-    let wave2 = sin(anim_time * 0.5 + world_pos.z * 0.15) * wind_strength * 0.6;
+    // Multiple wave frequencies for organic whipping motion
+    let wave1 = sin(coherent_time * 1.2 + world_pos.x * 0.06) * wind_strength;
+    let wave2 = sin(coherent_time * 0.8 + world_pos.z * 0.08) * wind_strength * 0.5;
 
-    // Height-based influence: trunk stays still, branches sway more
-    // local_height is in model space (0 = base, higher = branches)
-    let height_factor = saturate(local_height / 5.0); // Normalize to ~5 units
-    let wind_amount = height_factor * height_factor; // Quadratic falloff
+    // Beach-specific gentle swaying with subtle variation
+    var whip = 0.0;
+    var gust_mult = 1.0;
+    if (is_beach && local_height < 3.0) {
+        // Gentle swaying - lower frequency, softer motion
+        let sway1 = sin(coherent_time * 2.0) * wind_strength * 0.25;
+        let sway2 = sin(coherent_time * 1.5 + 1.0) * sin(coherent_time * 1.0) * wind_strength * 0.15;
+        whip = sway1 + sway2;
+
+        // Gentle sweeping gusts across the beach
+        let gust_wave = sin(time * 0.15 + cell_x * 0.05 + cell_z * 0.03);
+        gust_mult = 1.0 + max(gust_wave, 0.0) * 0.6; // Gusts up to 1.6x
+    }
+
+    let total_wave = (wave1 + wave2 + whip) * gust_mult;
 
     let wind_offset = vec3<f32>(
-        (wave1 + wave2) * wind_direction.x * wind_amount,
+        total_wave * wind_direction.x * wind_amount,
         0.0,
-        (wave1 + wave2) * wind_direction.y * wind_amount
+        total_wave * wind_direction.y * wind_amount
     );
 
     return world_pos + wind_offset;
@@ -137,8 +197,11 @@ fn vs_main(input: VertexInput, instance: InstanceInput) -> VertexOutput {
 
     let world_position = model_matrix * vec4<f32>(input.position, 1.0);
 
-    // Apply wind animation
-    let animated_position = apply_tree_wind(world_position.xyz, local_height, camera.time);
+    // Apply wind animation only if enabled (disabled for boulders/static objects)
+    var animated_position = world_position.xyz;
+    if (camera.wind_enabled > 0.5) {
+        animated_position = apply_tree_wind(world_position.xyz, local_height, camera.time);
+    }
 
     output.clip_position = camera.view_proj * vec4<f32>(animated_position, 1.0);
     output.world_position = animated_position;
@@ -261,6 +324,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let facing_factor = abs(in.world_normal.x) + abs(in.world_normal.z);
             base_color = mix(base_color, bark_deep, facing_factor * 0.2 * (1.0 - height_factor));
         }
+    }
+
+    // Beach boulder tint: deep burnt red for rocks at low world Y (beach level)
+    // Only tint very low objects (Y < 3m) to avoid affecting grass blades
+    // Boulders sit at Y 0.5-3m, grass extends from 2m terrain to 6m+ tips
+    let beach_tint_factor = 1.0 - saturate((in.world_position.y - 0.5) / 2.5);
+    if (beach_tint_factor > 0.01) {
+        // Deep burnt red - strongly tint the texture toward this color
+        let burnt_red = vec3<f32>(0.35, 0.15, 0.08);
+        // Strong blend for visibility on textures
+        let tinted = mix(base_color, base_color * burnt_red * 3.0, beach_tint_factor * 0.8);
+        base_color = tinted;
     }
 
     // Lighting (same for both trunk and canopy)

@@ -117,6 +117,127 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ray_dir = normalize(world_pos.xyz / world_pos.w);
 
     // Sun elevation determines day/night (-1 = below horizon, 1 = zenith)
+    let sun_elevation = -uniforms.sun_dir.y;
+    let rain = uniforms.rain_intensity;
+    let dimming = uniforms.ambient_dimming;
+    let day_factor = smoothstep(-0.2, 0.3, sun_elevation);
+
+    // ATMOSPHERIC SCATTERING
+    let cos_theta = dot(ray_dir, -uniforms.sun_dir);
+    let rayleigh = rayleigh_phase(cos_theta);
+    let rayleigh_color = vec3<f32>(0.15, 0.35, 0.65);
+    let mie = mie_phase(cos_theta, 0.76);
+    let mie_color = uniforms.sun_color * 0.8;
+    let horizon_factor = 1.0 - abs(ray_dir.y);
+    let optical_depth = pow(horizon_factor, 3.0);
+
+    // BASE SKY COLORS
+    let day_top = vec3<f32>(0.18, 0.38, 0.75) * (1.0 - dimming * 0.4);
+    let day_horizon = vec3<f32>(0.55, 0.65, 0.82) * (1.0 - dimming * 0.3);
+    let night_top = vec3<f32>(0.002, 0.002, 0.005);
+    let night_horizon = vec3<f32>(0.008, 0.01, 0.02);
+
+    var top_color = mix(night_top, day_top, day_factor);
+    var horizon_color_val = mix(night_horizon, day_horizon, day_factor);
+
+    let y = ray_dir.y * 0.5 + 0.5;
+    var sky_color = mix(horizon_color_val, top_color, pow(clamp(y, 0.0, 1.0), 0.5));
+
+    // Apply scattering
+    let rayleigh_strength = day_factor * 0.15;
+    sky_color += rayleigh_color * rayleigh * rayleigh_strength * (1.0 - horizon_factor * 0.5);
+    let mie_strength = day_factor * optical_depth * 0.4;
+    sky_color += mie_color * mie * mie_strength;
+
+    // Stars DISABLED for now - needs investigation
+
+    // Cloud Rendering - using ORIGINAL code
+    let cloud_height = 500.0;
+    let storm_height = 300.0;
+
+    if (ray_dir.y > 0.01) {
+        let t = cloud_height / ray_dir.y;
+        let cloud_pos = ray_dir.xz * t;
+
+        let cloud_speed = 0.004;
+        let time_offset = uniforms.time * cloud_speed;
+        let wind = uniforms.wind_offset * 15.0 + vec2<f32>(time_offset, time_offset * 0.25);
+
+        let dist_from_zenith = length(cloud_pos) * 0.0001;
+        let angle = atan2(cloud_pos.y, cloud_pos.x);
+        let spherical_uv = vec2<f32>(angle * 2.0, dist_from_zenith);
+
+        let planar_uv = cloud_pos * 0.0015 * uniforms.cloud_scale + wind;
+        let blend_factor = smoothstep(0.05, 0.4, ray_dir.y);
+        let uv_scaled = mix(spherical_uv + wind * 0.5, planar_uv, blend_factor);
+
+        let warp = vec2<f32>(fbm(uv_scaled * 0.5), fbm(uv_scaled * 0.5 + 7.3)) * 0.3;
+        var n = fbm(uv_scaled + warp);
+        let detail = fbm(uv_scaled * 2.5 + warp) * 0.25;
+        n = (n * 0.5 + 0.5) + detail;
+
+        var storm_n = 0.0;
+        if (rain > 0.1) {
+            let storm_t = storm_height / ray_dir.y;
+            let storm_pos = ray_dir.xz * storm_t;
+            let storm_uv = storm_pos * 0.003 + wind * 1.5;
+            storm_n = turbulence(storm_uv) + fbm(storm_uv * 0.7) * 0.5;
+            storm_n = storm_n * rain;
+        }
+
+        let threshold = 1.0 - uniforms.cloud_coverage;
+        let cloud_alpha = smoothstep(threshold - 0.15, threshold + 0.2, n);
+        let storm_alpha = smoothstep(0.2, 0.6, storm_n) * rain;
+        let horizon_fade = smoothstep(0.01, 0.15, ray_dir.y);
+        let night_cloud_fade = mix(0.25, 1.0, day_factor);
+        let base_opacity = mix(0.6, 0.85, rain);
+        let density = cloud_alpha * uniforms.cloud_density * horizon_fade * night_cloud_fade * base_opacity;
+        let storm_density = storm_alpha * horizon_fade * 0.9;
+
+        if (density > 0.01 || storm_density > 0.01) {
+            let color_mix = smoothstep(threshold, threshold + 0.35, n);
+            let clear_cloud_base = uniforms.cloud_color_base;
+            let clear_cloud_shade = uniforms.cloud_color_shade;
+            let storm_cloud_base = vec3<f32>(0.35, 0.38, 0.42);
+            let storm_cloud_shade = vec3<f32>(0.2, 0.22, 0.25);
+
+            let cloud_base = mix(clear_cloud_base, storm_cloud_base, rain);
+            let cloud_shade = mix(clear_cloud_shade, storm_cloud_shade, rain);
+            var cloud_rgb = mix(cloud_base, cloud_shade, color_mix);
+
+            let night_cloud_color = cloud_rgb * 0.15;
+            cloud_rgb = mix(night_cloud_color, cloud_rgb, day_factor);
+
+            let sun_dot = max(dot(ray_dir, -uniforms.sun_dir), 0.0);
+            let sun_scatter = pow(sun_dot, 4.0) * 0.3 * day_factor * (1.0 - rain * 0.8);
+            cloud_rgb += uniforms.sun_color * sun_scatter * (1.0 - density * 0.5);
+
+            let moon_dot = max(dot(ray_dir, -uniforms.moon_dir), 0.0);
+            let moon_scatter = pow(moon_dot, 3.0) * 0.4 * (1.0 - day_factor);
+            let moon_glow_color = vec3<f32>(0.5, 0.55, 0.7);
+            cloud_rgb += moon_glow_color * moon_scatter * (1.0 - density * 0.3);
+
+            let highlight = smoothstep(0.75, 1.0, n) * (1.0 - rain * 0.6);
+            let highlight_color = mix(vec3<f32>(0.2, 0.2, 0.28), vec3<f32>(0.95, 0.9, 0.85), day_factor);
+            var final_cloud_color = mix(cloud_rgb, highlight_color, highlight * 0.35);
+
+            if (storm_density > 0.01) {
+                let storm_color = vec3<f32>(0.15, 0.17, 0.2) * day_factor + vec3<f32>(0.02, 0.02, 0.03);
+                final_cloud_color = mix(final_cloud_color, storm_color, storm_density);
+            }
+
+            final_cloud_color = final_cloud_color * (1.0 - dimming * 0.3);
+            let total_density = min(density + storm_density, 0.95);
+            sky_color = mix(sky_color, final_cloud_color, total_density);
+        }
+    }
+
+    sky_color = sky_color * (1.0 - dimming * 0.2);
+    return vec4<f32>(sky_color, 1.0);
+
+    // ORIGINAL CODE BELOW - disabled
+    /*
+    // Sun elevation determines day/night (-1 = below horizon, 1 = zenith)
     let sun_elevation = -uniforms.sun_dir.y; // sun_dir points FROM sun, so negate
 
     // Rain and ambient dimming affect sky colors
@@ -238,12 +359,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         sky_color += star_color * star_intensity;
     }
 
-    // Cloud Rendering - wispy clouds with storm support
+    // Cloud Rendering - DISABLED FOR DEBUG
     let cloud_height = 500.0;
     let storm_height = 300.0; // Lower, darker storm clouds
 
     // Only render clouds when looking up (ray_dir.y > 0)
-    if (ray_dir.y > 0.01) {
+    if (false && ray_dir.y > 0.01) {
         let t = cloud_height / ray_dir.y;
         let cloud_pos = ray_dir.xz * t;
 
@@ -344,4 +465,5 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     sky_color = sky_color * (1.0 - dimming * 0.2);
 
     return vec4<f32>(sky_color, 1.0);
+    */ // END DEBUG COMMENT BLOCK
 }

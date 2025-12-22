@@ -42,7 +42,7 @@ struct CameraUniform {
     lod_fade_start: f32,            // 4 bytes (188-192) - distance where fade begins
     lod_fade_end: f32,              // 4 bytes (192-196) - distance where fade ends
     lod_fade_mode: f32,             // 4 bytes (196-200) - 0=disabled, 1=LOD0 fade out, 2=LOD1 fade in
-    _padding: f32,                  // 4 bytes (200-204)
+    wind_enabled: f32,              // 4 bytes (200-204) - 1.0=wind on, 0.0=wind off (for boulders)
     _padding2: f32,                 // 4 bytes (204-208) - 16-byte struct alignment
 }
 
@@ -643,7 +643,53 @@ impl TreePipeline {
             lod_fade_start: fade_start,
             lod_fade_end: fade_end,
             lod_fade_mode,
-            _padding: 0.0,
+            wind_enabled: 1.0, // Default: wind enabled for trees/grass
+            _padding2: 0.0,
+        };
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
+
+    /// Update camera uniform with wind disabled (for static objects like boulders)
+    pub fn update_camera_no_wind(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+        alpha_cutoff: f32,
+        use_texture: f32,
+        lod_mode: LODFadeMode,
+        fade_start: f32,
+        fade_end: f32,
+    ) {
+        let lod_fade_mode = match lod_mode {
+            LODFadeMode::Disabled => 0.0,
+            LODFadeMode::LOD0FadeOut | LODFadeMode::LOD1FadeOut => 1.0,
+            LODFadeMode::LOD1FadeIn | LODFadeMode::LOD2FadeIn => 2.0,
+        };
+
+        let uniform = CameraUniform {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
+            sun_dir,
+            time,
+            view_pos,
+            fog_density,
+            fog_color,
+            fog_start,
+            fog_end,
+            alpha_cutoff,
+            use_texture,
+            lod_fade_start: fade_start,
+            lod_fade_end: fade_end,
+            lod_fade_mode,
+            wind_enabled: 0.0, // Wind DISABLED for boulders/rocks
             _padding2: 0.0,
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));

@@ -37,6 +37,40 @@ Write a JSON spec at `docs/specs/<ASSET>_LOD_SPEC.json`:
 }
 ```
 
+#### Required Spec Sections (All New Assets)
+
+Every LOD spec **must** include these considerations:
+
+1. **Textures & UVs**
+   ```json
+   "textures": {
+     "uv_required": true,
+     "material_setup": "Principled BSDF with Image Texture -> Base Color",
+     "embedding": "Textures embedded in GLB (Images: Automatic)",
+     "notes": "Engine reads TEXCOORD_0 for UVs, extracts baseColorTexture from PBR"
+   }
+   ```
+
+2. **Decimation Targets** (explicit triangle counts for Blender)
+   ```json
+   "decimation_targets": {
+     "lod0": 800,
+     "lod1": 150,
+     "lod2": 40
+   }
+   ```
+
+3. **Pipeline Hook** (how it integrates with rendering)
+   ```json
+   "pipeline": {
+     "renderer": "TreePipeline or new dedicated pipeline",
+     "registry_keys": ["asset_lod0", "asset_lod1"],
+     "lod_distances": { "lod0_max": 200.0, "lod1_max": 500.0 }
+   }
+   ```
+
+See `docs/specs/CHEST_LOD_SPEC.json` for a complete example.
+
 ### 3. Register Mesh in Pipeline
 
 Add to `main.rs` mesh registry section (~line 2330):

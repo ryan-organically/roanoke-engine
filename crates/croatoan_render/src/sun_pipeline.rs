@@ -108,8 +108,8 @@ impl SunPipeline {
         let sun_distance = 800.0; // Far enough to be behind everything
         let sun_world_pos = camera_pos - sun_dir * sun_distance;
 
-        // Sun size in world units (appears as ~30 degree disk)
-        let sun_size = 40.0;
+        // Sun size in clip space - no FOV distortion
+        let sun_size = 0.1;
 
         // Sun elevation (y component of sun direction, negative = below horizon)
         let sun_elevation = -sun_dir.y;

@@ -32,3 +32,9 @@ gltf = "1.4"
 
 # Audio
 kira = "0.9"
+
+# Networking (multiplayer demo)
+tokio = { version = "1.0", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
+tokio-tungstenite = "0.21"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }

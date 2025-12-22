@@ -425,6 +425,18 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         base_color = lerp_color(base_color, [0.25, 0.20, 0.15], mine_entrance);
     }
 
+    // Boulder depressions on beach - waves scour sand around rocks
+    // Only apply in beach zone (t = 0.45-0.65) and above water
+    if t >= 0.45 && t < 0.65 && height > 0.3 {
+        let boulder_depression = calculate_boulder_depression(x, z, seed);
+        if boulder_depression > 0.0 {
+            height -= boulder_depression;
+            // Slightly darker/wetter color in depressions
+            let wet_factor = (boulder_depression * 2.0).min(1.0);
+            base_color = lerp_color(base_color, [0.45, 0.38, 0.28], wet_factor * 0.3);
+        }
+    }
+
     // ========================================================================
     // SPAWN AREA TERRAIN FEATURES
     // Large-scale river valley with natural gradients
@@ -597,6 +609,50 @@ fn calculate_mine_entrance(x: f32, z: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Calculate sand depression around beach boulders
+/// Creates bowl-shaped depressions where waves have scoured sand around rocks
+/// Uses same noise seed as boulder placement for consistency
+fn calculate_boulder_depression(x: f32, z: f32, seed: u32) -> f32 {
+    // Same noise as boulder placement in rocks.rs Phase 5 (seed + 888)
+    let boulder_noise = noise_util::fbm(
+        Vec2::new(x * 0.06, z * 0.06),
+        2, 2.0, 0.5, seed + 888
+    );
+
+    // Check if a boulder would spawn near here
+    // Boulder spawn threshold from rocks.rs: size_roll > 0.85 for large
+    // We create depressions at all potential boulder spots (above noise threshold)
+    if boulder_noise > 0.4 {
+        // Depression strength increases with boulder likelihood
+        let depression_strength = (boulder_noise - 0.4) / 0.6; // 0.0 to 1.0
+
+        // Create radial bowl shape - depression is strongest at center
+        // Secondary noise for radial variation
+        let radial_noise = noise_util::fbm(
+            Vec2::new(x * 0.3, z * 0.3),
+            2, 2.0, 0.5, seed + 889
+        );
+
+        // Depression depth: up to 0.4m deep for large boulders
+        let depth = depression_strength * 0.4 * (1.0 + radial_noise * 0.3);
+
+        // Ring effect - slight raised rim at edge (wave-deposited sand)
+        let rim_noise = noise_util::fbm(
+            Vec2::new(x * 0.15, z * 0.15),
+            1, 2.0, 0.5, seed + 890
+        );
+        let rim_height = if rim_noise > 0.3 && depression_strength < 0.5 {
+            (rim_noise - 0.3) * 0.1
+        } else {
+            0.0
+        };
+
+        return depth - rim_height;
+    }
+
+    0.0
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {

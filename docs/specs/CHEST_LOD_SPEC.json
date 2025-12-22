@@ -1,0 +1,60 @@
+{
+  "asset": "wooden_chest",
+  "description": "Wooden storage chest with open/closed variants for beach spawn and world placement",
+
+  "variants": {
+    "closed": "Lid closed - default state",
+    "open": "Lid open - when player is interacting"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "200",
+      "distance": "0-50 units",
+      "notes": "Close detail, visible hinges and planks"
+    },
+    "lod1": {
+      "triangles": "5",
+      "distance": "50-200 units",
+      "notes": "Far fill, ultra-lightweight proof of concept"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 200,
+    "lod1": 5
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF (Draco NOT supported by engine)",
+    "path": "assets/models/containers/",
+    "filenames": [
+      "chest_closed_lod0.glb",
+      "chest_closed_lod1.glb",
+      "chest_open_lod0.glb",
+      "chest_open_lod1.glb"
+    ]
+  },
+
+  "textures": {
+    "uv_required": true,
+    "material_setup": "Principled BSDF with Image Texture -> Base Color",
+    "embedding": "Textures embedded in GLB (Images: Automatic)",
+    "notes": "Engine reads TEXCOORD_0 for UVs and extracts baseColorTexture from PBR material"
+  },
+
+  "pipeline": {
+    "renderer": "ContainerPipeline (new, based on TreePipeline)",
+    "registry_keys": [
+      "chest_closed_lod0",
+      "chest_closed_lod1",
+      "chest_open_lod0",
+      "chest_open_lod1"
+    ],
+    "lod_distances": {
+      "lod0_max": 50.0,
+      "lod1_max": 200.0
+    }
+  }
+}

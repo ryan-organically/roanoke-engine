@@ -10,7 +10,7 @@
 //! 3. **Lazy pack updates**: Only recalculate morale when members change
 //! 4. **Reduced query radius**: 25 units (was 50) - 4x fewer cell checks
 
-use super::behavior::{update_behavior, update_wolf_behavior, BehaviorContext, BehaviorState};
+use super::behavior::{update_behavior, update_pheasant_behavior, update_wolf_behavior, BehaviorContext, BehaviorState};
 use super::entity::{Animal, AnimalId, PackId, Target};
 use super::spatial::SpatialHash;
 use super::types::{AnimalSpecies, Difficulty, TimeOfDay, WolfGroupType};
@@ -411,8 +411,10 @@ impl AnimalManager {
             // Update behavior
             if let Some(animal) = self.animals.get_mut(&id) {
                 if animal.is_alive() {
-                    // Use wolf-specific behavior for wolves with group types
-                    if animal.wolf_group_type.is_some() {
+                    // Use species-specific behavior functions
+                    if animal.species == AnimalSpecies::RingNeckedPheasant {
+                        update_pheasant_behavior(animal, &ctx);
+                    } else if animal.wolf_group_type.is_some() {
                         update_wolf_behavior(animal, &ctx);
                     } else {
                         update_behavior(animal, &ctx);

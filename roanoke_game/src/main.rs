@@ -5,9 +5,9 @@
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_deadwood_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, generate_ferns_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, SkyPipeline, ViewModelPipeline, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, MoonPipeline, SkyPipeline, ViewModelPipeline, WeaponViewModelPipeline, WeaponVertex, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline, EmberPipeline};
 use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, generate_default_lod1_tree, generate_lod1_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
-use glam::{Vec3, Mat4};
+use glam::{Vec3, Mat4, Quat};
 use wgpu;
 use image; // Added image crate
 use std::sync::{Arc, Mutex, OnceLock};
@@ -60,6 +60,8 @@ mod systems_manager;
 mod character_agent;
 mod world_features;
 mod ui;
+mod network;
+mod campfire;
 
 use water_system::WaterSystem;
 use world_features::WorldFeatures;
@@ -309,12 +311,13 @@ impl LoadingSlideshow {
     }
 }
 
-// Swing animation state for viewmodel
+// Shot/recoil animation state for viewmodel
 struct SwingAnimation {
     is_swinging: bool,
     swing_progress: f32,  // 0.0 to 1.0
     swing_duration: f32,  // Total animation duration in seconds
     hit_processed: bool,  // Whether hit was processed this swing
+    muzzle_flash: f32,    // Muzzle flash intensity (0.0 to 1.0, decays quickly)
 }
 
 struct SharedState {
@@ -372,6 +375,8 @@ struct SharedState {
     economy_manager: economy::EconomyManager,
     player_economy: economy::PlayerEconomy,
     dropped_items: economy::DroppedItemManager,
+    // Storage Containers (chests, crates in the world)
+    storage_manager: economy::StorageManager,
     // Hotbar (quick-slot for inventory access)
     active_hotbar_slot: usize, // 0-9, maps to first 10 inventory slots
     // Combat state
@@ -405,6 +410,8 @@ struct SharedState {
     // Perks Journal
     perks_journal: ui::PerksJournalState,
     journal_textures: ui::JournalTextures,
+    // Campfire System
+    campfire_manager: campfire::CampfireManager,
 }
 
 impl SharedState {
@@ -582,8 +589,74 @@ fn spawn_beach_horses(
     }
 }
 
+/// Find a beach spawn position at ground level
+/// Searches for a low beach area close to the water line
+fn find_beach_spawn_position(seed: u32) -> Vec3 {
+    use croatoan_wfc::{get_height_at, get_biome_t};
+
+    // Beach zone biome_t is roughly 0.45-0.65
+    // Search a grid and find the best low beach spot above water
+    let search_x_start = 200.0;
+    let search_x_end = 450.0;
+    let search_z_range = 200.0;
+
+    let mut best_pos = None;
+    let mut best_score = f32::MIN;
+
+    // Search for a good beach spot
+    let step = 10.0;
+    let mut x = search_x_start;
+    while x < search_x_end {
+        let mut z = -search_z_range;
+        while z < search_z_range {
+            let biome_t = get_biome_t(x, z, seed);
+            let (height, _) = get_height_at(x, z, seed);
+
+            // Must be above water (height > 1.0) but on low beach
+            // Beach biome_t is 0.45-0.65, prefer closer to water (lower biome_t)
+            if height > 1.0 && height < 8.0 && biome_t >= 0.45 && biome_t <= 0.60 {
+                // Score: prefer low height and low biome_t (closer to water)
+                let score = -height - (biome_t - 0.45) * 10.0;
+                if score > best_score {
+                    best_score = score;
+                    best_pos = Some(Vec3::new(x, height, z));
+                }
+            }
+            z += step;
+        }
+        x += step;
+    }
+
+    // Fallback: search for ANY spot above water if no beach found
+    let spawn_pos = match best_pos {
+        Some(pos) => {
+            println!("[SPAWN] Found beach at ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
+            pos
+        }
+        None => {
+            // Search for any above-water spot
+            let mut fallback_pos = Vec3::new(250.0, 5.0, 0.0);
+            for fx in (100..400).step_by(20) {
+                for fz in (-100..100).step_by(20) {
+                    let (h, _) = get_height_at(fx as f32, fz as f32, seed);
+                    if h > 2.0 && h < 20.0 {
+                        fallback_pos = Vec3::new(fx as f32, h, fz as f32);
+                        break;
+                    }
+                }
+            }
+            println!("[SPAWN] No beach found, fallback at ({:.1}, {:.1}, {:.1})",
+                fallback_pos.x, fallback_pos.y, fallback_pos.z);
+            fallback_pos
+        }
+    };
+
+    // Add player eye height (1.8m) to spawn at ground level
+    Vec3::new(spawn_pos.x, spawn_pos.y + 1.8, spawn_pos.z)
+}
+
 /// Spawn ring-necked pheasants near player spawn location
-/// Creates a flock of 30-40 pheasants in the area around (0, 0) for immediate wildlife encounters
+/// Creates a flock of 30-40 pheasants in the area around the beach spawn for immediate wildlife encounters
 fn spawn_pheasants_at_spawn(
     animal_manager: &mut animals::AnimalManager,
     seed: u32,
@@ -594,8 +667,9 @@ fn spawn_pheasants_at_spawn(
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64 + 7777); // Different seed offset for variety
 
-    // Spawn 30-40 pheasants in a 200m radius around spawn point (0, 0)
-    let spawn_center = glam::Vec3::new(0.0, 0.0, 0.0);
+    // Spawn 30-40 pheasants in a 200m radius around beach spawn point
+    let beach_spawn = find_beach_spawn_position(seed);
+    let spawn_center = glam::Vec3::new(beach_spawn.x, 0.0, beach_spawn.z);
     let spawn_radius = 200.0;
     let num_pheasants = 30 + rng.gen_range(0..11); // 30-40 pheasants
 
@@ -1466,8 +1540,9 @@ fn main() {
         swing_animation: SwingAnimation {
             is_swinging: false,
             swing_progress: 0.0,
-            swing_duration: 0.35, // 350ms swing - fast like Minecraft
+            swing_duration: 0.4, // 400ms for recoil animation
             hit_processed: false,
+            muzzle_flash: 0.0,
         },
         atmosphere: AtmosphereEngine::new(),
         show_load_menu: false,
@@ -1483,6 +1558,8 @@ fn main() {
         economy_manager: economy::EconomyManager::new(),
         player_economy: economy::PlayerEconomy::new(),
         dropped_items: economy::DroppedItemManager::new(),
+        // Storage Containers
+        storage_manager: economy::StorageManager::new(),
         // Hotbar
         active_hotbar_slot: 0,
         // Combat state
@@ -1516,6 +1593,8 @@ fn main() {
         // Perks Journal
         perks_journal: ui::PerksJournalState::default(),
         journal_textures: ui::JournalTextures::new(),
+        // Campfire System
+        campfire_manager: campfire::CampfireManager::new(),
     }));
 
     // ... (Channel setup) ...
@@ -1740,12 +1819,13 @@ fn main() {
                     }
                 }
                 Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
-                    // Left mouse click triggers swing animation
+                    // Left mouse click triggers shot/recoil animation
                     if *button == MouseButton::Left && *button_state == ElementState::Pressed {
                         if !state.swing_animation.is_swinging {
                             state.swing_animation.is_swinging = true;
                             state.swing_animation.swing_progress = 0.0;
                             state.swing_animation.hit_processed = false;
+                            state.swing_animation.muzzle_flash = 1.0; // Trigger muzzle flash
                         }
                     }
                 }
@@ -1824,6 +1904,32 @@ fn main() {
                                         _ => "Dense",
                                     };
                                     println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
+                                }
+                                // C = Place campfire in front of player
+                                KeyCode::KeyC => {
+                                    use croatoan_wfc::mesh_gen::get_height_at;
+
+                                    // Find ground position in front of player (3 meters ahead)
+                                    let forward = state.camera.forward();
+                                    let placement_offset = forward * 3.0;
+                                    let target_x = state.player.position.x + placement_offset.x;
+                                    let target_z = state.player.position.z + placement_offset.z;
+
+                                    // Get terrain height at target position
+                                    let (ground_height, _biome) = get_height_at(target_x, target_z, state.seed);
+                                    let placement_pos = Vec3::new(target_x, ground_height, target_z);
+
+                                    // Check if placement is valid (not in water, not too close to other campfires)
+                                    if ground_height > 0.5 && state.campfire_manager.can_place_at(placement_pos) {
+                                        let rotation = state.player.yaw;
+                                        let id = state.campfire_manager.place_campfire(placement_pos, rotation);
+                                        println!("[CAMPFIRE] Placed campfire {} at ({:.1}, {:.1}, {:.1})",
+                                            id.0, placement_pos.x, placement_pos.y, placement_pos.z);
+                                    } else if ground_height <= 0.5 {
+                                        println!("[CAMPFIRE] Cannot place campfire in water!");
+                                    } else {
+                                        println!("[CAMPFIRE] Too close to another campfire!");
+                                    }
                                 }
                                 // F5 = Spawn debug animals in a circle around player
                                 // Only spawns species that have 3D models
@@ -2762,105 +2868,105 @@ fn main() {
                 // dead_grass DISABLED - replaced by grass2/grass3 system
 
                 // Load grass2 LOD models (inland/meadow/forest ground cover)
-                // LOD0: 55 tris (close), LOD1: 18 tris (mid), LOD2: 12 tris (far)
-                let grass2_lods = ["grass2_lod0", "grass2_lod1", "grass2_lod2"];
+                // Using grass2_lod1 for all LOD levels (only correctly-positioned model)
+                let grass2_source = "grass2_lod1";
                 let mut grass2_cache = gltf_loader::ModelCache::new("assets/models/grass");
-                for name in &grass2_lods {
-                    if let Some(model) = grass2_cache.load(name) {
-                        let mut all_positions: Vec<[f32; 3]> = Vec::new();
-                        let mut all_normals: Vec<[f32; 3]> = Vec::new();
-                        let mut all_uvs: Vec<[f32; 2]> = Vec::new();
-                        let mut all_indices: Vec<u32> = Vec::new();
-                        let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+                if let Some(model) = grass2_cache.load(grass2_source) {
+                    let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                    let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                    let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                    let mut all_indices: Vec<u32> = Vec::new();
+                    let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                        for mesh in &model.meshes {
-                            let base_idx = all_positions.len() as u32;
-                            all_positions.extend_from_slice(&mesh.positions);
-                            all_normals.extend_from_slice(&mesh.normals);
-                            all_uvs.extend_from_slice(&mesh.uvs);
-                            all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
-                            if grass_texture.is_none() {
-                                grass_texture = mesh.material.base_color_texture_data.as_ref();
-                            }
+                    for mesh in &model.meshes {
+                        let base_idx = all_positions.len() as u32;
+                        all_positions.extend_from_slice(&mesh.positions);
+                        all_normals.extend_from_slice(&mesh.normals);
+                        all_uvs.extend_from_slice(&mesh.uvs);
+                        all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                        if grass_texture.is_none() {
+                            grass_texture = mesh.material.base_color_texture_data.as_ref();
                         }
-
-                        if !all_positions.is_empty() {
-                            let texture_bind_group = grass_texture.map(|tex_data| {
-                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                    ctx.device(), ctx.queue(), tex_data,
-                                    Some(&format!("{}_texture", name)),
-                                );
-                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                    ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
-                                ))
-                            });
-                            let gpu_mesh = TreePipeline::create_mesh(
-                                ctx.device(),
-                                &all_positions,
-                                &all_normals,
-                                &all_uvs,
-                                &all_indices,
-                                texture_bind_group,
-                            );
-                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[GRASS2] Registered '{}': {} verts, {} tris",
-                                name, all_positions.len(), all_indices.len() / 3);
-                        }
-                    } else {
-                        println!("[GRASS2] Model '{}' not found - export from Blender to assets/models/grass/", name);
                     }
+
+                    if !all_positions.is_empty() {
+                        let texture_bind_group = grass_texture.map(|tex_data| {
+                            let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                ctx.device(), ctx.queue(), tex_data,
+                                Some("grass2_texture"),
+                            );
+                            std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                ctx.device(), &tex_view, Some("grass2_bind"),
+                            ))
+                        });
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &all_positions,
+                            &all_normals,
+                            &all_uvs,
+                            &all_indices,
+                            texture_bind_group,
+                        );
+                        // Register same mesh under all LOD names
+                        state.mesh_registry.insert("grass2_lod0".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass2_lod1".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass2_lod2".to_string(), gpu_mesh);
+                        println!("[GRASS2] Registered all LODs from '{}': {} verts, {} tris",
+                            grass2_source, all_positions.len(), all_indices.len() / 3);
+                    }
+                } else {
+                    println!("[GRASS2] Source model '{}' not found", grass2_source);
                 }
 
                 // Load grass3 LOD models from assets/models/grass/
-                // Simple crossed-planes grass clumps for dense instancing
-                // LOD0: 24 tris (close), LOD1: 12 tris (mid), LOD2: 8 tris (far)
-                let grass3_lods = ["grass3_lod0", "grass3_lod1", "grass3_lod2"];
+                // Using grass3_lod2 for all LOD levels (only correctly-positioned model)
+                let grass3_source = "grass3_lod2";
                 let mut grass3_cache = gltf_loader::ModelCache::new("assets/models/grass");
-                for name in &grass3_lods {
-                    if let Some(model) = grass3_cache.load(name) {
-                        // Grass3 is single mesh with MASK/BLEND alpha
-                        let mut all_positions: Vec<[f32; 3]> = Vec::new();
-                        let mut all_normals: Vec<[f32; 3]> = Vec::new();
-                        let mut all_uvs: Vec<[f32; 2]> = Vec::new();
-                        let mut all_indices: Vec<u32> = Vec::new();
-                        let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+                if let Some(model) = grass3_cache.load(grass3_source) {
+                    let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                    let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                    let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                    let mut all_indices: Vec<u32> = Vec::new();
+                    let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                        for mesh in &model.meshes {
-                            let base_idx = all_positions.len() as u32;
-                            all_positions.extend_from_slice(&mesh.positions);
-                            all_normals.extend_from_slice(&mesh.normals);
-                            all_uvs.extend_from_slice(&mesh.uvs);
-                            all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
-                            if grass_texture.is_none() {
-                                grass_texture = mesh.material.base_color_texture_data.as_ref();
-                            }
+                    for mesh in &model.meshes {
+                        let base_idx = all_positions.len() as u32;
+                        all_positions.extend_from_slice(&mesh.positions);
+                        all_normals.extend_from_slice(&mesh.normals);
+                        all_uvs.extend_from_slice(&mesh.uvs);
+                        all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                        if grass_texture.is_none() {
+                            grass_texture = mesh.material.base_color_texture_data.as_ref();
                         }
-
-                        if !all_positions.is_empty() {
-                            let texture_bind_group = grass_texture.map(|tex_data| {
-                                let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
-                                    ctx.device(), ctx.queue(), tex_data,
-                                    Some(&format!("{}_texture", name)),
-                                );
-                                std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                    ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
-                                ))
-                            });
-                            let gpu_mesh = TreePipeline::create_mesh(
-                                ctx.device(),
-                                &all_positions,
-                                &all_normals,
-                                &all_uvs,
-                                &all_indices,
-                                texture_bind_group,
-                            );
-                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[GRASS3] Registered '{}': {} verts, {} tris",
-                                name, all_positions.len(), all_indices.len() / 3);
-                        }
-                    } else {
-                        println!("[GRASS3] Model '{}' not found - export from Blender to assets/models/grass/", name);
                     }
+
+                    if !all_positions.is_empty() {
+                        let texture_bind_group = grass_texture.map(|tex_data| {
+                            let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                ctx.device(), ctx.queue(), tex_data,
+                                Some("grass3_texture"),
+                            );
+                            std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                ctx.device(), &tex_view, Some("grass3_bind"),
+                            ))
+                        });
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(),
+                            &all_positions,
+                            &all_normals,
+                            &all_uvs,
+                            &all_indices,
+                            texture_bind_group,
+                        );
+                        // Register same mesh under all LOD names
+                        state.mesh_registry.insert("grass3_lod0".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass3_lod1".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass3_lod2".to_string(), gpu_mesh);
+                        println!("[GRASS3] Registered all LODs from '{}': {} verts, {} tris",
+                            grass3_source, all_positions.len(), all_indices.len() / 3);
+                    }
+                } else {
+                    println!("[GRASS3] Source model '{}' not found", grass3_source);
                 }
 
                 // 2. Rocks - Procedural types (pebble, small, medium, flat, mossy)
@@ -3003,6 +3109,55 @@ fn main() {
                     }
                 }
 
+                // 5. Storage Containers - Chests (LOD1 and LOD2 only for now)
+                let mut container_cache = gltf_loader::ModelCache::new("assets/models/containers");
+                let chest_variants = ["chest_closed", "chest_open"];
+                let chest_lods = [1, 2]; // Skip LOD0 for now, use LOD1 (2006 tris) and LOD2 (48 tris)
+
+                for variant in &chest_variants {
+                    for &lod in &chest_lods {
+                        let name = format!("{}_lod{}", variant, lod);
+                        if let Some(model) = container_cache.load(&name) {
+                            let mut positions: Vec<[f32; 3]> = Vec::new();
+                            let mut normals: Vec<[f32; 3]> = Vec::new();
+                            let mut uvs: Vec<[f32; 2]> = Vec::new();
+                            let mut indices: Vec<u32> = Vec::new();
+                            let mut texture_bind_group = None;
+
+                            for mesh in &model.meshes {
+                                let base_idx = positions.len() as u32;
+                                positions.extend_from_slice(&mesh.positions);
+                                normals.extend_from_slice(&mesh.normals);
+                                uvs.extend_from_slice(&mesh.uvs);
+                                indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                                if texture_bind_group.is_none() {
+                                    if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                        let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                            ctx.device(), ctx.queue(), tex_data,
+                                            Some(&format!("{}_texture", name)),
+                                        );
+                                        texture_bind_group = Some(Arc::new(
+                                            boulder_texture_helper.create_texture_bind_group(
+                                                ctx.device(), &tex_view, Some(&format!("{}_bind", name)),
+                                            )
+                                        ));
+                                    }
+                                }
+                            }
+
+                            let gpu_mesh = TreePipeline::create_mesh(
+                                ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
+                            );
+                            println!("[CONTAINER] Registered '{}': {} verts, {} tris",
+                                name, positions.len(), indices.len() / 3);
+                            state.mesh_registry.insert(name, gpu_mesh);
+                        } else {
+                            println!("[CONTAINER] Model '{}' not found in assets/models/containers/", name);
+                        }
+                    }
+                }
+
                 println!("[GPU] Assets registered: {:?}", state.mesh_registry.keys());
             }
 
@@ -3131,6 +3286,80 @@ fn main() {
             Mutex::new(ViewModelPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // Weapon Viewmodel Pipeline (GLB weapon models)
+        static WEAPON_VIEWMODEL_PIPELINE: OnceLock<Mutex<WeaponViewModelPipeline>> = OnceLock::new();
+        static WEAPON_LOADED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+        let weapon_viewmodel_mutex = WEAPON_VIEWMODEL_PIPELINE.get_or_init(|| {
+            Mutex::new(WeaponViewModelPipeline::new(ctx.device(), ctx.queue(), ctx.surface_format()))
+        });
+        let weapon_loaded_flag = WEAPON_LOADED.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
+
+        // Load flintlock pistol if not already loaded
+        if !weapon_loaded_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(model) = gltf_loader::load_gltf("assets/models/weapons/flintlock_lod0.glb") {
+                // Collect all vertices and indices from the model
+                let mut all_vertices: Vec<WeaponVertex> = Vec::new();
+                let mut all_indices: Vec<u32> = Vec::new();
+                let mut texture_data: Option<(Vec<u8>, u32, u32)> = None;
+
+                for mesh in &model.meshes {
+                    let base_vertex = all_vertices.len() as u32;
+
+                    for (i, pos) in mesh.positions.iter().enumerate() {
+                        all_vertices.push(WeaponVertex::new(
+                            *pos,
+                            mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                            mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                        ));
+                    }
+
+                    for idx in &mesh.indices {
+                        all_indices.push(base_vertex + idx);
+                    }
+
+                    // Get texture from first mesh that has one
+                    if texture_data.is_none() {
+                        if let Some(tex) = mesh.material.get_or_create_texture() {
+                            texture_data = Some((tex.data.clone(), tex.width, tex.height));
+                        }
+                    }
+                }
+
+                if !all_vertices.is_empty() {
+                    let mut weapon_pipeline = weapon_viewmodel_mutex.safe_lock();
+
+                    // Adjust position for right-hand POV (centered, back, lower)
+                    weapon_pipeline.position_offset = Vec3::new(0.15, -0.18, -0.45);
+                    weapon_pipeline.rotation_offset = Vec3::new(0.0, -1.5, 0.0); // Point forward
+                    weapon_pipeline.scale = 1.2;
+
+                    if let Some((data, w, h)) = texture_data {
+                        weapon_pipeline.upload_weapon_mesh(
+                            ctx.device(),
+                            ctx.queue(),
+                            &all_vertices,
+                            &all_indices,
+                            Some((&data, w, h)),
+                        );
+                    } else {
+                        weapon_pipeline.upload_weapon_mesh(
+                            ctx.device(),
+                            ctx.queue(),
+                            &all_vertices,
+                            &all_indices,
+                            None,
+                        );
+                    }
+
+                    println!("[Weapon] Loaded flintlock pistol: {} vertices, {} indices",
+                        all_vertices.len(), all_indices.len());
+                    weapon_loaded_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                println!("[Weapon] Failed to load flintlock_lod0.glb");
+            }
+        }
+
         // Water System
         static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
         let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
@@ -3172,6 +3401,14 @@ fn main() {
         let rain_pipeline_mutex = RAIN_PIPELINE.get_or_init(|| {
             Mutex::new(RainPipeline::new(ctx.device(), ctx.surface_format()))
         });
+
+        // Ember Particle Pipeline (campfire embers)
+        static EMBER_PIPELINE: OnceLock<Mutex<EmberPipeline>> = OnceLock::new();
+        let ember_pipeline_mutex = EMBER_PIPELINE.get_or_init(|| {
+            Mutex::new(EmberPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Container Pipelines created fresh each frame (same pattern as rocks/trees)
 
         // Animal Model Cache (loads GLTF models)
         static ANIMAL_MODEL_CACHE: OnceLock<Mutex<gltf_loader::ModelCache>> = OnceLock::new();
@@ -3228,6 +3465,9 @@ fn main() {
             
             // Update Weather
             state.weather.update(delta);
+
+            // Update Campfires (flickering animation)
+            state.campfire_manager.update(delta);
 
             // Update dropped items (despawn timer)
             state.dropped_items.update(delta);
@@ -3330,6 +3570,14 @@ fn main() {
                 if state.swing_animation.swing_progress >= 1.0 {
                     state.swing_animation.is_swinging = false;
                     state.swing_animation.swing_progress = 0.0;
+                }
+            }
+
+            // Decay muzzle flash quickly (fades in ~0.1 seconds)
+            if state.swing_animation.muzzle_flash > 0.0 {
+                state.swing_animation.muzzle_flash -= delta * 10.0;
+                if state.swing_animation.muzzle_flash < 0.0 {
+                    state.swing_animation.muzzle_flash = 0.0;
                 }
             }
 
@@ -3702,7 +3950,18 @@ fn main() {
                             // Find texture: first try embedded, then create from baseColorFactor
                             let mut texture_data: Option<gltf_loader::LoadedTexture> = None;
 
+                            // Check if this model has a skeleton (is animated)
+                            let model_is_animated = loaded_model.is_animated();
+
                             for mesh in &loaded_model.meshes {
+                                // Skip non-skinned meshes in animated models - they're often
+                                // broken/mispositioned helper objects (e.g. pheasant tail quads)
+                                if model_is_animated && !mesh.is_skinned() {
+                                    log::debug!("[AnimalModel] Skipping non-skinned mesh '{}' in animated model '{}'",
+                                        mesh.name, model_name);
+                                    continue;
+                                }
+
                                 let vertex_offset = all_vertices.len() as u32;
                                 for i in 0..mesh.positions.len() {
                                     // Get joint indices and weights if available (for skinned meshes)
@@ -3833,18 +4092,15 @@ fn main() {
                     model_pipeline.upload_instances(ctx.device(), model_name, instances);
 
                     // Update skeletal animation for animated species
-                    if model_pipeline.has_animations(model_name) {
+                    // Skip pheasants - their animation is broken and causes mesh stretching
+                    if model_pipeline.has_animations(model_name) && *model_name != "ring_necked_pheasant" {
                         // Use time_of_day as animation time (cycles every 24 hours = 86400 secs)
-                        // Scale to get reasonable animation speed - faster for birds
-                        let anim_speed = if *model_name == "ring_necked_pheasant" { 300.0 } else { 150.0 };
+                        // Scale to get reasonable animation speed
+                        let anim_speed = 150.0;
                         let anim_time = state.time_of_day * anim_speed;
 
                         // Try to find an idle/default animation
-                        let anim_name = if *model_name == "ring_necked_pheasant" {
-                            "Take 001" // Pheasant animation name
-                        } else {
-                            "Idle"
-                        };
+                        let anim_name = "Idle";
 
                         if let Some(joint_matrices) = model_pipeline.compute_animation_matrices(
                             model_name,
@@ -3936,10 +4192,10 @@ fn main() {
         // Sun Billboard
 
 
-        // Moon Billboard (Reusing SunPipeline)
-        static MOON_PIPELINE: OnceLock<Mutex<SunPipeline>> = OnceLock::new();
+        // Moon Billboard (Proper MoonPipeline with silver/white colors)
+        static MOON_PIPELINE: OnceLock<Mutex<MoonPipeline>> = OnceLock::new();
         let moon_pipeline_mutex = MOON_PIPELINE.get_or_init(|| {
-            Mutex::new(SunPipeline::new(ctx.device(), ctx.surface_format()))
+            Mutex::new(MoonPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
         // Egui Input
@@ -4218,8 +4474,12 @@ fn main() {
                                         state.seed_input = seed.to_string();
                                         state.game_state = GameState::Loading;
                                         state.save_name_input = format!("seed_{}", seed);
-                                        state.player = Player::new(Vec3::new(0.0, 50.0, 0.0));
-                                        println!("[GAME] Starting new game with seed: {}", seed);
+                                        // Spawn on beach at ground level
+                                        let spawn_pos = find_beach_spawn_position(seed);
+                                        state.player = Player::new(spawn_pos);
+                                        state.player.yaw = std::f32::consts::PI; // Face west (inland)
+                                        println!("[GAME] Starting new game with seed: {} at beach ({:.1}, {:.1}, {:.1})",
+                                            seed, spawn_pos.x, spawn_pos.y, spawn_pos.z);
                                         let range = 3;
                                         let total = saturating_range_area(range);
                                         state.loading_progress = LoadingProgress {
@@ -4256,6 +4516,34 @@ fn main() {
                                         spawn_beach_horses(&mut state.animal_manager, seed);
                                         // Spawn pheasants near player spawn for early wildlife encounters
                                         spawn_pheasants_at_spawn(&mut state.animal_manager, seed);
+                                        // Spawn starter chests near beach spawn (scattered along shoreline)
+                                        {
+                                            use croatoan_wfc::get_height_at;
+                                            let base_x = spawn_pos.x;
+                                            let base_z = spawn_pos.z;
+
+                                            // Spawn 5 chests scattered along the beach
+                                            let chest_offsets = [
+                                                (-3.0, 2.0, 0.0),      // Near player, facing east
+                                                (5.0, -8.0, 0.5),      // South along beach
+                                                (-2.0, 15.0, -0.3),    // North along beach
+                                                (8.0, -20.0, 0.8),     // Further south
+                                                (-5.0, 25.0, -0.6),    // Further north
+                                            ];
+
+                                            for (dx, dz, rot) in chest_offsets {
+                                                let x = base_x + dx;
+                                                let z = base_z + dz;
+                                                let (height, _) = get_height_at(x, z, seed);
+                                                let chest_pos = Vec3::new(x, height + 1.0, z); // Raise above ground
+                                                let _chest_id = state.storage_manager.spawn_container(
+                                                    economy::ContainerType::WoodenChest,
+                                                    chest_pos,
+                                                    rot,
+                                                );
+                                            }
+                                            println!("[STORAGE] Spawned {} starter chests on beach", chest_offsets.len());
+                                        }
                                         // Register village factions
                                         register_village_factions(&mut *state);
                                     }
@@ -5157,9 +5445,9 @@ fn main() {
 
             // Check for new chunks from background thread
             if let Ok(rx) = render_rx.try_lock() {
-                // During Loading: Process 1 chunk per frame
-                // During Playing: Process up to 2 chunks per frame to avoid stutter
-                let chunks_per_frame = if state.game_state == GameState::Loading { 1 } else { 2 };
+                // During Loading: Process ALL available chunks for faster load
+                // During Playing: Process 1 chunk per frame to avoid stutter
+                let chunks_per_frame = if state.game_state == GameState::Loading { 100 } else { 1 };
                 for _ in 0..chunks_per_frame {
                     match rx.try_recv() {
                         Ok((terrain_pos, terrain_col, terrain_nrm, terrain_idx,
@@ -5637,10 +5925,11 @@ fn main() {
                                     let rotation = rng_grass2.gen::<f32>() * std::f32::consts::TAU;
                                     let scale = 1.4 + rng_grass2.gen::<f32>() * 0.8; // 1.4-2.2 (larger clumps)
 
+                                    // DEBUG: +0.3 offset to test - remove once model issue found
                                     let transform = Mat4::from_scale_rotation_translation(
                                         Vec3::splat(scale),
                                         glam::Quat::from_rotation_y(rotation),
-                                        Vec3::new(world_x, height, world_z),
+                                        Vec3::new(world_x, height + 0.3, world_z),
                                     );
                                     grass2_transforms.push(transform);
                                 }
@@ -5744,10 +6033,11 @@ fn main() {
                                     // Very tall wispy beach grass with high variation
                                     let scale = 4.0 + rng_grass3.gen::<f32>() * 4.0; // 4.0-8.0 scale
 
+                                    // DEBUG: +1.0 offset to test - remove once model issue found
                                     let transform = Mat4::from_scale_rotation_translation(
                                         Vec3::splat(scale),
                                         glam::Quat::from_rotation_y(rotation),
-                                        Vec3::new(world_x, height, world_z),
+                                        Vec3::new(world_x, height + 1.0, world_z),
                                     );
                                     grass3_transforms.push(transform);
                                 }
@@ -5838,14 +6128,13 @@ fn main() {
                             state.loading_progress.chunks_uploaded += 1;
 
                             // Check if loading is complete
-                            // For streaming, "complete" just means "initial batch done"
+                            // Wait for ALL chunks to load before allowing play
                             if state.game_state == GameState::Loading {
-                                let (loaded, _loading) = manager.get_stats();
-                                // Start playing after 13 chunks loaded (3x3 core + 4 cardinal)
-                                // This ensures terrain exists in all directions around player
-                                // Remaining chunks will stream in while playing
-                                if loaded >= 13 {
-                                    println!("[LOAD] Initial {} chunks loaded! Transitioning to Playing...", loaded);
+                                let uploaded = state.loading_progress.chunks_uploaded;
+                                let total = state.loading_progress.total_chunks;
+                                // Wait for all chunks to be uploaded before transitioning
+                                if total > 0 && uploaded >= total {
+                                    println!("[LOAD] All {} chunks loaded! Transitioning to Playing...", uploaded);
                                     state.loading_progress.current_status = "Ready!".to_string();
                                     state.game_state = GameState::Playing;
                                 }
@@ -6080,6 +6369,34 @@ fn main() {
                             );
                         }
                     }
+
+                    // Render beach grass (grass3) shadows - LOD0 only for performance
+                    for grass3 in &chunk.grass3_lod0 {
+                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = grass3.get_shadow_buffers() {
+                            instanced_shadow_pipeline.render(
+                                &mut shadow_pass,
+                                vb,
+                                ib,
+                                inst_buf,
+                                idx_count,
+                                inst_count,
+                            );
+                        }
+                    }
+
+                    // Render boulder shadows - LOD0 only for performance
+                    for boulder in &chunk.boulders_lod0 {
+                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = boulder.get_shadow_buffers() {
+                            instanced_shadow_pipeline.render(
+                                &mut shadow_pass,
+                                vb,
+                                ib,
+                                inst_buf,
+                                idx_count,
+                                inst_count,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -6201,6 +6518,12 @@ fn main() {
                 let model_pipeline = animal_model_pipeline_mutex.safe_lock();
                 // Lock rain_pipeline early so it outlives render_pass
                 let mut rain_pipeline = rain_pipeline_mutex.safe_lock();
+                // Lock ember_pipeline early so it outlives render_pass
+                let mut ember_pipeline = ember_pipeline_mutex.safe_lock();
+                // Container pipelines must be declared here to outlive render_pass
+                let mut container_pipelines: Vec<TreePipeline> = Vec::new();
+                // Campfire pipelines must be declared here to outlive render_pass
+                let mut campfire_pipelines: Vec<TreePipeline> = Vec::new();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -6276,6 +6599,13 @@ fn main() {
                     lod2_max_distance: lod2_max,            // ~1360: LOD2 fades into fog
                 };
 
+                // Get campfire lights for terrain shader (up to 4 nearest)
+                let campfire_light_data: Vec<[f32; 4]> = state.campfire_manager
+                    .get_light_data(state.camera.position, 50.0, 4)
+                    .iter()
+                    .map(|l| [l.position.x, l.position.y, l.position.z, l.intensity])
+                    .collect();
+
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
                     if !frustum.contains_sphere(chunk.bounds.center, chunk.bounds.radius) {
@@ -6283,6 +6613,10 @@ fn main() {
                         continue;
                     }
                     terrain_rendered += 1;
+
+                    // Calculate muzzle flash world position (in front of player)
+                    let flash_offset = state.camera.forward() * 1.5 + Vec3::new(0.3, -0.3, 0.0);
+                    let flash_world_pos = state.camera.position + flash_offset;
 
                     // Terrain
                     chunk.terrain.update_uniforms(
@@ -6296,7 +6630,10 @@ fn main() {
                         fog_density,
                         sun_dir.to_array(),
                         state.camera.position.to_array(),
-                        state.camera.position.to_array()
+                        state.camera.position.to_array(),
+                        flash_world_pos.to_array(),
+                        state.swing_animation.muzzle_flash,
+                        &campfire_light_data,
                     );
                     chunk.terrain.render(&mut render_pass);
 
@@ -6449,80 +6786,53 @@ fn main() {
                     let boulder_transition_0_1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod0_end;
                     let boulder_transition_1_2 = dist >= boulder_lod1_fade_start && dist <= boulder_lod1_end;
 
-                    // Boulder LOD0 (high detail)
+                    // Boulder LOD0 (high detail) - NO WIND (boulders are static)
                     if in_boulder_lod0 {
                         for boulder in &chunk.boulders_lod0 {
-                            if boulder_transition_0_1 {
-                                boulder.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0, LODFadeMode::LOD0FadeOut,
-                                    boulder_lod0_fade_start, boulder_lod0_end,
-                                );
-                            } else {
-                                boulder.update_camera_full(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0, // use texture
-                                );
-                            }
+                            boulder.update_camera_no_wind(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0,
+                                if boulder_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
+                                boulder_lod0_fade_start, boulder_lod0_end,
+                            );
                             rocks_rendered += boulder.instance_count() as usize;
                             boulder.render(&mut render_pass);
                         }
                     }
 
-                    // Boulder LOD1 (medium detail)
+                    // Boulder LOD1 (medium detail) - NO WIND
                     if in_boulder_lod1 {
                         for boulder in &chunk.boulders_lod1 {
-                            if boulder_transition_0_1 {
-                                boulder.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0, LODFadeMode::LOD1FadeIn,
-                                    boulder_lod0_fade_start, boulder_lod0_end,
-                                );
+                            let (lod_mode, fade_start, fade_end) = if boulder_transition_0_1 {
+                                (LODFadeMode::LOD1FadeIn, boulder_lod0_fade_start, boulder_lod0_end)
                             } else if boulder_transition_1_2 {
-                                boulder.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0, LODFadeMode::LOD0FadeOut,
-                                    boulder_lod1_fade_start, boulder_lod1_end,
-                                );
+                                (LODFadeMode::LOD0FadeOut, boulder_lod1_fade_start, boulder_lod1_end)
                             } else {
-                                boulder.update_camera_full(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0,
-                                );
-                            }
+                                (LODFadeMode::Disabled, 0.0, 0.0)
+                            };
+                            boulder.update_camera_no_wind(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0, lod_mode, fade_start, fade_end,
+                            );
                             boulder.render(&mut render_pass);
                         }
                     }
 
-                    // Boulder LOD2 (low detail)
+                    // Boulder LOD2 (low detail) - NO WIND
                     if in_boulder_lod2 {
                         for boulder in &chunk.boulders_lod2 {
-                            if boulder_transition_1_2 {
-                                boulder.update_camera_with_lod(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0, LODFadeMode::LOD1FadeIn,
-                                    boulder_lod1_fade_start, boulder_lod1_end,
-                                );
-                            } else {
-                                boulder.update_camera_full(
-                                    ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                    fog_color, fog_start, fog_end, fog_density,
-                                    0.0, 1.0,
-                                );
-                            }
+                            boulder.update_camera_no_wind(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.0, 1.0,
+                                if boulder_transition_1_2 { LODFadeMode::LOD1FadeIn } else { LODFadeMode::Disabled },
+                                boulder_lod1_fade_start, boulder_lod1_end,
+                            );
                             boulder.render(&mut render_pass);
                         }
                     }
@@ -6632,25 +6942,33 @@ fn main() {
                     }
 
                     // ================================================================
-                    // GRASS2: Inland/meadow/forest ground cover with 3 LOD levels
+                    // GRASS2: Inland/meadow/forest ground cover with 3 LOD levels + crossfade
                     // ================================================================
-                    // LOD0: 0-50, LOD1: 40-120, LOD2: 100-250
-                    let grass2_lod0_end = 50.0;
-                    let grass2_lod1_end = 120.0;
-                    let grass2_lod1_fade_start = 100.0;
+                    // LOD0: 0-55, LOD1: 45-125, LOD2: 115-250 (with 10m crossfade zones)
+                    let grass2_lod0_fade_start = 45.0;  // LOD0 starts fading
+                    let grass2_lod0_end = 55.0;         // LOD0 fully gone
+                    let grass2_lod1_fade_start = 115.0; // LOD1 starts fading
+                    let grass2_lod1_end = 125.0;        // LOD1 fully gone
                     let grass2_lod2_end = 250.0;
 
+                    // Determine LOD visibility with crossfade zones
                     let in_grass2_lod0 = dist <= grass2_lod0_end;
-                    let in_grass2_lod1 = dist > grass2_lod0_end && dist <= grass2_lod1_end;
+                    let in_grass2_lod1 = dist >= grass2_lod0_fade_start && dist <= grass2_lod1_end;
                     let in_grass2_lod2 = dist >= grass2_lod1_fade_start && dist <= grass2_lod2_end;
+
+                    // Transition zones (both LODs render during crossfade)
+                    let grass2_transition_0_1 = dist >= grass2_lod0_fade_start && dist <= grass2_lod0_end;
+                    let grass2_transition_1_2 = dist >= grass2_lod1_fade_start && dist <= grass2_lod1_end;
 
                     if in_grass2_lod0 {
                         for g2 in &chunk.grass2_lod0 {
-                            g2.update_camera_full(
+                            g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
+                                if grass2_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
+                                grass2_lod0_fade_start, grass2_lod0_end,
                             );
                             g2.render(&mut render_pass);
                         }
@@ -6658,11 +6976,18 @@ fn main() {
 
                     if in_grass2_lod1 {
                         for g2 in &chunk.grass2_lod1 {
-                            g2.update_camera_full(
+                            let (lod_mode, fade_start, fade_end) = if grass2_transition_0_1 {
+                                (LODFadeMode::LOD1FadeIn, grass2_lod0_fade_start, grass2_lod0_end)
+                            } else if grass2_transition_1_2 {
+                                (LODFadeMode::LOD0FadeOut, grass2_lod1_fade_start, grass2_lod1_end)
+                            } else {
+                                (LODFadeMode::Disabled, 0.0, 0.0)
+                            };
+                            g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
-                                0.5, 1.0,
+                                0.5, 1.0, lod_mode, fade_start, fade_end,
                             );
                             g2.render(&mut render_pass);
                         }
@@ -6670,38 +6995,48 @@ fn main() {
 
                     if in_grass2_lod2 {
                         for g2 in &chunk.grass2_lod2 {
-                            g2.update_camera_full(
+                            g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
+                                if grass2_transition_1_2 { LODFadeMode::LOD2FadeIn } else { LODFadeMode::Disabled },
+                                grass2_lod1_fade_start, grass2_lod1_end,
                             );
                             g2.render(&mut render_pass);
                         }
                     }
 
                     // ================================================================
-                    // GRASS3: Beach grass with 3 LOD levels
+                    // GRASS3: Beach grass with 3 LOD levels + crossfade transitions
                     // ================================================================
-                    // LOD0: 0-40, LOD1: 30-100, LOD2: 80-200
-                    let grass3_lod0_end = 40.0;
-                    let grass3_lod0_fade_start = 30.0;
-                    let grass3_lod1_end = 100.0;
-                    let grass3_lod1_fade_start = 80.0;
+                    // LOD0: 0-50, LOD1: 40-100, LOD2: 90-200 (with 10m crossfade zones)
+                    // Extended LOD0 range for more detail at close range
+                    let grass3_lod0_fade_start = 40.0;  // LOD0 starts fading
+                    let grass3_lod0_end = 50.0;         // LOD0 fully gone
+                    let grass3_lod1_fade_start = 90.0;  // LOD1 starts fading
+                    let grass3_lod1_end = 100.0;        // LOD1 fully gone
                     let grass3_lod2_end = 200.0;
 
+                    // Determine LOD visibility with crossfade zones
                     let in_grass3_lod0 = dist <= grass3_lod0_end;
                     let in_grass3_lod1 = dist >= grass3_lod0_fade_start && dist <= grass3_lod1_end;
                     let in_grass3_lod2 = dist >= grass3_lod1_fade_start && dist <= grass3_lod2_end;
 
+                    // Transition zones (both LODs render during crossfade)
+                    let grass3_transition_0_1 = dist >= grass3_lod0_fade_start && dist <= grass3_lod0_end;
+                    let grass3_transition_1_2 = dist >= grass3_lod1_fade_start && dist <= grass3_lod1_end;
+
                     // Render grass3 LOD0 (highest detail, close range)
                     if in_grass3_lod0 {
                         for g3 in &chunk.grass3_lod0 {
-                            g3.update_camera_full(
+                            g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
+                                if grass3_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
+                                grass3_lod0_fade_start, grass3_lod0_end,
                             );
                             g3.render(&mut render_pass);
                         }
@@ -6710,11 +7045,18 @@ fn main() {
                     // Render grass3 LOD1 (mid-range)
                     if in_grass3_lod1 {
                         for g3 in &chunk.grass3_lod1 {
-                            g3.update_camera_full(
+                            let (lod_mode, fade_start, fade_end) = if grass3_transition_0_1 {
+                                (LODFadeMode::LOD1FadeIn, grass3_lod0_fade_start, grass3_lod0_end)
+                            } else if grass3_transition_1_2 {
+                                (LODFadeMode::LOD0FadeOut, grass3_lod1_fade_start, grass3_lod1_end)
+                            } else {
+                                (LODFadeMode::Disabled, 0.0, 0.0)
+                            };
+                            g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
-                                0.5, 1.0,
+                                0.5, 1.0, lod_mode, fade_start, fade_end,
                             );
                             g3.render(&mut render_pass);
                         }
@@ -6723,11 +7065,13 @@ fn main() {
                     // Render grass3 LOD2 (far range, lowest detail)
                     if in_grass3_lod2 {
                         for g3 in &chunk.grass3_lod2 {
-                            g3.update_camera_full(
+                            g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
+                                if grass3_transition_1_2 { LODFadeMode::LOD2FadeIn } else { LODFadeMode::Disabled },
+                                grass3_lod1_fade_start, grass3_lod1_end,
                             );
                             g3.render(&mut render_pass);
                         }
@@ -6754,6 +7098,153 @@ fn main() {
                         }
                     }
                 }
+
+                // Render Storage Containers (chests, crates, etc.)
+                // Uses container_pipelines vec declared at outer scope (outlives render_pass)
+                let containers_rendered = {
+                    let mut rendered_count = 0usize;
+                    let player_pos = state.camera.position;
+                    let container_max_distance = 200.0;
+                    let lod_threshold = 50.0;
+
+                    // Debug: log container count once
+                    static CONTAINER_DEBUG_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    let total_containers = state.storage_manager.all_containers().count();
+                    if total_containers > 0 && !CONTAINER_DEBUG_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        println!("[CONTAINER] {} containers in world, player at ({:.1}, {:.1}, {:.1})",
+                            total_containers, player_pos.x, player_pos.y, player_pos.z);
+                        for c in state.storage_manager.all_containers() {
+                            println!("[CONTAINER]   - {:?} at ({:.1}, {:.1}, {:.1}) dist={:.1}",
+                                c.container_type, c.position.x, c.position.y, c.position.z,
+                                c.position.distance(player_pos));
+                        }
+                    }
+
+                    // Collect transforms for each mesh type
+                    let mut closed_lod1_transforms: Vec<Mat4> = Vec::new();
+                    let mut closed_lod2_transforms: Vec<Mat4> = Vec::new();
+                    let mut open_lod1_transforms: Vec<Mat4> = Vec::new();
+                    let mut open_lod2_transforms: Vec<Mat4> = Vec::new();
+
+                    for container in state.storage_manager.all_containers() {
+                        let dist = container.position.distance(player_pos);
+                        if dist > container_max_distance {
+                            continue;
+                        }
+
+                        let transform = Mat4::from_scale_rotation_translation(
+                            Vec3::splat(5.0), // 5x scale for visibility
+                            Quat::from_rotation_y(container.rotation),
+                            container.position,
+                        );
+
+                        let is_lod1 = dist < lod_threshold;
+                        if container.is_open {
+                            if is_lod1 { open_lod1_transforms.push(transform); }
+                            else { open_lod2_transforms.push(transform); }
+                        } else {
+                            if is_lod1 { closed_lod1_transforms.push(transform); }
+                            else { closed_lod2_transforms.push(transform); }
+                        }
+                    }
+
+                    // Create pipelines for each variant with transforms
+                    let shadow_map = shadow_map_mutex.safe_lock();
+
+                    if !closed_lod1_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_closed_lod1") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &closed_lod1_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += closed_lod1_transforms.len();
+                        }
+                    }
+                    if !closed_lod2_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_closed_lod2") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &closed_lod2_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += closed_lod2_transforms.len();
+                        }
+                    }
+                    if !open_lod1_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_open_lod1") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &open_lod1_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += open_lod1_transforms.len();
+                        }
+                    }
+                    if !open_lod2_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_open_lod2") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &open_lod2_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += open_lod2_transforms.len();
+                        }
+                    }
+                    // Generate campfire meshes before dropping shadow_map
+                    let nearby_campfires: Vec<_> = state.campfire_manager
+                        .campfires_near(state.camera.position, 100.0)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+
+                    for campfire in &nearby_campfires {
+                        // Generate mesh for this campfire
+                        let mesh_data = campfire::CampfireMesh::generate(campfire);
+                        let (positions, normals, uvs, indices) = mesh_data.to_tree_mesh_data();
+
+                        if !positions.is_empty() {
+                            // Create pipeline and mesh
+                            let mut pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let tree_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, None);
+                            pipeline.set_mesh(tree_mesh);
+
+                            // Single instance at origin (mesh is already in world space)
+                            let transforms = vec![Mat4::IDENTITY];
+                            pipeline.upload_instances(ctx.device(), &transforms);
+                            pipeline.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0
+                            );
+                            campfire_pipelines.push(pipeline);
+                        }
+                    }
+
+                    drop(shadow_map);
+
+                    // Render all container pipelines
+                    for pipeline in &container_pipelines {
+                        pipeline.render(&mut render_pass);
+                    }
+
+                    // Render all campfire pipelines
+                    for pipeline in &campfire_pipelines {
+                        pipeline.render(&mut render_pass);
+                    }
+
+                    rendered_count
+                };
+
+                let campfires_rendered = campfire_pipelines.len();
 
                 // Render Animal Models (3D models for species that have them)
                 model_pipeline.update_camera(
@@ -6796,18 +7287,36 @@ fn main() {
                 );
                 rain_pipeline.render(&mut render_pass);
 
+                // Render Ember Particles (from campfires)
+                // Get campfire data for ember pipeline (up to 8 campfires)
+                let ember_campfire_data: Vec<[f32; 4]> = state.campfire_manager
+                    .get_light_data(state.camera.position, 50.0, 8)
+                    .iter()
+                    .map(|l| [l.position.x, l.position.y, l.position.z, l.intensity])
+                    .collect();
+                ember_pipeline.update(
+                    ctx.queue(),
+                    &view_proj,
+                    state.camera.position,
+                    state.camera.right(),
+                    state.camera.up,
+                    elapsed,
+                    &ember_campfire_data,
+                );
+                ember_pipeline.render(&mut render_pass);
+
                 // Log culling stats occasionally (every ~60 frames)
                 static mut FRAME_COUNTER: u32 = 0;
                 unsafe {
                     FRAME_COUNTER += 1;
                     if FRAME_COUNTER % 300 == 1 {
-                        println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}",
+                        println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}, containers={}",
                             terrain_rendered, grass_rendered, trees_rendered, trees_lod1_rendered,
-                            shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered);
+                            shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered, containers_rendered);
                     }
                 }
                 let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, trees_lod1_rendered,
-                         rocks_rendered, boulders_rendered, shrubs_rendered, ferns_rendered, dead_logs_rendered, buildings_rendered);
+                         rocks_rendered, boulders_rendered, shrubs_rendered, ferns_rendered, dead_logs_rendered, buildings_rendered, containers_rendered);
             } // End Main Pass
 
             // 2.5 Light Shaft Post-Process Pass
@@ -6901,40 +7410,43 @@ fn main() {
                 }
             }
 
-            // 3. Viewmodel Pass (First-person arms and weapon) - DISABLED (block arms)
-            // TODO: Replace with proper first-person arm model
-            // if state.game_state == GameState::Playing {
-            //     let viewmodel_pipeline = viewmodel_pipeline_mutex.safe_lock();
-            //     viewmodel_pipeline.update_uniforms(
-            //         ctx.queue(),
-            //         state.camera.yaw,
-            //         state.camera.pitch,
-            //         state.camera.aspect_ratio,
-            //         state.swing_animation.swing_progress,
-            //     );
-            //     let mut viewmodel_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            //         label: Some("Viewmodel Pass"),
-            //         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            //             view: &view,
-            //             resolve_target: None,
-            //             ops: wgpu::Operations {
-            //                 load: wgpu::LoadOp::Load,
-            //                 store: wgpu::StoreOp::Store,
-            //             },
-            //         })],
-            //         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            //             view: ctx.depth_view(),
-            //             depth_ops: Some(wgpu::Operations {
-            //                 load: wgpu::LoadOp::Clear(1.0),
-            //                 store: wgpu::StoreOp::Store,
-            //             }),
-            //             stencil_ops: None,
-            //         }),
-            //         timestamp_writes: None,
-            //         occlusion_query_set: None,
-            //     });
-            //     viewmodel_pipeline.render(&mut viewmodel_pass);
-            // }
+            // 3. Weapon Viewmodel Pass (First-person weapon)
+            if state.game_state == GameState::Playing {
+                let weapon_pipeline = weapon_viewmodel_mutex.safe_lock();
+                if weapon_pipeline.has_weapon() {
+                    weapon_pipeline.update_uniforms(
+                        ctx.queue(),
+                        state.camera.aspect_ratio,
+                        state.swing_animation.swing_progress,
+                        elapsed,
+                        state.player.velocity,
+                        state.swing_animation.muzzle_flash,
+                    );
+
+                    let mut viewmodel_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Weapon Viewmodel Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: ctx.depth_view(),
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    weapon_pipeline.render(&mut viewmodel_pass);
+                }
+            }
 
             // 4. Egui Pass
             {

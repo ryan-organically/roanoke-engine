@@ -19,12 +19,9 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
 }
 
-// Billboard quad vertices (two triangles)
+// Billboard quad vertices (two triangles) - rendered in clip space to avoid FOV distortion
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Generate quad vertices from index
-    // 0: (-1, -1), 1: (1, -1), 2: (-1, 1), 3: (1, 1)
-    // Triangles: 0-1-2, 2-1-3
     var positions = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>( 1.0, -1.0),
@@ -36,14 +33,18 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
     let pos_2d = positions[vertex_index];
 
-    // Billboard in world space - offset from sun position using camera basis vectors
-    let world_pos = uniforms.sun_world_pos 
-        + uniforms.camera_right * pos_2d.x * uniforms.sun_size 
-        + uniforms.camera_up * pos_2d.y * uniforms.sun_size;
+    // Project sun center to clip space
+    let center_clip = uniforms.view_proj * vec4<f32>(uniforms.sun_world_pos, 1.0);
 
+    // Offset in clip space (no aspect correction)
     var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(world_pos, 1.0);
-    out.uv = pos_2d * 0.5 + 0.5; // Convert -1,1 to 0,1
+    out.clip_position = vec4<f32>(
+        center_clip.x + pos_2d.x * uniforms.sun_size * center_clip.w,
+        center_clip.y + pos_2d.y * uniforms.sun_size * center_clip.w,
+        center_clip.z,
+        center_clip.w
+    );
+    out.uv = pos_2d * 0.5 + 0.5;
 
     return out;
 }
@@ -99,7 +100,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         return vec4<f32>(horizon_color, glow * 0.8);
     } else {
-        // Outside sun
         discard;
     }
 }

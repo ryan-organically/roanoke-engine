@@ -915,11 +915,37 @@ impl AnimalModelPipeline {
         for joint_idx in 0..joint_count {
             let keyframes = animation.joint_keyframes.get(joint_idx).cloned().unwrap_or_default();
 
-            // Sample translation, rotation, scale
-            let translation = sample_vec3_keyframes(&keyframes.translation_times, &keyframes.translations, t);
-            let rotation = sample_quat_keyframes(&keyframes.rotation_times, &keyframes.rotations, t);
+            // Get rest pose as fallback for joints without animation keyframes
+            // This prevents vertices from collapsing to origin when joints have no keyframes
+            let rest_pose = skeleton.local_transforms.get(joint_idx);
+            let (rest_translation, rest_rotation, rest_scale) = if let Some((mat, rot, scl)) = rest_pose {
+                // Extract translation from rest pose matrix (column 3)
+                let rest_mat = Mat4::from_cols_array_2d(mat);
+                let rest_t = Vec3::new(rest_mat.w_axis.x, rest_mat.w_axis.y, rest_mat.w_axis.z);
+                let rest_r = glam::Quat::from_xyzw(rot[0], rot[1], rot[2], rot[3]);
+                let rest_s = Vec3::from_array(*scl);
+                (rest_t, rest_r, rest_s)
+            } else {
+                (Vec3::ZERO, glam::Quat::IDENTITY, Vec3::ONE)
+            };
+
+            // Sample translation - use rest pose if no keyframes
+            let translation = if keyframes.translation_times.is_empty() {
+                rest_translation
+            } else {
+                sample_vec3_keyframes(&keyframes.translation_times, &keyframes.translations, t)
+            };
+
+            // Sample rotation - use rest pose if no keyframes
+            let rotation = if keyframes.rotation_times.is_empty() {
+                rest_rotation
+            } else {
+                sample_quat_keyframes(&keyframes.rotation_times, &keyframes.rotations, t)
+            };
+
+            // Sample scale - use rest pose if no keyframes
             let scale = if keyframes.scale_times.is_empty() {
-                Vec3::ONE
+                rest_scale
             } else {
                 sample_vec3_keyframes(&keyframes.scale_times, &keyframes.scales, t)
             };
