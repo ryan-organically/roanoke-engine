@@ -411,6 +411,39 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         }
     }
 
+    // ========================================================================
+    // WETLAND TRANSITION ZONE - flat marshy area between spawn and salt marsh
+    // Located immediately south of spawn (z = -60 to z = -140)
+    // ========================================================================
+    let (wetland_factor, is_wetland_flooded) = calculate_wetland_zone(x, z, seed);
+    if wetland_factor > 0.0 {
+        // Flatten terrain to near sea level (0.5 - 2.0m)
+        let wetland_height = 1.0 + noise_util::fbm(
+            Vec2::new(x * 0.01, z * 0.01),
+            2, 2.0, 0.5, seed + 450
+        ) * 0.5;
+
+        // Blend toward flat wetland
+        height = lerp(height, wetland_height, wetland_factor * 0.8);
+
+        // Wetland color: dark muddy green-brown
+        let wetland_color = if is_wetland_flooded {
+            [0.18, 0.28, 0.22] // Darker, wetter
+        } else {
+            [0.30, 0.38, 0.25] // Marshy grass
+        };
+        base_color = lerp_color(base_color, wetland_color, wetland_factor * 0.7);
+
+        // Add subtle hummocks (raised grass clumps)
+        let hummock_noise = noise_util::fbm(
+            Vec2::new(x * 0.15, z * 0.15),
+            2, 2.0, 0.5, seed + 451
+        );
+        if hummock_noise > 0.5 && !is_wetland_flooded {
+            height += (hummock_noise - 0.5) * 0.4 * wetland_factor;
+        }
+    }
+
     // Cave entrance near spawn (around -50, 0 to -100, 50)
     let cave_entrance = calculate_cave_entrance(x, z);
     if cave_entrance > 0.0 {
@@ -550,35 +583,162 @@ pub fn calculate_river_depth(x: f32, z: f32, seed: u32) -> f32 {
 fn calculate_pond_depth(x: f32, z: f32, seed: u32) -> f32 {
     let mut max_depth = 0.0f32;
 
-    // Fixed pond locations near spawn for visibility
-    let ponds = [
-        (Vec2::new(-40.0, 80.0), 12.0),   // Pond near spawn
-        (Vec2::new(-120.0, -50.0), 15.0), // Forest pond
-        (Vec2::new(30.0, 120.0), 10.0),   // Coastal pond
-        (Vec2::new(-200.0, 30.0), 18.0),  // Large inland pond
+    // ========================================================================
+    // FIXED WATER BODIES - strategically placed for gameplay
+    // ========================================================================
+
+    // Near spawn area ponds (tutorial/early game)
+    let spawn_ponds = [
+        (Vec2::new(-40.0, 80.0), 12.0, 1.5),    // Small pond near spawn
+        (Vec2::new(-120.0, -50.0), 15.0, 2.0),  // Forest pond
+        (Vec2::new(30.0, 120.0), 10.0, 1.2),    // Coastal pond
+        (Vec2::new(-200.0, 30.0), 18.0, 2.5),   // Large inland pond
     ];
 
-    for (center, radius) in ponds {
+    // Inland lakes (larger water bodies for exploration)
+    let inland_lakes = [
+        (Vec2::new(-350.0, 150.0), 35.0, 4.0),   // Large inland lake
+        (Vec2::new(-280.0, -100.0), 25.0, 3.0),  // Forest lake
+        (Vec2::new(-450.0, -50.0), 28.0, 3.5),   // Western lake
+        (Vec2::new(-180.0, 200.0), 20.0, 2.5),   // Northern pond
+        (Vec2::new(-400.0, 250.0), 32.0, 4.0),   // Large northern lake
+    ];
+
+    // Wetland pools in the transition zone (between spawn and salt marsh)
+    let wetland_pools = [
+        (Vec2::new(-50.0, -80.0), 8.0, 0.8),     // Shallow wetland pool
+        (Vec2::new(-80.0, -100.0), 10.0, 1.0),   //
+        (Vec2::new(-30.0, -120.0), 12.0, 1.2),   // Larger wetland pool
+        (Vec2::new(-100.0, -130.0), 9.0, 0.9),   //
+        (Vec2::new(-60.0, -150.0), 14.0, 1.0),   // Near salt marsh
+        (Vec2::new(-20.0, -90.0), 7.0, 0.7),     // Small pool
+        (Vec2::new(-130.0, -110.0), 11.0, 1.1),  //
+        (Vec2::new(20.0, -100.0), 8.0, 0.8),     // Eastern wetland
+    ];
+
+    // Salt marsh tidal pools (shallow, irregular)
+    let marsh_pools = [
+        (Vec2::new(-40.0, -180.0), 15.0, 0.6),   // Tidal pool 1
+        (Vec2::new(30.0, -200.0), 12.0, 0.5),    // Tidal pool 2
+        (Vec2::new(-80.0, -220.0), 18.0, 0.7),   // Larger tidal area
+        (Vec2::new(10.0, -160.0), 10.0, 0.5),    // Small tidal
+        (Vec2::new(-120.0, -190.0), 14.0, 0.6),  //
+    ];
+
+    // Process all pond types
+    let all_ponds: Vec<(Vec2, f32, f32)> = spawn_ponds.iter()
+        .chain(inland_lakes.iter())
+        .chain(wetland_pools.iter())
+        .chain(marsh_pools.iter())
+        .copied()
+        .collect();
+
+    for (center, radius, max_pond_depth) in all_ponds {
         let dist = Vec2::new(x, z).distance(center);
-        if dist < radius {
-            // Smooth edges with noise
-            let edge_noise = noise_util::fbm(Vec2::new(x * 0.1, z * 0.1), 2, 2.0, 0.5, seed + 300) * 3.0;
+        if dist < radius * 1.3 {
+            // Smooth edges with noise for natural shoreline
+            let edge_noise = noise_util::fbm(
+                Vec2::new(x * 0.1 + center.x * 0.01, z * 0.1 + center.y * 0.01),
+                2, 2.0, 0.5, seed + 300
+            ) * (radius * 0.2);
             let effective_radius = radius + edge_noise;
+
             if dist < effective_radius {
-                let depth = 1.0 - (dist / effective_radius);
-                max_depth = max_depth.max(depth * depth);
+                let normalized = dist / effective_radius;
+                // Smooth bowl shape: steep sides, flat bottom
+                let depth_curve = 1.0 - (normalized * normalized);
+                let depth = depth_curve * (max_pond_depth / 4.0); // Normalize to 0-1 range
+                max_depth = max_depth.max(depth);
             }
         }
     }
 
-    // Additional procedural ponds based on noise
+    // Additional procedural ponds based on noise (smaller random pools)
     let pond_noise = noise_util::fbm(Vec2::new(x * 0.02, z * 0.02), 3, 2.0, 0.5, seed + 301);
-    if pond_noise > 0.6 {
-        let pond_strength = (pond_noise - 0.6) / 0.4; // 0 to 1
-        max_depth = max_depth.max(pond_strength * 0.7);
+    if pond_noise > 0.65 {
+        let pond_strength = (pond_noise - 0.65) / 0.35;
+        max_depth = max_depth.max(pond_strength * 0.5);
     }
 
     max_depth
+}
+
+/// Calculate wetland transition zone - flat marshy area between spawn and salt marsh
+/// Returns (wetland_factor, is_flooded)
+pub fn calculate_wetland_zone(x: f32, z: f32, seed: u32) -> (f32, bool) {
+    // Wetland transition zone: roughly z = -60 to z = -140
+    // Centered at x = -50, extends from x = -200 to x = 100
+    let wetland_center = Vec2::new(-50.0, -100.0);
+    let wetland_width = 300.0;  // X extent
+    let wetland_depth = 80.0;   // Z extent
+
+    // Distance from wetland center (elliptical)
+    let dx = (x - wetland_center.x) / wetland_width;
+    let dz = (z - wetland_center.y) / wetland_depth;
+    let dist = (dx * dx + dz * dz).sqrt();
+
+    if dist > 1.0 {
+        return (0.0, false);
+    }
+
+    // Smooth falloff at edges
+    let base_factor = 1.0 - (dist * dist);
+
+    // Add noise for irregular edges
+    let edge_noise = noise_util::fbm(
+        Vec2::new(x * 0.02, z * 0.02),
+        3, 2.0, 0.5, seed + 400
+    ) * 0.3;
+
+    let wetland_factor = (base_factor + edge_noise).clamp(0.0, 1.0);
+
+    // Flooded areas within wetland (standing water)
+    let flood_noise = noise_util::fbm(
+        Vec2::new(x * 0.05, z * 0.05),
+        2, 2.0, 0.5, seed + 401
+    );
+    let is_flooded = wetland_factor > 0.3 && flood_noise > 0.2;
+
+    (wetland_factor, is_flooded)
+}
+
+/// Get all static water body definitions for rendering
+/// Returns Vec of (center, radius, depth, water_type)
+/// water_type: 0 = pond, 1 = lake, 2 = wetland, 3 = marsh
+pub fn get_water_bodies() -> Vec<(Vec2, f32, f32, u32)> {
+    let mut bodies = Vec::new();
+
+    // Spawn ponds (type 0)
+    bodies.push((Vec2::new(-40.0, 80.0), 12.0, 1.5, 0));
+    bodies.push((Vec2::new(-120.0, -50.0), 15.0, 2.0, 0));
+    bodies.push((Vec2::new(30.0, 120.0), 10.0, 1.2, 0));
+    bodies.push((Vec2::new(-200.0, 30.0), 18.0, 2.5, 0));
+
+    // Inland lakes (type 1)
+    bodies.push((Vec2::new(-350.0, 150.0), 35.0, 4.0, 1));
+    bodies.push((Vec2::new(-280.0, -100.0), 25.0, 3.0, 1));
+    bodies.push((Vec2::new(-450.0, -50.0), 28.0, 3.5, 1));
+    bodies.push((Vec2::new(-180.0, 200.0), 20.0, 2.5, 1));
+    bodies.push((Vec2::new(-400.0, 250.0), 32.0, 4.0, 1));
+
+    // Wetland pools (type 2)
+    bodies.push((Vec2::new(-50.0, -80.0), 8.0, 0.8, 2));
+    bodies.push((Vec2::new(-80.0, -100.0), 10.0, 1.0, 2));
+    bodies.push((Vec2::new(-30.0, -120.0), 12.0, 1.2, 2));
+    bodies.push((Vec2::new(-100.0, -130.0), 9.0, 0.9, 2));
+    bodies.push((Vec2::new(-60.0, -150.0), 14.0, 1.0, 2));
+    bodies.push((Vec2::new(-20.0, -90.0), 7.0, 0.7, 2));
+    bodies.push((Vec2::new(-130.0, -110.0), 11.0, 1.1, 2));
+    bodies.push((Vec2::new(20.0, -100.0), 8.0, 0.8, 2));
+
+    // Salt marsh tidal pools (type 3)
+    bodies.push((Vec2::new(-40.0, -180.0), 15.0, 0.6, 3));
+    bodies.push((Vec2::new(30.0, -200.0), 12.0, 0.5, 3));
+    bodies.push((Vec2::new(-80.0, -220.0), 18.0, 0.7, 3));
+    bodies.push((Vec2::new(10.0, -160.0), 10.0, 0.5, 3));
+    bodies.push((Vec2::new(-120.0, -190.0), 14.0, 0.6, 3));
+
+    bodies
 }
 
 /// Calculate cave entrance depression
@@ -853,51 +1013,51 @@ pub fn generate_detritus_for_chunk(
             
             if t < 0.45 {
                 // Ocean / Shallow Water (Inlets)
-                // Spawn dead trees in shallow water
+                // Spawn small sticks poking up from shallow water
                 if terrain_height > -2.0 && terrain_height < 0.5 && spawn_chance > 0.95 {
-                    // Dead Tree (Vertical)
+                    // Small stick (Vertical) - reduced from 0.3 radius logs
                     add_cylinder(
                         &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
                         Vec3::new(px, terrain_height, pz),
-                        0.3, // Radius
-                        4.0 + spawn_chance * 3.0, // Height
+                        0.02, // Radius (was 0.3 - now thin stick)
+                        0.4 + spawn_chance * 0.4, // Height 0.4-0.8m (was 4-7m)
                         Vec3::Y, // Up
-                        8 // Segments
+                        4 // Segments (was 8)
                     );
                 }
             } else if t < 0.55 {
                 // Beach
-                // Spawn driftwood (scattered sticks)
+                // Spawn tiny driftwood sticks
                 if spawn_chance > 0.92 {
-                    // Driftwood (Small, random orientation)
+                    // Small driftwood stick (random orientation)
                     let rot_x = (spawn_chance * 10.0).sin();
                     let rot_z = (spawn_chance * 10.0).cos();
                     let axis = Vec3::new(rot_x, 0.1, rot_z).normalize();
-                    
+
                     add_cylinder(
                         &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
-                        Vec3::new(px, terrain_height + 0.1, pz),
-                        0.1, // Radius
-                        1.5, // Length
+                        Vec3::new(px, terrain_height + 0.02, pz),
+                        0.015, // Radius (was 0.1 - now tiny stick)
+                        0.25 + spawn_chance * 0.2, // Length 0.25-0.45m (was 1.5m)
                         axis,
-                        6 // Segments
+                        4 // Segments (was 6)
                     );
                 }
             } else if t > 0.75 {
                 // Forest
-                // Spawn fallen logs
+                // Spawn small fallen twigs/sticks (high-fidelity logs use dead_log_0 model)
                 if spawn_chance > 0.97 {
-                    // Fallen Log (Horizontal)
+                    // Small twig (Horizontal)
                     let angle = spawn_chance * std::f32::consts::PI * 2.0;
                     let axis = Vec3::new(angle.cos(), 0.0, angle.sin());
-                    
+
                     add_cylinder(
                         &mut positions, &mut normals, &mut uvs, &mut indices, &mut index_offset,
-                        Vec3::new(px, terrain_height + 0.3, pz),
-                        0.4, // Radius
-                        3.0 + spawn_chance * 2.0, // Length
+                        Vec3::new(px, terrain_height + 0.02, pz),
+                        0.02, // Radius (was 0.4 - now small twig)
+                        0.3 + spawn_chance * 0.3, // Length 0.3-0.6m (was 3-5m)
                         axis,
-                        8 // Segments
+                        4 // Segments (was 8)
                     );
                 }
             }

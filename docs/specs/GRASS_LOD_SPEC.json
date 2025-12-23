@@ -1,0 +1,74 @@
+{
+  "asset": "grass_0",
+  "description": "Grass clump model - CRITICAL. 23MB is absurd for grass instanced 1000s of times.",
+
+  "current_problem": {
+    "lod0_size": "23MB",
+    "lod1_size": "MISSING",
+    "lod2_size": "MISSING",
+    "instances_per_chunk": "1400-2900",
+    "total_instances": "68K-142K across all chunks",
+    "issue": "23MB grass x 2000 instances = GPU meltdown"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "100-200",
+      "texture_resolution": "256x256",
+      "distance": "0-30 units",
+      "target_filesize": "50-100KB",
+      "notes": "Grass should be LIGHTWEIGHT - it's instanced thousands of times"
+    },
+    "lod1": {
+      "triangles": "30-50",
+      "texture_resolution": "128x128",
+      "distance": "30-80 units",
+      "target_filesize": "20-40KB"
+    },
+    "lod2": {
+      "triangles": "8-16",
+      "texture_resolution": "64x64",
+      "distance": "80-200 units",
+      "target_filesize": "5-15KB",
+      "notes": "Billboard or cross-plane at this distance"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 150,
+    "lod1": 40,
+    "lod2": 12
+  },
+
+  "textures": {
+    "uv_required": true,
+    "critical": "GRASS TEXTURES MUST BE TINY - 256x256 MAX for LOD0",
+    "lod0_texture": "256x256",
+    "lod1_texture": "128x128",
+    "lod2_texture": "64x64",
+    "alpha_cutout": "Use alpha for grass blade silhouette"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "assets/models/shrubs/",
+    "filenames": ["grass_0.glb", "grass_0_lod1.glb", "grass_0_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "GrassPipeline or TreePipeline",
+    "registry_keys": ["grass_0_lod0", "grass_0_lod1", "grass_0_lod2"],
+    "lod_distances": {
+      "lod0_max": 30.0,
+      "lod1_max": 80.0,
+      "lod2_max": 200.0
+    }
+  },
+
+  "optimization_notes": {
+    "consider_billboards": "LOD2 could be a simple textured quad facing camera",
+    "instance_limit": "Cap at 5000 grass instances per pipeline batch",
+    "cull_distance": "Don't render grass beyond 200 units"
+  }
+}

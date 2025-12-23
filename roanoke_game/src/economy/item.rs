@@ -560,3 +560,48 @@ pub struct TradeRecord {
     pub price: u64,
     pub timestamp: u64,
 }
+
+// ============================================================================
+// ITEM TEMPLATES - Common item creation helpers
+// ============================================================================
+
+/// Create a stick item (for campfire building)
+pub fn create_stick() -> Item {
+    let mut item = Item::new("stick", "Stick", ItemType::Material, 1);
+    item.rarity = Rarity::Crude;
+    item.stack_size = 1;
+    item.max_stack = 50;
+    item
+}
+
+/// Create multiple sticks
+pub fn create_sticks(count: u32) -> Item {
+    let mut item = create_stick();
+    item.stack_size = count.min(item.max_stack);
+    item
+}
+
+/// Create a pebble item (for campfire ring)
+pub fn create_pebble() -> Item {
+    let mut item = Item::new("pebble", "Pebble", ItemType::Material, 1);
+    item.rarity = Rarity::Crude;
+    item.stack_size = 1;
+    item.max_stack = 50;
+    item
+}
+
+/// Create multiple pebbles
+pub fn create_pebbles(count: u32) -> Item {
+    let mut item = create_pebble();
+    item.stack_size = count.min(item.max_stack);
+    item
+}
+
+/// Create kindling (dry leaves/grass for fire starting)
+pub fn create_kindling() -> Item {
+    let mut item = Item::new("kindling", "Kindling", ItemType::Material, 1);
+    item.rarity = Rarity::Crude;
+    item.stack_size = 1;
+    item.max_stack = 30;
+    item
+}

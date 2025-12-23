@@ -11,7 +11,7 @@
 //!
 //! ### Tier 2: Scattered Large Rocks
 //! Independent large boulders on steep slopes and rocky biomes.
-//! Density: ~0.2 per sq meter (10x previous).
+//! Density: ~0.05 per sq meter (reduced from 0.2 for performance).
 //!
 //! ### Tier 3: Dense Pebble Fields
 //! Hundreds of tiny stones per chunk for ground detail.
@@ -213,19 +213,20 @@ pub fn generate_rocks_for_chunk_with_exclusions(
             instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
         }
 
-        // Add bunch pebbles
-        for transform in bunch_instances.pebbles {
-            instances.push((RockType::Pebble.mesh_name().to_string(), transform));
-        }
+        // DISABLED: Bunch pebbles - "rock_pebble" mesh doesn't exist/render,
+        // these were invisible instances hurting performance
+        // for transform in bunch_instances.pebbles {
+        //     instances.push((RockType::Pebble.mesh_name().to_string(), transform));
+        // }
     }
 
     //=========================================================================
-    // PHASE 2: Scattered Large/Medium Rocks (10x density)
+    // PHASE 2: Scattered Large/Medium Rocks (REDUCED for performance)
     //=========================================================================
     // Independent rocks on steep slopes and rocky biome areas
-    // Previous density: 0.02, New density: 0.2
+    // Was 0.2 (way too dense), now 0.05 = 75% reduction
 
-    let large_rock_density = 0.2; // 10x increase
+    let large_rock_density = 0.05; // Reduced from 0.2 - was generating 5000+ per chunk
     let potential_large = (chunk_size * chunk_size * large_rock_density) as u32;
 
     for i in 0..potential_large {
@@ -316,7 +317,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     // Large boulders spawned across all terrain for visual landmark
     // These use the new GLB boulder model with LOD system
 
-    let boulder_density = 0.8; // ~50+ boulders per 256x256 chunk - VERY dense
+    let boulder_density = 0.3; // Reduced from 0.8 - was too dense
     let potential_boulders_scatter = (chunk_size * chunk_size * boulder_density / 1000.0) as u32;
 
     for i in 0..potential_boulders_scatter {
@@ -368,7 +369,7 @@ pub fn generate_rocks_for_chunk_with_exclusions(
     // Massive boulders in and around rivers/streams (low height, non-beach)
     // These create dramatic river scenery with huge rocks jutting from water
 
-    let river_boulder_density = 0.25; // High density along rivers
+    let river_boulder_density = 0.1; // Reduced from 0.25
     let potential_river_boulders = (chunk_size * chunk_size * river_boulder_density / 500.0) as u32;
 
     for i in 0..potential_river_boulders {
@@ -539,6 +540,21 @@ pub fn generate_rocks_for_chunk_with_exclusions(
         );
 
         instances.push((RockType::LargeBoulder.mesh_name().to_string(), transform));
+    }
+
+    //=========================================================================
+    // INSTANCE CAP - Prevent GPU overload
+    //=========================================================================
+    const MAX_ROCKS_PER_CHUNK: usize = 500;
+    if instances.len() > MAX_ROCKS_PER_CHUNK {
+        // Prioritize larger rocks (boulders) over small rocks
+        // Sort by scale (embedded in transform matrix diagonal)
+        instances.sort_by(|a, b| {
+            let scale_a = a.1.x_axis.x; // Scale is on diagonal
+            let scale_b = b.1.x_axis.x;
+            scale_b.partial_cmp(&scale_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        instances.truncate(MAX_ROCKS_PER_CHUNK);
     }
 
     instances

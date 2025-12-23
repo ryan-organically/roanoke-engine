@@ -5,9 +5,26 @@
 //! - Glowing ember bed in the center
 //! - Rising ember particles
 //! - Flickering point light that illuminates surroundings
+//!
+//! Building a campfire requires:
+//! - 5 sticks (for the fire fuel)
+//! - 8 pebbles (for the ring)
 
 use glam::{Vec3, Mat4};
 use std::collections::HashMap;
+
+/// Required sticks to build a campfire
+pub const CAMPFIRE_STICKS_REQUIRED: u32 = 5;
+/// Required pebbles to build a campfire ring
+pub const CAMPFIRE_PEBBLES_REQUIRED: u32 = 8;
+
+/// Get the campfire building requirements as a recipe
+pub fn campfire_requirements() -> [(&'static str, u32); 2] {
+    [
+        ("stick", CAMPFIRE_STICKS_REQUIRED),
+        ("pebble", CAMPFIRE_PEBBLES_REQUIRED),
+    ]
+}
 
 /// Unique identifier for a campfire
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,7 +73,7 @@ impl Campfire {
 
     /// Get the effective light radius
     pub fn light_radius() -> f32 {
-        12.0  // Campfire light reaches ~12 units
+        25.0  // Campfire light reaches ~25 units for dramatic fire glow
     }
 }
 
@@ -230,12 +247,12 @@ impl CampfireMesh {
         let pebble_count = 8 + (campfire.id.0 % 3) as usize;
         let ring_radius = campfire.radius;
 
-        // Pebble colors (gray stone variations)
+        // Pebble colors (lighter warm stone for visibility around fire)
         let stone_colors = [
-            [0.35, 0.32, 0.30],
-            [0.38, 0.35, 0.32],
-            [0.32, 0.30, 0.28],
-            [0.40, 0.36, 0.33],
+            [0.55, 0.50, 0.45],  // Light warm gray
+            [0.60, 0.55, 0.48],  // Lighter tan
+            [0.52, 0.48, 0.42],  // Medium warm stone
+            [0.58, 0.52, 0.45],  // Sandy stone
         ];
 
         // Generate pebbles in a ring
@@ -244,9 +261,9 @@ impl CampfireMesh {
             let x = ring_radius * angle.cos();
             let z = ring_radius * angle.sin();
 
-            // Vary pebble size (0.06-0.10m)
-            let size_variation = ((campfire.id.0 + i as u64) % 100) as f32 / 2500.0;
-            let pebble_size = 0.06 + size_variation;
+            // Vary pebble size (0.08-0.14m) - larger for visibility
+            let size_variation = ((campfire.id.0 + i as u64) % 100) as f32 / 1700.0;
+            let pebble_size = 0.08 + size_variation;
 
             // Slight height variation
             let height_var = ((campfire.id.0 * 7 + i as u64 * 13) % 50) as f32 / 500.0;

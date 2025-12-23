@@ -42,7 +42,7 @@ pub struct ActiveStatusEffect {
 }
 
 /// Animation state for rendering
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AnimationState {
     #[default]
     Idle,

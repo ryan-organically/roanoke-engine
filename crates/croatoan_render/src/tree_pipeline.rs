@@ -24,6 +24,9 @@ struct TreeVertex {
     uv: [f32; 2],
 }
 
+/// Maximum campfire lights for tree canopy illumination
+pub const MAX_TREE_CAMPFIRE_LIGHTS: usize = 4;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct CameraUniform {
@@ -43,7 +46,11 @@ struct CameraUniform {
     lod_fade_end: f32,              // 4 bytes (192-196) - distance where fade ends
     lod_fade_mode: f32,             // 4 bytes (196-200) - 0=disabled, 1=LOD0 fade out, 2=LOD1 fade in
     wind_enabled: f32,              // 4 bytes (200-204) - 1.0=wind on, 0.0=wind off (for boulders)
-    _padding2: f32,                 // 4 bytes (204-208) - 16-byte struct alignment
+    _padding1: f32,                 // 4 bytes (204-208) - align campfire_lights to 16 bytes
+    // Campfire lights for canopy illumination (xyz = position, w = intensity with flicker)
+    campfire_lights: [[f32; 4]; MAX_TREE_CAMPFIRE_LIGHTS], // 64 bytes (208-272)
+    campfire_count: u32,            // 4 bytes (272-276)
+    _padding2: [f32; 7],            // 28 bytes (276-304) - pad to match WGSL vec3 alignment
 }
 
 /// Configuration for tree LOD distance bands (3-tier system)
@@ -644,7 +651,67 @@ impl TreePipeline {
             lod_fade_end: fade_end,
             lod_fade_mode,
             wind_enabled: 1.0, // Default: wind enabled for trees/grass
-            _padding2: 0.0,
+            _padding1: 0.0,
+            campfire_lights: [[0.0; 4]; MAX_TREE_CAMPFIRE_LIGHTS], // No campfires by default
+            campfire_count: 0,
+            _padding2: [0.0; 7],
+        };
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
+
+    /// Update camera uniform with campfire lights for canopy illumination
+    pub fn update_camera_with_campfires(
+        &self,
+        queue: &Queue,
+        view_proj: &Mat4,
+        light_view_proj: &Mat4,
+        sun_dir: [f32; 3],
+        time: f32,
+        view_pos: [f32; 3],
+        fog_color: [f32; 3],
+        fog_start: f32,
+        fog_end: f32,
+        fog_density: f32,
+        alpha_cutoff: f32,
+        use_texture: f32,
+        lod_mode: LODFadeMode,
+        fade_start: f32,
+        fade_end: f32,
+        campfire_lights: &[[f32; 4]],  // xyz = position, w = intensity
+    ) {
+        let lod_fade_mode = match lod_mode {
+            LODFadeMode::Disabled => 0.0,
+            LODFadeMode::LOD0FadeOut | LODFadeMode::LOD1FadeOut => 1.0,
+            LODFadeMode::LOD1FadeIn | LODFadeMode::LOD2FadeIn => 2.0,
+        };
+
+        // Copy campfire lights to fixed array
+        let mut lights = [[0.0f32; 4]; MAX_TREE_CAMPFIRE_LIGHTS];
+        let count = campfire_lights.len().min(MAX_TREE_CAMPFIRE_LIGHTS);
+        for i in 0..count {
+            lights[i] = campfire_lights[i];
+        }
+
+        let uniform = CameraUniform {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_view_proj: light_view_proj.to_cols_array_2d(),
+            sun_dir,
+            time,
+            view_pos,
+            fog_density,
+            fog_color,
+            fog_start,
+            fog_end,
+            alpha_cutoff,
+            use_texture,
+            lod_fade_start: fade_start,
+            lod_fade_end: fade_end,
+            lod_fade_mode,
+            wind_enabled: 1.0,
+            _padding1: 0.0,
+            campfire_lights: lights,
+            campfire_count: count as u32,
+            _padding2: [0.0; 7],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
@@ -690,7 +757,10 @@ impl TreePipeline {
             lod_fade_end: fade_end,
             lod_fade_mode,
             wind_enabled: 0.0, // Wind DISABLED for boulders/rocks
-            _padding2: 0.0,
+            _padding1: 0.0,
+            campfire_lights: [[0.0; 4]; MAX_TREE_CAMPFIRE_LIGHTS],
+            campfire_count: 0,
+            _padding2: [0.0; 7],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }

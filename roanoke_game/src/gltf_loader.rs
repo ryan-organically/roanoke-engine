@@ -285,6 +285,8 @@ pub struct LoadedMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    /// Vertex colors (RGBA) - from COLOR_0 attribute or material baseColorFactor
+    pub colors: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
     /// Material for this mesh
     pub material: LoadedMaterial,
@@ -677,6 +679,24 @@ pub fn load_gltf_with_options(
                 })
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
+            // Read vertex colors (COLOR_0) - fallback to material baseColorFactor
+            let colors: Vec<[f32; 4]> = reader
+                .read_colors(0)
+                .map(|iter| {
+                    iter.into_rgba_f32()
+                        .map(|c| [
+                            sanitize_float(c[0]),
+                            sanitize_float(c[1]),
+                            sanitize_float(c[2]),
+                            sanitize_float(c[3]),
+                        ])
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    // No vertex colors - use material's baseColorFactor for all vertices
+                    vec![material.base_color_factor; positions.len()]
+                });
+
             // Read indices
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(iter) => iter.into_u32().collect(),
@@ -748,6 +768,7 @@ pub fn load_gltf_with_options(
                 positions,
                 normals,
                 uvs,
+                colors,
                 indices: valid_indices,
                 material,
                 joint_indices,

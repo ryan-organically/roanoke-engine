@@ -394,6 +394,11 @@ impl WeaponViewModelPipeline {
         self.weapon_mesh.is_some()
     }
 
+    /// Clear the currently loaded weapon (empty hand)
+    pub fn clear_weapon(&mut self) {
+        self.weapon_mesh = None;
+    }
+
     /// Update uniforms for rendering
     pub fn update_uniforms(&self, queue: &Queue, aspect_ratio: f32, recoil_progress: f32, time: f32, velocity: Vec3, muzzle_flash: f32) {
         // Viewmodel uses a separate projection with closer near plane

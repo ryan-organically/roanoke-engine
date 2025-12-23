@@ -96,7 +96,7 @@ impl AnimalSpecies {
             "red wolf" | "redwolf" => Some(Self::RedWolf),
             "bobcat" => Some(Self::Bobcat),
             "cottonmouth" => Some(Self::Cottonmouth),
-            "whitetail deer" | "whitetaildeer" | "deer" => Some(Self::WhitetailDeer),
+            "whitetail deer" | "whitetaildeer" | "deer" | "doe" => Some(Self::WhitetailDeer),
             "stag" => Some(Self::Stag),
             "horse" => Some(Self::Horse),
             "donkey" => Some(Self::Donkey),
@@ -259,9 +259,9 @@ impl AnimalSpecies {
             Self::TimberRattlesnake | Self::AmericanAlligator => BehaviorType::Ambush,
             Self::WildBoar | Self::Cottonmouth => BehaviorType::Aggressive,
             Self::Copperhead => BehaviorType::Hidden,
-            Self::Bobcat | Self::Fox => BehaviorType::Stalker,
+            Self::Bobcat => BehaviorType::Stalker,
             // Docile animals - flee behavior
-            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey => BehaviorType::Hidden,
+            Self::WhitetailDeer | Self::Stag | Self::Horse | Self::Donkey | Self::Fox => BehaviorType::Hidden,
             Self::Husky => BehaviorType::Territorial, // Protective when tamed
             Self::RingNeckedPheasant => BehaviorType::Hidden, // Flees when detected
         }
@@ -275,10 +275,10 @@ impl AnimalSpecies {
             Self::GrayWolf => AggressionType::Aggressive,
             Self::TimberRattlesnake | Self::Copperhead => AggressionType::Defensive,
             Self::AmericanAlligator | Self::WildBoar => AggressionType::Territorial,
-            Self::RedWolf | Self::Bobcat | Self::Fox => AggressionType::Cautious,
+            Self::RedWolf | Self::Bobcat => AggressionType::Cautious,
             Self::Cottonmouth => AggressionType::Aggressive,
             // Docile animals - defensive only when cornered
-            Self::WhitetailDeer | Self::Horse | Self::Donkey => AggressionType::Defensive,
+            Self::WhitetailDeer | Self::Horse | Self::Donkey | Self::Fox => AggressionType::Defensive,
             Self::Stag => AggressionType::Territorial, // Will charge if cornered
             Self::Husky => AggressionType::Defensive,
             Self::RingNeckedPheasant => AggressionType::Cautious, // Flees quickly
@@ -806,8 +806,8 @@ impl AnimalSpecies {
             Self::GrayWolf | Self::RedWolf => 0.8,
             Self::WhitetailDeer => 1.0,
             Self::Stag => 1.2,
-            Self::Horse => 1.5,
-            Self::Donkey => 1.2,
+            Self::Horse => 1.1,  // Reduced from 1.5 - was too large
+            Self::Donkey => 1.0, // Slightly reduced to match horse
             Self::Fox => 0.6,
             Self::Husky => 0.7,
             Self::Bobcat => 0.6,

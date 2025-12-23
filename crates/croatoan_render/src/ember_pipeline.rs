@@ -11,8 +11,8 @@ use wgpu::util::DeviceExt;
 /// Maximum number of campfires to render embers for
 pub const MAX_EMBER_CAMPFIRES: usize = 8;
 
-/// Number of ember particles per campfire
-const EMBERS_PER_CAMPFIRE: u32 = 200;
+/// Number of particles per campfire (80 embers + 100 rising smoke + 70 lingering smoke)
+const EMBERS_PER_CAMPFIRE: u32 = 250;
 
 /// Total ember particle count
 const TOTAL_EMBER_PARTICLES: u32 = EMBERS_PER_CAMPFIRE * MAX_EMBER_CAMPFIRES as u32;

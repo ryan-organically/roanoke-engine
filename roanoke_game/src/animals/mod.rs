@@ -30,6 +30,7 @@ pub mod horses;
 pub mod quadruped_ik;
 
 pub use types::*;
+pub use entity::AnimationState;
 pub use manager::AnimalManager;
 pub use behavior::{BehaviorState, CuriousState};
 pub use spawner::AnimalSpawner;

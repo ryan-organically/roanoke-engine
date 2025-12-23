@@ -26,6 +26,8 @@ pub struct AnimalVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Vertex color (RGBA) - from model's COLOR_0 or material baseColorFactor
+    pub color: [f32; 4],
     /// Joint indices (up to 4 influencing joints)
     pub joints: [u32; 4],
     /// Joint weights (should sum to 1.0)
@@ -33,14 +35,27 @@ pub struct AnimalVertex {
 }
 
 impl AnimalVertex {
-    /// Create a non-skinned vertex (default joint weights)
+    /// Create a non-skinned vertex (default joint weights, white color)
     pub fn new(position: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
         Self {
             position,
             normal,
             uv,
+            color: [1.0, 1.0, 1.0, 1.0], // Default white
             joints: [0, 0, 0, 0],
             weights: [0.0, 0.0, 0.0, 0.0], // No skinning - shader will skip
+        }
+    }
+
+    /// Create a vertex with color (no skinning)
+    pub fn with_color(position: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 4]) -> Self {
+        Self {
+            position,
+            normal,
+            uv,
+            color,
+            joints: [0, 0, 0, 0],
+            weights: [0.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -49,6 +64,7 @@ impl AnimalVertex {
         position: [f32; 3],
         normal: [f32; 3],
         uv: [f32; 2],
+        color: [f32; 4],
         joints: [u32; 4],
         weights: [f32; 4],
     ) -> Self {
@@ -56,6 +72,7 @@ impl AnimalVertex {
             position,
             normal,
             uv,
+            color,
             joints,
             weights,
         }
@@ -420,16 +437,22 @@ impl AnimalModelPipeline {
                                 shader_location: 2,
                                 format: wgpu::VertexFormat::Float32x2,
                             },
-                            // Joint indices (vec4<u32>)
+                            // Vertex color (vec4<f32>)
                             wgpu::VertexAttribute {
                                 offset: 32,
                                 shader_location: 3,
+                                format: wgpu::VertexFormat::Float32x4,
+                            },
+                            // Joint indices (vec4<u32>)
+                            wgpu::VertexAttribute {
+                                offset: 48,
+                                shader_location: 4,
                                 format: wgpu::VertexFormat::Uint32x4,
                             },
                             // Joint weights (vec4<f32>)
                             wgpu::VertexAttribute {
-                                offset: 48,
-                                shader_location: 4,
+                                offset: 64,
+                                shader_location: 5,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
                         ],
@@ -442,37 +465,37 @@ impl AnimalModelPipeline {
                             // Model matrix row 0
                             wgpu::VertexAttribute {
                                 offset: 0,
-                                shader_location: 5,
+                                shader_location: 6,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
                             // Model matrix row 1
                             wgpu::VertexAttribute {
                                 offset: 16,
-                                shader_location: 6,
+                                shader_location: 7,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
                             // Model matrix row 2
                             wgpu::VertexAttribute {
                                 offset: 32,
-                                shader_location: 7,
+                                shader_location: 8,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
                             // Model matrix row 3
                             wgpu::VertexAttribute {
                                 offset: 48,
-                                shader_location: 8,
+                                shader_location: 9,
                                 format: wgpu::VertexFormat::Float32x4,
                             },
-                            // Color
+                            // Instance Color
                             wgpu::VertexAttribute {
                                 offset: 64,
-                                shader_location: 9,
+                                shader_location: 10,
                                 format: wgpu::VertexFormat::Float32x3,
                             },
                             // Emissive
                             wgpu::VertexAttribute {
                                 offset: 76,
-                                shader_location: 10,
+                                shader_location: 11,
                                 format: wgpu::VertexFormat::Float32,
                             },
                         ],
@@ -614,6 +637,12 @@ impl AnimalModelPipeline {
                 position: sanitize_vec3(v.position),
                 normal: sanitize_vec3(v.normal),
                 uv: [sanitize_float(v.uv[0]), sanitize_float(v.uv[1])],
+                color: [
+                    sanitize_float(v.color[0]),
+                    sanitize_float(v.color[1]),
+                    sanitize_float(v.color[2]),
+                    sanitize_float(v.color[3]),
+                ],
                 joints: v.joints,
                 weights: [
                     sanitize_float(v.weights[0]),

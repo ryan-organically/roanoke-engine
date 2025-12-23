@@ -1,0 +1,62 @@
+{
+  "asset": "shrub_0",
+  "description": "Generic shrub - NEEDS LODs. Currently 23MB with no LOD variants.",
+
+  "current_problem": {
+    "lod0_size": "23MB",
+    "lod1_size": "MISSING",
+    "lod2_size": "MISSING",
+    "issue": "No LOD system - 23MB rendered at all distances"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "500-800",
+      "texture_resolution": "512x512",
+      "distance": "0-40 units",
+      "target_filesize": "600KB-1MB"
+    },
+    "lod1": {
+      "triangles": "120-200",
+      "texture_resolution": "256x256",
+      "distance": "40-120 units",
+      "target_filesize": "150-300KB"
+    },
+    "lod2": {
+      "triangles": "25-40",
+      "texture_resolution": "128x128",
+      "distance": "120-300 units",
+      "target_filesize": "40-80KB"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 650,
+    "lod1": 160,
+    "lod2": 32
+  },
+
+  "textures": {
+    "uv_required": true,
+    "lod0_texture": "512x512",
+    "lod1_texture": "256x256",
+    "lod2_texture": "128x128"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "assets/models/shrubs/",
+    "filenames": ["shrub_0.glb", "shrub_0_lod1.glb", "shrub_0_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "TreePipeline",
+    "registry_keys": ["shrub_0_lod0", "shrub_0_lod1", "shrub_0_lod2"],
+    "lod_distances": {
+      "lod0_max": 40.0,
+      "lod1_max": 120.0,
+      "lod2_max": 300.0
+    }
+  }
+}

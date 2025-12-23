@@ -1,0 +1,89 @@
+{
+  "asset": "dagger",
+  "description": "Melee weapon dagger for first-person viewmodel and world drops",
+
+  "lods": {
+    "lod0": {
+      "triangles": 710,
+      "texture": "1024x1024",
+      "size": "2.5MB",
+      "distance": "0-15 units (viewmodel, close pickup)",
+      "notes": "Full detail for first-person view"
+    },
+    "lod1": {
+      "triangles": 174,
+      "texture": "512x512",
+      "size": "697KB",
+      "distance": "15-40 units",
+      "notes": "Medium detail for nearby ground drops"
+    },
+    "lod2": {
+      "triangles": 60,
+      "texture": "256x256",
+      "size": "197KB",
+      "distance": "40-80 units",
+      "notes": "Low detail for distant visibility"
+    },
+    "lod3": {
+      "triangles": 19,
+      "texture": "128x128",
+      "size": "59KB",
+      "distance": "80+ units",
+      "notes": "Billboard-level detail for far drops"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 710,
+    "lod1": 174,
+    "lod2": 60,
+    "lod3": 19
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF (Draco NOT supported by engine)",
+    "path": "assets/models/weapons/",
+    "filenames": [
+      "dagger_lod0.glb",
+      "dagger_lod1.glb",
+      "dagger_lod2.glb",
+      "dagger_lod3.glb"
+    ]
+  },
+
+  "textures": {
+    "uv_required": true,
+    "material_setup": "Principled BSDF with Image Texture -> Base Color",
+    "embedding": "Textures embedded in GLB (Images: Automatic)",
+    "lod_textures": {
+      "lod0": "1024x1024",
+      "lod1": "512x512",
+      "lod2": "256x256",
+      "lod3": "128x128"
+    }
+  },
+
+  "pipeline": {
+    "renderer": "WeaponViewModelPipeline (viewmodel), DroppedItemManager (world)",
+    "registry_keys": [
+      "dagger_lod0",
+      "dagger_lod1",
+      "dagger_lod2",
+      "dagger_lod3"
+    ],
+    "lod_distances": {
+      "lod0_max": 15.0,
+      "lod1_max": 40.0,
+      "lod2_max": 80.0,
+      "lod3_max": 200.0
+    }
+  },
+
+  "viewmodel": {
+    "position_offset": [0.25, -0.15, -0.35],
+    "rotation_offset": [0.0, -1.2, 0.0],
+    "scale": 0.8,
+    "notes": "Dagger held forward, smaller than flintlock"
+  }
+}

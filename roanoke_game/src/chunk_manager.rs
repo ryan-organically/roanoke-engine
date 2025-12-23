@@ -48,6 +48,16 @@ pub struct LoadedChunk {
     pub conifer_shrubs_lod0: Vec<TreePipeline>, // Conifer shrub LOD0 (0-100 units)
     pub conifer_shrubs_lod1: Vec<TreePipeline>, // Conifer shrub LOD1 (80-250 units)
     pub conifer_shrubs_lod2: Vec<TreePipeline>, // Conifer shrub LOD2 (200-500 units)
+    pub chamomile_lod0: Vec<TreePipeline>,     // Chamomile flowers LOD0 (0-60 units)
+    pub chamomile_lod1: Vec<TreePipeline>,     // Chamomile flowers LOD1 (50-150 units)
+    pub clover_patch_lod0: Vec<TreePipeline>,  // Clover patch LOD0 (0-50 units)
+    pub clover_patch_lod1: Vec<TreePipeline>,  // Clover patch LOD1 (40-120 units)
+    pub groundcover_lod0: Vec<TreePipeline>,   // Groundcover (daisy) LOD0 (0-40 units)
+    pub groundcover_lod1: Vec<TreePipeline>,   // Groundcover (daisy) LOD1 (30-100 units)
+    pub spikegrass_lod0: Vec<TreePipeline>,    // Spikegrass LOD0 (0-50 units) - beach sparse, marsh dense
+    pub spikegrass_lod1: Vec<TreePipeline>,    // Spikegrass LOD1 (40-120 units)
+    pub hedge_lod0: Vec<TreePipeline>,         // Hedge LOD0 (0-80 units) - forest/beach edges
+    pub hedge_lod1: Vec<TreePipeline>,         // Hedge LOD1 (60-200 units)
     pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk
     pub river_water: Vec<TreePipeline>, // Flat calm water quads for rivers
     pub bounds: ChunkBounds,

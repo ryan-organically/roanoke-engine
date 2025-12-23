@@ -252,6 +252,62 @@ impl Inventory {
         self.rebuild_index();
         Ok(())
     }
+
+    /// Check if player has enough of a material
+    pub fn has_materials(&self, template_id: &str, count: u32) -> bool {
+        self.count_items(template_id) >= count
+    }
+
+    /// Consume materials from inventory (returns true if successful)
+    pub fn consume_materials(&mut self, template_id: &str, mut count: u32) -> bool {
+        // First check we have enough
+        if !self.has_materials(template_id, count) {
+            return false;
+        }
+
+        // Consume from slots
+        for slot in &mut self.slots {
+            if count == 0 {
+                break;
+            }
+            if let Some(item) = slot {
+                if item.template_id == template_id {
+                    let to_consume = item.stack_size.min(count);
+                    item.stack_size -= to_consume;
+                    count -= to_consume;
+
+                    // Remove empty stack
+                    if item.stack_size == 0 {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+
+        // Rebuild index after modifications
+        self.rebuild_index();
+        true
+    }
+
+    /// Check if player has all required materials for a recipe
+    pub fn has_recipe_materials(&self, requirements: &[(&str, u32)]) -> bool {
+        requirements.iter().all(|(template, count)| self.has_materials(template, *count))
+    }
+
+    /// Consume all materials for a recipe (all-or-nothing)
+    pub fn consume_recipe_materials(&mut self, requirements: &[(&str, u32)]) -> bool {
+        // First verify all materials are available
+        if !self.has_recipe_materials(requirements) {
+            return false;
+        }
+
+        // Consume each material
+        for (template, count) in requirements {
+            self.consume_materials(template, *count);
+        }
+
+        true
+    }
 }
 
 /// Check if an item can be equipped in a slot

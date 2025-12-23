@@ -15,6 +15,20 @@ pub const TREE_SPECIES_BIRCH: usize = 0;       // birch_0
 pub const TREE_SPECIES_PINE: usize = 1;        // pine_0
 pub const TREE_SPECIES_DEAD_CONIFER: usize = 2; // dead_conifer_0
 pub const TREE_SPECIES_FIR: usize = 3;         // fir_0 (bushy, forest edges)
+pub const TREE_SPECIES_NOBLEFIR: usize = 4;    // noblefir0 (bushy fir, forest edges/clearings)
+
+/// Per-species Y offset to ground models correctly
+/// Positive = raise model up, Negative = sink into ground
+pub fn tree_species_y_offset(species: usize) -> f32 {
+    match species {
+        TREE_SPECIES_BIRCH => 0.0,         // birch exported with correct anchor
+        TREE_SPECIES_PINE => 0.0,          // pine exported with correct anchor
+        TREE_SPECIES_DEAD_CONIFER => 3.0,  // dead conifer needs raising (was half underground)
+        TREE_SPECIES_FIR => 0.0,           // fir exported with correct anchor
+        TREE_SPECIES_NOBLEFIR => 3.5,      // noblefir needs +3.5 Y offset
+        _ => 0.0,
+    }
+}
 
 /// Shrub model indices - must match order in main.rs shrub_models array
 /// NOTE: shrub_0, bush_0, grass_0 disabled (single-LOD placeholders)
@@ -127,23 +141,27 @@ fn select_tree_species(world_x: f32, world_z: f32, seed: u32, tree_count: usize)
         }
     }
 
-    // Fir trees at forest edges (bushy, sun-loving)
+    // Fir and Noblefir trees at forest edges (bushy, sun-loving)
     // biome_t 0.65-0.78 = coastal forest / forest edge zone (where beach transitions to forest)
-    if tree_count >= 4 {
+    if tree_count >= 5 {
         let biome_t = get_biome_t(world_x, world_z, seed);
         if biome_t > 0.65 && biome_t < 0.78 {
-            // Fir dominates forest edges (70% fir, 30% other)
+            // Mixed fir/noblefir at forest edges (40% fir, 35% noblefir, 25% other)
             let edge_hash = ((world_x.abs() as u32).wrapping_mul(67891234)
                 ^ (world_z.abs() as u32).wrapping_mul(98765432)) % 100;
-            if edge_hash < 70 {
+            if edge_hash < 40 {
                 return TREE_SPECIES_FIR;
+            } else if edge_hash < 75 {
+                return TREE_SPECIES_NOBLEFIR;
             }
         }
-        // Also spawn fir in sparse areas of deeper forest (~15% chance)
+        // Also spawn fir/noblefir in sparse areas of deeper forest (~20% chance)
         let sparse_hash = ((world_x.abs() as u32).wrapping_mul(11223344)
             ^ (world_z.abs() as u32).wrapping_mul(55667788)) % 100;
-        if sparse_hash < 15 {
+        if sparse_hash < 10 {
             return TREE_SPECIES_FIR;
+        } else if sparse_hash < 20 {
+            return TREE_SPECIES_NOBLEFIR;
         }
     }
 
@@ -173,6 +191,7 @@ impl FoliageInstances {
                 TREE_SPECIES_PINE => "pine_0".to_string(),
                 TREE_SPECIES_DEAD_CONIFER => "dead_conifer_0".to_string(),
                 TREE_SPECIES_FIR => "fir_0".to_string(),
+                TREE_SPECIES_NOBLEFIR => "noblefir0".to_string(),
                 _ => "birch_0".to_string(), // fallback to birch
             };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
@@ -371,12 +390,14 @@ pub fn generate_foliage_for_chunk(
                 // Y-anchor: Use smaller sink for low terrain to prevent floating
                 // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
                 let sink_amount = ((th - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
+                // Apply per-species Y offset to ground models correctly
+                let species_y_offset = tree_species_y_offset(model_idx);
 
                 result.trees.push(FoliageInstance {
                     transform: Mat4::from_scale_rotation_translation(
                         Vec3::splat(tree_scale),
                         Quat::from_rotation_y(tree_angle),
-                        Vec3::new(tx, th - sink_amount, tz),
+                        Vec3::new(tx, th - sink_amount + species_y_offset, tz),
                     ),
                     model_index: model_idx,
                     is_megaflora: mega,
@@ -443,11 +464,14 @@ pub fn generate_foliage_for_chunk(
             scale *= 4.0;
         }
 
+        // Apply per-species Y offset to ground models correctly
+        let species_y_offset = tree_species_y_offset(model_idx);
+
         result.trees.push(FoliageInstance {
             transform: Mat4::from_scale_rotation_translation(
                 Vec3::splat(scale),
                 Quat::from_rotation_y(angle),
-                Vec3::new(world_x, height, world_z),
+                Vec3::new(world_x, height + species_y_offset, world_z),
             ),
             model_index: model_idx,
             is_megaflora: mega,

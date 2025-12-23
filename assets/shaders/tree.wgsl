@@ -15,7 +15,10 @@ struct CameraUniform {
     lod_fade_end: f32,   // Distance where fade ends
     lod_fade_mode: f32,  // 0.0 = disabled, 1.0 = LOD0 (fade out), 2.0 = LOD1 (fade in)
     wind_enabled: f32,   // 1.0 = wind on, 0.0 = wind off (for boulders)
-    _padding2: f32,      // 16-byte struct alignment (208 bytes total)
+    // Campfire lights for canopy illumination (xyz = position, w = intensity)
+    campfire_lights: array<vec4<f32>, 4>,
+    campfire_count: u32,
+    _padding2: vec3<f32>, // alignment padding
 }
 
 @group(0) @binding(0)
@@ -375,7 +378,47 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Strong diffuse during day, shadow provides contrast
     let diffuse_strength = mix(0.15, 0.9, day_factor);
-    let lighting = ambient + sun_color * diffuse * diffuse_strength * shadow;
+    var lighting = ambient + sun_color * diffuse * diffuse_strength * shadow;
+
+    // CAMPFIRE LIGHTS - Flickering warm light on canopy (especially visible at night)
+    let normal = normalize(in.world_normal);
+    for (var i = 0u; i < camera.campfire_count; i++) {
+        let light = camera.campfire_lights[i];
+        let light_pos = light.xyz;
+        let light_intensity = light.w;
+
+        if (light_intensity > 0.0) {
+            let light_to_surface = in.world_position - light_pos;
+            let light_dist = length(light_to_surface);
+            let light_dir_cf = light_to_surface / max(light_dist, 0.001);
+
+            // Campfire light properties - larger radius for canopy (35m)
+            let campfire_radius = 35.0;
+            let attenuation = 1.0 / (1.0 + light_dist * 0.08 + light_dist * light_dist * 0.004);
+            let range_falloff = max(0.0, 1.0 - light_dist / campfire_radius);
+
+            // Diffuse lighting from campfire
+            let cf_n_dot_l = max(dot(normal, -light_dir_cf), 0.0);
+
+            // Warm orange campfire color
+            let campfire_color = vec3<f32>(1.0, 0.55, 0.2);
+
+            // Campfire light is stronger at night
+            let night_boost = mix(1.0, 3.0, 1.0 - day_factor);
+
+            // Canopy gets more light (upward-facing surfaces catch more firelight)
+            var canopy_boost = 1.0;
+            if (is_canopy) {
+                // Leaves facing down toward fire get extra illumination
+                let down_factor = max(0.0, -normal.y);
+                canopy_boost = 1.0 + down_factor * 2.0;
+            }
+
+            // Apply campfire lighting - strong contribution for visible flickering
+            let contribution = campfire_color * cf_n_dot_l * attenuation * range_falloff * light_intensity * night_boost * canopy_boost * 12.0;
+            lighting += contribution;
+        }
+    }
 
     var final_color = base_color * lighting;
 

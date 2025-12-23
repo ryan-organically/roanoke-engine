@@ -36,6 +36,7 @@ use chunk_manager::{ChunkManager, ChunkCoord, ChunkRequest, LoadedChunk};
 
 
 mod water_system;
+mod pond_water_system;
 mod atmosphere;
 mod audio_system;
 mod procedural_synth;
@@ -53,6 +54,7 @@ mod safe_ops;
 // New systems for discovery, ecology, flora, naval, and weather
 mod encyclopedia;
 mod flora;
+mod inventory_icons;
 mod ecology;
 mod naval;
 mod weather;
@@ -64,6 +66,7 @@ mod network;
 mod campfire;
 
 use water_system::WaterSystem;
+use pond_water_system::PondWaterSystem;
 use world_features::WorldFeatures;
 mod weather_system;
 use weather_system::{WeatherSystem, WeatherType};
@@ -377,8 +380,12 @@ struct SharedState {
     dropped_items: economy::DroppedItemManager,
     // Storage Containers (chests, crates in the world)
     storage_manager: economy::StorageManager,
+    // Inventory Icon Cache (3D model icons for items)
+    icon_cache: inventory_icons::InventoryIconCache,
     // Hotbar (quick-slot for inventory access)
     active_hotbar_slot: usize, // 0-9, maps to first 10 inventory slots
+    // Currently loaded weapon viewmodel (template_id)
+    loaded_weapon_viewmodel: Option<String>,
     // Combat state
     combat_kill_time: f32, // Tracks time spent fighting current target
     // Debug
@@ -412,6 +419,8 @@ struct SharedState {
     journal_textures: ui::JournalTextures,
     // Campfire System
     campfire_manager: campfire::CampfireManager,
+    // Currently open chest (for UI interaction)
+    open_chest_id: Option<economy::ContainerId>,
 }
 
 impl SharedState {
@@ -1243,15 +1252,30 @@ fn render_inventory_tab(
                     egui::Stroke::new(2.0, rarity_color),
                 );
 
-                // Item name (truncated)
-                let name: String = item.name.chars().take(6).collect();
-                ui.painter().text(
-                    slot_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    name,
-                    egui::FontId::proportional(10.0),
-                    ink_color,
-                );
+                // Try to show 3D model icon if available
+                if let Some(tex) = state.icon_cache.textures.get(&item.template_id) {
+                    let icon_size = slot_size - 8.0;
+                    let icon_rect = egui::Rect::from_center_size(
+                        slot_rect.center(),
+                        egui::vec2(icon_size, icon_size),
+                    );
+                    ui.painter().image(
+                        tex.id(),
+                        icon_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        rarity_color,
+                    );
+                } else {
+                    // Fallback to item name (truncated)
+                    let name: String = item.name.chars().take(6).collect();
+                    ui.painter().text(
+                        slot_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        name,
+                        egui::FontId::proportional(10.0),
+                        ink_color,
+                    );
+                }
 
                 // Stack count
                 if item.stack_size > 1 {
@@ -1560,8 +1584,11 @@ fn main() {
         dropped_items: economy::DroppedItemManager::new(),
         // Storage Containers
         storage_manager: economy::StorageManager::new(),
+        // Inventory Icon Cache
+        icon_cache: inventory_icons::InventoryIconCache::new(),
         // Hotbar
         active_hotbar_slot: 0,
+        loaded_weapon_viewmodel: None,
         // Combat state
         combat_kill_time: 0.0,
         // Debug
@@ -1595,6 +1622,8 @@ fn main() {
         journal_textures: ui::JournalTextures::new(),
         // Campfire System
         campfire_manager: campfire::CampfireManager::new(),
+        // Currently open chest
+        open_chest_id: None,
     }));
 
     // ... (Channel setup) ...
@@ -1669,10 +1698,10 @@ fn main() {
                     chunk_world_size,
                     offset_x as f32,
                     offset_z as f32,
-                    4, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0
+                    5, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0, noblefir0
                     1, // shrub model count: conifer_shrub_0 (beach_grass_0 disabled - using grass3 LOD)
                 );
-                let tree_groups = foliage.trees_by_model(4);
+                let tree_groups = foliage.trees_by_model(5);
                 let shrub_groups = foliage.shrubs_by_model(1);
 
                 // Generate detritus
@@ -1809,8 +1838,9 @@ fn main() {
         if state.game_state == GameState::Playing {
             match event {
                 Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                    // Skip mouse look when journal is open
-                    if !state.perks_journal.is_open {
+                    // Skip mouse look when UI overlay is open (journal or chest)
+                    let ui_open = state.perks_journal.is_open || state.open_chest_id.is_some();
+                    if !ui_open {
                         // Mouse Look - convert 0-100 scale to actual sensitivity (50 = 0.002)
                         let sensitivity = state.mouse_sensitivity / 25000.0;
                         state.player.yaw += delta.0 as f32 * sensitivity;
@@ -1819,13 +1849,21 @@ fn main() {
                     }
                 }
                 Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
-                    // Left mouse click triggers shot/recoil animation
+                    // Left mouse click triggers attack/shot animation
                     if *button == MouseButton::Left && *button_state == ElementState::Pressed {
                         if !state.swing_animation.is_swinging {
                             state.swing_animation.is_swinging = true;
                             state.swing_animation.swing_progress = 0.0;
                             state.swing_animation.hit_processed = false;
-                            state.swing_animation.muzzle_flash = 1.0; // Trigger muzzle flash
+
+                            // Only trigger muzzle flash if holding a flintlock
+                            let is_flintlock = state.player_economy.inventory
+                                .get_slot(state.active_hotbar_slot)
+                                .map(|item| item.template_id == "flintlock_pistol")
+                                .unwrap_or(false);
+                            if is_flintlock {
+                                state.swing_animation.muzzle_flash = 1.0;
+                            }
                         }
                     }
                 }
@@ -1905,7 +1943,7 @@ fn main() {
                                     };
                                     println!("[FOG] Level: {} ({})", state.fog_level, fog_name);
                                 }
-                                // C = Place campfire in front of player
+                                // C = Place campfire in front of player (requires sticks + pebbles)
                                 KeyCode::KeyC => {
                                     use croatoan_wfc::mesh_gen::get_height_at;
 
@@ -1919,16 +1957,51 @@ fn main() {
                                     let (ground_height, _biome) = get_height_at(target_x, target_z, state.seed);
                                     let placement_pos = Vec3::new(target_x, ground_height, target_z);
 
-                                    // Check if placement is valid (not in water, not too close to other campfires)
-                                    if ground_height > 0.5 && state.campfire_manager.can_place_at(placement_pos) {
-                                        let rotation = state.player.yaw;
-                                        let id = state.campfire_manager.place_campfire(placement_pos, rotation);
-                                        println!("[CAMPFIRE] Placed campfire {} at ({:.1}, {:.1}, {:.1})",
-                                            id.0, placement_pos.x, placement_pos.y, placement_pos.z);
+                                    // Check for required materials
+                                    let requirements = campfire::campfire_requirements();
+                                    let sticks = state.player_economy.inventory.count_items("stick");
+                                    let pebbles = state.player_economy.inventory.count_items("pebble");
+
+                                    if sticks < campfire::CAMPFIRE_STICKS_REQUIRED {
+                                        println!("[CAMPFIRE] Need {} sticks (have {})",
+                                            campfire::CAMPFIRE_STICKS_REQUIRED, sticks);
+                                    } else if pebbles < campfire::CAMPFIRE_PEBBLES_REQUIRED {
+                                        println!("[CAMPFIRE] Need {} pebbles (have {})",
+                                            campfire::CAMPFIRE_PEBBLES_REQUIRED, pebbles);
                                     } else if ground_height <= 0.5 {
                                         println!("[CAMPFIRE] Cannot place campfire in water!");
-                                    } else {
+                                    } else if !state.campfire_manager.can_place_at(placement_pos) {
                                         println!("[CAMPFIRE] Too close to another campfire!");
+                                    } else {
+                                        // Consume materials and place campfire
+                                        let consumed = state.player_economy.inventory.consume_recipe_materials(&requirements);
+                                        if consumed {
+                                            let rotation = state.player.yaw;
+                                            let id = state.campfire_manager.place_campfire(placement_pos, rotation);
+                                            println!("[CAMPFIRE] Placed campfire {} at ({:.1}, {:.1}, {:.1})",
+                                                id.0, placement_pos.x, placement_pos.y, placement_pos.z);
+                                            println!("[CAMPFIRE] Used {} sticks and {} pebbles",
+                                                campfire::CAMPFIRE_STICKS_REQUIRED, campfire::CAMPFIRE_PEBBLES_REQUIRED);
+                                        }
+                                    }
+                                }
+                                // G = Drop item from current hotbar slot onto the ground
+                                KeyCode::KeyG => {
+                                    let slot = state.active_hotbar_slot;
+                                    if let Some(item) = state.player_economy.inventory.get_slot(slot).cloned() {
+                                        // Remove from inventory
+                                        let item_name = item.name.clone();
+                                        let item_id = item.id;
+                                        if let Some(removed) = state.player_economy.inventory.remove_item(item_id) {
+                                            // Drop in front of player
+                                            let drop_pos = state.player.position + state.camera.forward() * 2.0 + Vec3::new(0.0, 1.0, 0.0);
+                                            state.dropped_items.spawn_drop(removed, drop_pos);
+                                            println!("[DROP] Dropped {} from hotbar slot {}", item_name, slot + 1);
+                                            // Clear the loaded viewmodel if we dropped a weapon
+                                            if item.item_type == economy::ItemType::Weapon {
+                                                state.loaded_weapon_viewmodel = None;
+                                            }
+                                        }
                                     }
                                 }
                                 // F5 = Spawn debug animals in a circle around player
@@ -2063,6 +2136,31 @@ fn main() {
                                             }
                                         }
                                     }
+                                    // Check if chest UI is open - close it
+                                    else if state.open_chest_id.is_some() {
+                                        // Close chest
+                                        if let Some(chest_id) = state.open_chest_id.take() {
+                                            if let Some(chest) = state.storage_manager.get_mut(chest_id) {
+                                                chest.close();
+                                            }
+                                        }
+                                        log::info!("[CHEST] Closed");
+                                    }
+                                    // Check if near a chest to open it
+                                    else if let Some(chest) = state.storage_manager.nearest_interactable(
+                                        state.player.position,
+                                        None, // player_id for lock check
+                                        3.5,  // interaction range
+                                    ) {
+                                        let chest_id = chest.id;
+                                        let chest_name = chest.display_name().to_string();
+                                        // Open the chest
+                                        if let Some(chest) = state.storage_manager.get_mut(chest_id) {
+                                            chest.open();
+                                        }
+                                        state.open_chest_id = Some(chest_id);
+                                        log::info!("[CHEST] Opened {}", chest_name);
+                                    }
                                     // Otherwise pickup closest item
                                     else {
                                         let pickup_range = 3.0;
@@ -2092,11 +2190,16 @@ fn main() {
                                     if let Some(item) = state.player_economy.inventory.get_slot(slot).cloned() {
                                         // Remove from inventory
                                         let item_id = item.id;
+                                        let is_weapon = item.item_type == economy::ItemType::Weapon;
                                         if let Some(removed) = state.player_economy.inventory.remove_item(item_id) {
                                             // Drop in front of player
-                                            let drop_pos = state.player.position + state.camera.forward() * 1.5 + Vec3::new(0.0, 1.0, 0.0);
+                                            let drop_pos = state.player.position + state.camera.forward() * 1.5 + Vec3::new(0.0, 0.5, 0.0);
                                             state.dropped_items.spawn_drop(removed, drop_pos);
                                             log::info!("[DROP] {} from hotbar slot {}", item.name, slot + 1);
+                                            // Clear the loaded viewmodel if we dropped a weapon
+                                            if is_weapon {
+                                                state.loaded_weapon_viewmodel = None;
+                                            }
                                         }
                                     }
                                 }
@@ -2227,9 +2330,10 @@ fn main() {
                 // NOTE: tree_0, tree_1 are single-LOD placeholders - DISABLED
                 let tree_models = [
                     // "tree_0", "tree_1", // DISABLED - single LOD placeholders
-                    "birch_0", "pine_0", "dead_conifer_0", "fir_0",
+                    "birch_0", "pine_0", "dead_conifer_0", "fir_0", "noblefir0",
                 ];
-                let mut tree_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                // OPTIMIZED: Using models_optimized for reduced texture/poly models
+                let mut tree_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
                 for name in &tree_models {
                     if let Some(model) = tree_cache.load(name) {
                         // Separate meshes into bark (OPAQUE) and leaves (BLEND)
@@ -2417,8 +2521,10 @@ fn main() {
                     ("pine_0_lod1", "pine_0"),
                     ("dead_conifer_0_lod1", "dead_conifer_0"),
                     ("fir_0_lod1", "fir_0"),
+                    ("noblefir0_lod1", "noblefir0"),
                 ];
-                let mut lod1_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                // OPTIMIZED: Using models_optimized for reduced texture/poly models
+                let mut lod1_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
 
                 for (i, (lod1_name, base_name)) in lod1_tree_models.iter().enumerate() {
                     // Try to load GLB first
@@ -2542,8 +2648,10 @@ fn main() {
                     ("pine_0_lod2", "pine_0"),
                     ("dead_conifer_0_lod2", "dead_conifer_0"),
                     ("fir_0_lod2", "fir_0"),
+                    ("noblefir0_lod2", "noblefir0"),
                 ];
-                let mut lod2_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                // OPTIMIZED: Using models_optimized for reduced texture/poly models
+                let mut lod2_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
 
                 for (_i, (lod2_name, base_name)) in lod2_tree_models.iter().enumerate() {
                     if let Some(model) = lod2_cache.load(lod2_name) {
@@ -2632,7 +2740,8 @@ fn main() {
                     // "beach_grass_0", // DISABLED - replaced by grass3 LOD system
                     "conifer_shrub_0", // New 3-LOD shrub
                 ];
-                let mut shrub_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
+                // OPTIMIZED: Using models_optimized for reduced texture/poly models
+                let mut shrub_cache = gltf_loader::ModelCache::new("assets/models_optimized/shrubs");
                 for name in &shrub_models {
                     if let Some(model) = shrub_cache.load(name) {
                         // Debug: show mesh breakdown
@@ -2816,7 +2925,8 @@ fn main() {
                 // Ferns are single mesh with MASK alpha mode for leaf cutout
                 // NOTE: fern_01.glb was corrupted (empty scene), using fern_02
                 let fern_models = ["fern_02"];
-                let mut fern_cache = gltf_loader::ModelCache::new("assets/models/shrubs");
+                // OPTIMIZED: Using models_optimized for reduced texture/poly models
+                let mut fern_cache = gltf_loader::ModelCache::new("assets/models_optimized/shrubs");
                 for name in &fern_models {
                     if let Some(model) = fern_cache.load(name) {
                         // Ferns are single combined mesh - no bark/leaf separation
@@ -2860,7 +2970,7 @@ fn main() {
                                 name, all_positions.len(), all_indices.len() / 3);
                         }
                     } else {
-                        println!("[FERN] WARNING: Model '{}' not found in assets/models/shrubs/", name);
+                        println!("[FERN] WARNING: Model '{}' not found in assets/models_optimized/shrubs/", name);
                     }
                 }
 
@@ -2868,10 +2978,13 @@ fn main() {
                 // dead_grass DISABLED - replaced by grass2/grass3 system
 
                 // Load grass2 LOD models (inland/meadow/forest ground cover)
-                // Using grass2_lod1 for all LOD levels (only correctly-positioned model)
-                let grass2_source = "grass2_lod1";
-                let mut grass2_cache = gltf_loader::ModelCache::new("assets/models/grass");
-                if let Some(model) = grass2_cache.load(grass2_source) {
+                // OPTIMIZED: Using models_optimized/grass with separate LOD models
+                // LOD0: grass2.glb (2.2MB, 2160px texture) - close range
+                // LOD1: grass2_lod1.glb (83KB, 256px texture) - distant
+                let mut grass2_cache = gltf_loader::ModelCache::new("assets/models_optimized/grass");
+
+                // Load LOD0 (high quality)
+                if let Some(model) = grass2_cache.load("grass2") {
                     let mut all_positions: Vec<[f32; 3]> = Vec::new();
                     let mut all_normals: Vec<[f32; 3]> = Vec::new();
                     let mut all_uvs: Vec<[f32; 2]> = Vec::new();
@@ -2893,36 +3006,25 @@ fn main() {
                         let texture_bind_group = grass_texture.map(|tex_data| {
                             let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                 ctx.device(), ctx.queue(), tex_data,
-                                Some("grass2_texture"),
+                                Some("grass2_lod0_texture"),
                             );
                             std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                ctx.device(), &tex_view, Some("grass2_bind"),
+                                ctx.device(), &tex_view, Some("grass2_lod0_bind"),
                             ))
                         });
                         let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &all_positions,
-                            &all_normals,
-                            &all_uvs,
-                            &all_indices,
+                            ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
                             texture_bind_group,
                         );
-                        // Register same mesh under all LOD names
-                        state.mesh_registry.insert("grass2_lod0".to_string(), gpu_mesh.clone());
-                        state.mesh_registry.insert("grass2_lod1".to_string(), gpu_mesh.clone());
-                        state.mesh_registry.insert("grass2_lod2".to_string(), gpu_mesh);
-                        println!("[GRASS2] Registered all LODs from '{}': {} verts, {} tris",
-                            grass2_source, all_positions.len(), all_indices.len() / 3);
+                        state.mesh_registry.insert("grass2_lod0".to_string(), gpu_mesh);
+                        println!("[GRASS2] LOD0: {} verts, {} tris", all_positions.len(), all_indices.len() / 3);
                     }
                 } else {
-                    println!("[GRASS2] Source model '{}' not found", grass2_source);
+                    println!("[GRASS2] LOD0 model 'grass2' not found");
                 }
 
-                // Load grass3 LOD models from assets/models/grass/
-                // Using grass3_lod2 for all LOD levels (only correctly-positioned model)
-                let grass3_source = "grass3_lod2";
-                let mut grass3_cache = gltf_loader::ModelCache::new("assets/models/grass");
-                if let Some(model) = grass3_cache.load(grass3_source) {
+                // Load LOD1 (low quality - 96% smaller)
+                if let Some(model) = grass2_cache.load("grass2_lod1") {
                     let mut all_positions: Vec<[f32; 3]> = Vec::new();
                     let mut all_normals: Vec<[f32; 3]> = Vec::new();
                     let mut all_uvs: Vec<[f32; 2]> = Vec::new();
@@ -2944,29 +3046,332 @@ fn main() {
                         let texture_bind_group = grass_texture.map(|tex_data| {
                             let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                 ctx.device(), ctx.queue(), tex_data,
-                                Some("grass3_texture"),
+                                Some("grass2_lod1_texture"),
                             );
                             std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                ctx.device(), &tex_view, Some("grass3_bind"),
+                                ctx.device(), &tex_view, Some("grass2_lod1_bind"),
                             ))
                         });
                         let gpu_mesh = TreePipeline::create_mesh(
-                            ctx.device(),
-                            &all_positions,
-                            &all_normals,
-                            &all_uvs,
-                            &all_indices,
+                            ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
                             texture_bind_group,
                         );
-                        // Register same mesh under all LOD names
-                        state.mesh_registry.insert("grass3_lod0".to_string(), gpu_mesh.clone());
-                        state.mesh_registry.insert("grass3_lod1".to_string(), gpu_mesh.clone());
-                        state.mesh_registry.insert("grass3_lod2".to_string(), gpu_mesh);
-                        println!("[GRASS3] Registered all LODs from '{}': {} verts, {} tris",
-                            grass3_source, all_positions.len(), all_indices.len() / 3);
+                        // Use LOD1 for both lod1 and lod2 (same low-poly model)
+                        state.mesh_registry.insert("grass2_lod1".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass2_lod2".to_string(), gpu_mesh);
+                        println!("[GRASS2] LOD1/2: {} verts, {} tris (96% smaller)", all_positions.len(), all_indices.len() / 3);
                     }
                 } else {
-                    println!("[GRASS3] Source model '{}' not found", grass3_source);
+                    println!("[GRASS2] LOD1 model 'grass2_lod1' not found");
+                }
+
+                // Load grass3 LOD models (beach/riverbank grass)
+                // OPTIMIZED: Using models_optimized/grass with separate LOD models
+                // LOD0: grass3.glb (2.2MB, 2160px texture) - close range
+                // LOD1: grass3_lod1.glb (82KB, 256px texture) - distant
+                let mut grass3_cache = gltf_loader::ModelCache::new("assets/models_optimized/grass");
+
+                // Load LOD0 (high quality)
+                if let Some(model) = grass3_cache.load("grass3") {
+                    let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                    let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                    let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                    let mut all_indices: Vec<u32> = Vec::new();
+                    let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                    for mesh in &model.meshes {
+                        let base_idx = all_positions.len() as u32;
+                        all_positions.extend_from_slice(&mesh.positions);
+                        all_normals.extend_from_slice(&mesh.normals);
+                        all_uvs.extend_from_slice(&mesh.uvs);
+                        all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                        if grass_texture.is_none() {
+                            grass_texture = mesh.material.base_color_texture_data.as_ref();
+                        }
+                    }
+
+                    if !all_positions.is_empty() {
+                        let texture_bind_group = grass_texture.map(|tex_data| {
+                            let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                ctx.device(), ctx.queue(), tex_data,
+                                Some("grass3_lod0_texture"),
+                            );
+                            std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                ctx.device(), &tex_view, Some("grass3_lod0_bind"),
+                            ))
+                        });
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
+                            texture_bind_group,
+                        );
+                        state.mesh_registry.insert("grass3_lod0".to_string(), gpu_mesh);
+                        println!("[GRASS3] LOD0: {} verts, {} tris", all_positions.len(), all_indices.len() / 3);
+                    }
+                } else {
+                    println!("[GRASS3] LOD0 model 'grass3' not found");
+                }
+
+                // Load LOD1 (low quality - 96% smaller)
+                if let Some(model) = grass3_cache.load("grass3_lod1") {
+                    let mut all_positions: Vec<[f32; 3]> = Vec::new();
+                    let mut all_normals: Vec<[f32; 3]> = Vec::new();
+                    let mut all_uvs: Vec<[f32; 2]> = Vec::new();
+                    let mut all_indices: Vec<u32> = Vec::new();
+                    let mut grass_texture: Option<&gltf_loader::LoadedTexture> = None;
+
+                    for mesh in &model.meshes {
+                        let base_idx = all_positions.len() as u32;
+                        all_positions.extend_from_slice(&mesh.positions);
+                        all_normals.extend_from_slice(&mesh.normals);
+                        all_uvs.extend_from_slice(&mesh.uvs);
+                        all_indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+                        if grass_texture.is_none() {
+                            grass_texture = mesh.material.base_color_texture_data.as_ref();
+                        }
+                    }
+
+                    if !all_positions.is_empty() {
+                        let texture_bind_group = grass_texture.map(|tex_data| {
+                            let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                ctx.device(), ctx.queue(), tex_data,
+                                Some("grass3_lod1_texture"),
+                            );
+                            std::sync::Arc::new(texture_helper.create_texture_bind_group(
+                                ctx.device(), &tex_view, Some("grass3_lod1_bind"),
+                            ))
+                        });
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
+                            texture_bind_group,
+                        );
+                        // Use LOD1 for both lod1 and lod2 (same low-poly model)
+                        state.mesh_registry.insert("grass3_lod1".to_string(), gpu_mesh.clone());
+                        state.mesh_registry.insert("grass3_lod2".to_string(), gpu_mesh);
+                        println!("[GRASS3] LOD1/2: {} verts, {} tris (96% smaller)", all_positions.len(), all_indices.len() / 3);
+                    }
+                } else {
+                    println!("[GRASS3] LOD1 model 'grass3_lod1' not found");
+                }
+
+                // Load groundcover models (clover, daisy) for forest floor scatter
+                // OPTIMIZED: models_optimized/groundcover with LOD0/LOD1
+                let mut groundcover_cache = gltf_loader::ModelCache::new("assets/models_optimized/groundcover");
+
+                // Clover (10 tris, LOD0: 1.3MB, LOD1: 34KB)
+                for (file_name, registry_name) in [
+                    ("clover0lod0", "clover_lod0"),
+                    ("clover0_lod1", "clover_lod1"),
+                ] {
+                    if let Some(model) = groundcover_cache.load(file_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", registry_name)),
+                                    );
+                                    let shadow_map_gc = shadow_map_mutex.safe_lock();
+                                    let helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    texture_bind_group = Some(Arc::new(
+                                        helper.create_texture_bind_group(ctx.device(), &tex_view, Some(&format!("{}_bind", registry_name)))
+                                    ));
+                                    drop(shadow_map_gc);
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group);
+                        println!("[GROUNDCOVER] {}: {} verts, {} tris", registry_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
+                    }
+                }
+
+                // Sparse clover (8 tris, LOD0: 653KB, LOD1: 15KB)
+                for (file_name, registry_name) in [
+                    ("sparseclover_lod0", "sparseclover_lod0"),
+                    ("sparseclover_lod1", "sparseclover_lod1"),
+                ] {
+                    if let Some(model) = groundcover_cache.load(file_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", registry_name)),
+                                    );
+                                    let shadow_map_gc = shadow_map_mutex.safe_lock();
+                                    let helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    texture_bind_group = Some(Arc::new(
+                                        helper.create_texture_bind_group(ctx.device(), &tex_view, Some(&format!("{}_bind", registry_name)))
+                                    ));
+                                    drop(shadow_map_gc);
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group);
+                        println!("[GROUNDCOVER] {}: {} verts, {} tris", registry_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
+                    }
+                }
+
+                // Sparse daisy (28 tris, LOD0: 766KB, LOD1: 19KB)
+                for (file_name, registry_name) in [
+                    ("sparsedaisy_lod0", "daisy_lod0"),
+                    ("sparsedaisy_lod1", "daisy_lod1"),
+                ] {
+                    if let Some(model) = groundcover_cache.load(file_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", registry_name)),
+                                    );
+                                    let shadow_map_gc = shadow_map_mutex.safe_lock();
+                                    let helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    texture_bind_group = Some(Arc::new(
+                                        helper.create_texture_bind_group(ctx.device(), &tex_view, Some(&format!("{}_bind", registry_name)))
+                                    ));
+                                    drop(shadow_map_gc);
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group);
+                        println!("[GROUNDCOVER] {}: {} verts, {} tris", registry_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
+                    }
+                }
+
+                // Load plants (chamomile, genericbush, hedge)
+                let mut plants_cache = gltf_loader::ModelCache::new("assets/models_optimized/plants");
+                let plant_models = [
+                    // Chamomile (360 tris, LOD0: 2.8MB, LOD1: 107KB)
+                    ("chamomile_lod0", "chamomile_lod0"),
+                    ("chamomile_lod1", "chamomile_lod1"),
+                    // Generic bush 0 (512 tris, LOD0: 1.3MB, LOD1: 55KB)
+                    ("genericbush0_lod0", "genericbush0_lod0"),
+                    ("genericbush0_lod1", "genericbush0_lod1"),
+                    // Generic bush 1 (216 tris, LOD0: 2.8MB, LOD1: 71KB)
+                    ("genericbush1_lod0", "genericbush1_lod0"),
+                    ("genericbush1_lod1", "genericbush1_lod1"),
+                    // Hedge (976 tris, LOD0: 1.8MB, LOD1: 97KB)
+                    ("hedge0_lod0", "hedge0_lod0"),
+                    ("hedge0_lod1", "hedge0_lod1"),
+                ];
+                for (file_name, registry_name) in plant_models {
+                    if let Some(model) = plants_cache.load(file_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", registry_name)),
+                                    );
+                                    let shadow_map_gc = shadow_map_mutex.safe_lock();
+                                    let helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    texture_bind_group = Some(Arc::new(
+                                        helper.create_texture_bind_group(ctx.device(), &tex_view, Some(&format!("{}_bind", registry_name)))
+                                    ));
+                                    drop(shadow_map_gc);
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group);
+                        println!("[PLANTS] {}: {} verts, {} tris", registry_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
+                    }
+                }
+
+                // Load spikegrass groundcover (40 tris, LOD0: 1.8MB, LOD1: 39KB, Z offset -0.3)
+                for (file_name, registry_name) in [
+                    ("spikegrass0offset_lod0", "spikegrass_lod0"),
+                    ("spikegrass0offset_lod1", "spikegrass_lod1"),
+                ] {
+                    if let Some(model) = groundcover_cache.load(file_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", registry_name)),
+                                    );
+                                    let shadow_map_gc = shadow_map_mutex.safe_lock();
+                                    let helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    texture_bind_group = Some(Arc::new(
+                                        helper.create_texture_bind_group(ctx.device(), &tex_view, Some(&format!("{}_bind", registry_name)))
+                                    ));
+                                    drop(shadow_map_gc);
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group);
+                        println!("[GROUNDCOVER] {}: {} verts, {} tris", registry_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
+                    }
                 }
 
                 // 2. Rocks - Procedural types (pebble, small, medium, flat, mossy)
@@ -3061,7 +3466,8 @@ fn main() {
                 }
 
                 // 4. Dead log LODs - fallen logs for forest floor and beach driftwood
-                let mut dead_log_cache = gltf_loader::ModelCache::new("assets/models/trees");
+                // OPTIMIZED: 36MB -> 3.8MB (2.9MB LOD0, 724KB LOD1, 192KB LOD2)
+                let mut dead_log_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
                 for lod in 0..=2 {
                     let name = if lod == 0 {
                         "dead_log_0".to_string()
@@ -3155,6 +3561,51 @@ fn main() {
                         } else {
                             println!("[CONTAINER] Model '{}' not found in assets/models/containers/", name);
                         }
+                    }
+                }
+
+                // 6. Weapon Models - For dropped items in world
+                let mut weapon_cache = gltf_loader::ModelCache::new("assets/models/weapons");
+                let weapon_models = ["dagger_lod0", "flintlock_lod0", "hatchet_lod0"];
+
+                for weapon_name in &weapon_models {
+                    if let Some(model) = weapon_cache.load(weapon_name) {
+                        let mut positions: Vec<[f32; 3]> = Vec::new();
+                        let mut normals: Vec<[f32; 3]> = Vec::new();
+                        let mut uvs: Vec<[f32; 2]> = Vec::new();
+                        let mut indices: Vec<u32> = Vec::new();
+                        let mut texture_bind_group = None;
+
+                        for mesh in &model.meshes {
+                            let base_idx = positions.len() as u32;
+                            positions.extend_from_slice(&mesh.positions);
+                            normals.extend_from_slice(&mesh.normals);
+                            uvs.extend_from_slice(&mesh.uvs);
+                            indices.extend(mesh.indices.iter().map(|i| i + base_idx));
+
+                            if texture_bind_group.is_none() {
+                                if let Some(tex_data) = &mesh.material.base_color_texture_data {
+                                    let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
+                                        ctx.device(), ctx.queue(), tex_data,
+                                        Some(&format!("{}_texture", weapon_name)),
+                                    );
+                                    texture_bind_group = Some(Arc::new(
+                                        boulder_texture_helper.create_texture_bind_group(
+                                            ctx.device(), &tex_view, Some(&format!("{}_bind", weapon_name)),
+                                        )
+                                    ));
+                                }
+                            }
+                        }
+
+                        let gpu_mesh = TreePipeline::create_mesh(
+                            ctx.device(), &positions, &normals, &uvs, &indices, texture_bind_group,
+                        );
+                        println!("[WEAPON] Registered '{}': {} verts, {} tris",
+                            weapon_name, positions.len(), indices.len() / 3);
+                        state.mesh_registry.insert(weapon_name.to_string(), gpu_mesh);
+                    } else {
+                        println!("[WEAPON] Model '{}' not found in assets/models/weapons/", weapon_name);
                     }
                 }
 
@@ -3288,82 +3739,20 @@ fn main() {
 
         // Weapon Viewmodel Pipeline (GLB weapon models)
         static WEAPON_VIEWMODEL_PIPELINE: OnceLock<Mutex<WeaponViewModelPipeline>> = OnceLock::new();
-        static WEAPON_LOADED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
         let weapon_viewmodel_mutex = WEAPON_VIEWMODEL_PIPELINE.get_or_init(|| {
             Mutex::new(WeaponViewModelPipeline::new(ctx.device(), ctx.queue(), ctx.surface_format()))
         });
-        let weapon_loaded_flag = WEAPON_LOADED.get_or_init(|| std::sync::atomic::AtomicBool::new(false));
-
-        // Load flintlock pistol if not already loaded
-        if !weapon_loaded_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            if let Ok(model) = gltf_loader::load_gltf("assets/models/weapons/flintlock_lod0.glb") {
-                // Collect all vertices and indices from the model
-                let mut all_vertices: Vec<WeaponVertex> = Vec::new();
-                let mut all_indices: Vec<u32> = Vec::new();
-                let mut texture_data: Option<(Vec<u8>, u32, u32)> = None;
-
-                for mesh in &model.meshes {
-                    let base_vertex = all_vertices.len() as u32;
-
-                    for (i, pos) in mesh.positions.iter().enumerate() {
-                        all_vertices.push(WeaponVertex::new(
-                            *pos,
-                            mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-                            mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-                        ));
-                    }
-
-                    for idx in &mesh.indices {
-                        all_indices.push(base_vertex + idx);
-                    }
-
-                    // Get texture from first mesh that has one
-                    if texture_data.is_none() {
-                        if let Some(tex) = mesh.material.get_or_create_texture() {
-                            texture_data = Some((tex.data.clone(), tex.width, tex.height));
-                        }
-                    }
-                }
-
-                if !all_vertices.is_empty() {
-                    let mut weapon_pipeline = weapon_viewmodel_mutex.safe_lock();
-
-                    // Adjust position for right-hand POV (centered, back, lower)
-                    weapon_pipeline.position_offset = Vec3::new(0.15, -0.18, -0.45);
-                    weapon_pipeline.rotation_offset = Vec3::new(0.0, -1.5, 0.0); // Point forward
-                    weapon_pipeline.scale = 1.2;
-
-                    if let Some((data, w, h)) = texture_data {
-                        weapon_pipeline.upload_weapon_mesh(
-                            ctx.device(),
-                            ctx.queue(),
-                            &all_vertices,
-                            &all_indices,
-                            Some((&data, w, h)),
-                        );
-                    } else {
-                        weapon_pipeline.upload_weapon_mesh(
-                            ctx.device(),
-                            ctx.queue(),
-                            &all_vertices,
-                            &all_indices,
-                            None,
-                        );
-                    }
-
-                    println!("[Weapon] Loaded flintlock pistol: {} vertices, {} indices",
-                        all_vertices.len(), all_indices.len());
-                    weapon_loaded_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            } else {
-                println!("[Weapon] Failed to load flintlock_lod0.glb");
-            }
-        }
 
         // Water System
         static WATER_SYSTEM: OnceLock<Mutex<WaterSystem>> = OnceLock::new();
         let water_system_mutex = WATER_SYSTEM.get_or_init(|| {
             Mutex::new(WaterSystem::new(ctx.device(), ctx.surface_format()))
+        });
+
+        // Pond Water System (inland lakes, ponds, wetlands)
+        static POND_WATER_SYSTEM: OnceLock<Mutex<PondWaterSystem>> = OnceLock::new();
+        let pond_water_system_mutex = POND_WATER_SYSTEM.get_or_init(|| {
+            Mutex::new(PondWaterSystem::new(ctx.device(), ctx.surface_format(), 12345))
         });
 
         // Light Shaft Pipeline (God Rays Post-Process)
@@ -3442,6 +3831,115 @@ fn main() {
 
         let mut state = render_state.safe_lock();
 
+        // Dynamic weapon viewmodel loading based on active hotbar slot
+        {
+            let current_hotbar_weapon = state.player_economy.inventory.get_slot(state.active_hotbar_slot)
+                .filter(|item| item.item_type == economy::ItemType::Weapon)
+                .map(|item| item.template_id.clone());
+
+            if current_hotbar_weapon != state.loaded_weapon_viewmodel {
+                let (model_path, position, rotation, scale) = match current_hotbar_weapon.as_deref() {
+                    // Standard right-hand weapon position for all weapons
+                    // Position: (0.40, -0.30, -0.55) - right side, below center, in front
+                    // Scale: 1.2 for good visibility
+                    Some("flintlock_pistol") => (
+                        "assets/models/weapons/flintlock_lod0.glb",
+                        Vec3::new(0.40, -0.30, -0.55), // Right hand position
+                        Vec3::new(0.0, -1.57, 0.0),    // Point straight forward (-90 degrees)
+                        1.2f32,                        // Larger for visibility
+                    ),
+                    Some("dagger") => (
+                        "assets/models/weapons/dagger_lod0.glb",
+                        Vec3::new(0.40, -0.30, -0.55), // Right hand position (same as others)
+                        Vec3::new(0.0, 1.57, 0.0),     // Rotated 180° - dagger model faces opposite direction
+                        1.2f32,                        // Same scale as others
+                    ),
+                    Some("hatchet") => (
+                        "assets/models/weapons/hatchet_lod0.glb",
+                        Vec3::new(0.40, -0.30, -0.55), // Right hand position
+                        Vec3::new(0.0, -1.57, 0.0),    // Point straight forward
+                        1.2f32,                        // Larger for visibility
+                    ),
+                    _ => {
+                        // No weapon or unknown weapon - clear viewmodel
+                        state.loaded_weapon_viewmodel = None;
+                        ("", Vec3::ZERO, Vec3::ZERO, 0.0f32)
+                    }
+                };
+
+                if !model_path.is_empty() {
+                    if let Ok(model) = gltf_loader::load_gltf(model_path) {
+                        let mut all_vertices: Vec<WeaponVertex> = Vec::new();
+                        let mut all_indices: Vec<u32> = Vec::new();
+                        let mut texture_data: Option<(Vec<u8>, u32, u32)> = None;
+
+                        for mesh in &model.meshes {
+                            let base_vertex = all_vertices.len() as u32;
+
+                            for (i, pos) in mesh.positions.iter().enumerate() {
+                                all_vertices.push(WeaponVertex::new(
+                                    *pos,
+                                    mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+                                    mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                                ));
+                            }
+
+                            for idx in &mesh.indices {
+                                all_indices.push(base_vertex + idx);
+                            }
+
+                            if texture_data.is_none() {
+                                if let Some(tex) = mesh.material.get_or_create_texture() {
+                                    texture_data = Some((tex.data.clone(), tex.width, tex.height));
+                                }
+                            }
+                        }
+
+                        if !all_vertices.is_empty() {
+                            let mut weapon_pipeline = weapon_viewmodel_mutex.safe_lock();
+
+                            weapon_pipeline.position_offset = position;
+                            weapon_pipeline.rotation_offset = rotation;
+                            weapon_pipeline.scale = scale;
+
+                            if let Some((data, w, h)) = texture_data {
+                                weapon_pipeline.upload_weapon_mesh(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    &all_vertices,
+                                    &all_indices,
+                                    Some((&data, w, h)),
+                                );
+                            } else {
+                                weapon_pipeline.upload_weapon_mesh(
+                                    ctx.device(),
+                                    ctx.queue(),
+                                    &all_vertices,
+                                    &all_indices,
+                                    None,
+                                );
+                            }
+
+                            let weapon_name = current_hotbar_weapon.as_deref().unwrap_or("unknown");
+                            println!("[Weapon] Loaded {}: {} vertices, {} indices",
+                                weapon_name, all_vertices.len(), all_indices.len());
+                            state.loaded_weapon_viewmodel = current_hotbar_weapon.clone();
+                        }
+                    } else {
+                        // Model file not found - keep current or clear
+                        if current_hotbar_weapon.is_some() {
+                            log::debug!("[Weapon] Model not found: {}", model_path);
+                        }
+                    }
+                } else {
+                    // No weapon in slot - clear the viewmodel mesh
+                    let mut weapon_pipeline = weapon_viewmodel_mutex.safe_lock();
+                    weapon_pipeline.clear_weapon();
+                    log::debug!("[Weapon] Cleared viewmodel - empty hand");
+                }
+            }
+        }
+
         // Calculate FPS
         let now = Instant::now();
         let delta = now.duration_since(state.last_frame_time).as_secs_f32();
@@ -3499,15 +3997,71 @@ fn main() {
                     state.swing_animation.hit_processed = true;
                     state.combat_kill_time += delta;
 
-                    // Find closest animal in attack range
-                    let attack_range = 3.0; // Melee range in world units
-                    if let Some((animal_id, dist)) = animals::combat::find_closest_animal(
-                        &state.animal_manager,
-                        state.player.position,
-                        attack_range,
-                    ) {
-                        // Base damage from weapon (could be modified by equipped weapon)
-                        let base_damage = 25.0;
+                    // Get equipped weapon from active hotbar slot
+                    let hotbar_weapon = state.player_economy.inventory.get_slot(state.active_hotbar_slot)
+                        .filter(|item| item.item_type == economy::ItemType::Weapon)
+                        .map(|item| item.template_id.as_str());
+
+                    // Determine attack type based on equipped weapon
+                    let (target_id, weapon_name, base_damage) = match hotbar_weapon {
+                        // Dagger: melee-only, fast, moderate damage
+                        Some("dagger") => {
+                            let melee_range = 3.5; // Slightly longer than fists
+                            if let Some((id, _dist)) = animals::combat::find_closest_animal(
+                                &state.animal_manager,
+                                state.player.position,
+                                melee_range,
+                            ) {
+                                (Some(id), "dagger", 30.0)
+                            } else {
+                                (None, "", 0.0)
+                            }
+                        }
+                        // Flintlock: ranged-only
+                        Some("flintlock_pistol") => {
+                            let look_dir = state.camera.forward();
+                            let ranged_distance = 50.0;
+                            let aim_cone = 0.05;
+                            if let Some((id, _dist, _species, _behavior)) = state.animal_manager.get_focused_animal(
+                                state.player.position,
+                                look_dir,
+                                ranged_distance,
+                                aim_cone,
+                            ) {
+                                (Some(id), "flintlock_pistol", 40.0)
+                            } else {
+                                (None, "", 0.0)
+                            }
+                        }
+                        // Hatchet: melee, high damage, good range
+                        Some("hatchet") => {
+                            let melee_range = 4.0; // Longer reach than dagger
+                            if let Some((id, _dist)) = animals::combat::find_closest_animal(
+                                &state.animal_manager,
+                                state.player.position,
+                                melee_range,
+                            ) {
+                                (Some(id), "hatchet", 45.0) // High damage
+                            } else {
+                                (None, "", 0.0)
+                            }
+                        }
+                        // Default/unarmed: basic melee
+                        _ => {
+                            let melee_range = 3.0;
+                            if let Some((id, _dist)) = animals::combat::find_closest_animal(
+                                &state.animal_manager,
+                                state.player.position,
+                                melee_range,
+                            ) {
+                                (Some(id), "hunter_knife", 25.0)
+                            } else {
+                                (None, "", 0.0)
+                            }
+                        }
+                    };
+
+                    if let Some(animal_id) = target_id {
                         let combat_ctx = animals::combat::CombatContext::default();
 
                         // Process the attack
@@ -3515,12 +4069,12 @@ fn main() {
                             &mut state.animal_manager,
                             animal_id,
                             base_damage,
-                            Some("hunter_knife"), // TODO: Get from equipped weapon
+                            Some(weapon_name),
                             &combat_ctx,
                         ) {
                             // Process loot if killed
                             if result.killed {
-                                let loot_result = state.process_combat_loot(&result, "hunter_knife");
+                                let loot_result = state.process_combat_loot(&result, weapon_name);
 
                                 // Spawn dropped items in the world
                                 let drop_pos = result.position + Vec3::new(0.0, 0.5, 0.0);
@@ -3533,6 +4087,18 @@ fn main() {
                                             (rand::random::<f32>() - 0.5) * 1.0,
                                         ),
                                     );
+                                }
+
+                                // If killed a pheasant, also spawn a pheasant carcass item for pickup
+                                if result.species == animals::AnimalSpecies::RingNeckedPheasant {
+                                    let carcass = economy::Item::new(
+                                        "pheasant_carcass",
+                                        "Pheasant Carcass",
+                                        economy::ItemType::Food,
+                                        15,
+                                    );
+                                    state.dropped_items.spawn_drop(carcass, drop_pos);
+                                    log::info!("[HUNT] Shot a pheasant! Carcass dropped at {:?}", drop_pos);
                                 }
 
                                 // Spawn currency drops if any
@@ -3846,6 +4412,8 @@ fn main() {
             // Separate animals by whether they have 3D models
             let mut orb_instances: Vec<OrbInstance> = Vec::new();
             let mut model_instances: std::collections::HashMap<&'static str, Vec<AnimalInstance>> = std::collections::HashMap::new();
+            // Track animation state counts per species to pick dominant animation
+            let mut species_anim_states: std::collections::HashMap<&'static str, std::collections::HashMap<animals::AnimationState, usize>> = std::collections::HashMap::new();
 
             for animal in &nearby_animals {
                 let base_color = animal.species.orb_color();
@@ -3918,6 +4486,8 @@ fn main() {
                     );
                     let instance = AnimalInstance::new(model_matrix, color, emissive);
                     model_instances.entry(model_name).or_insert_with(Vec::new).push(instance);
+                    // Track animation state for this species
+                    *species_anim_states.entry(model_name).or_default().entry(animal.animation_state).or_insert(0) += 1;
                 } else {
                     // Fall back to orb rendering
                     let pos = animal.position + Vec3::new(0.0, scale * 0.5 + 0.5, 0.0);
@@ -3976,6 +4546,7 @@ fn main() {
                                         position: mesh.positions[i],
                                         normal: mesh.normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
                                         uv: mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                                        color: mesh.colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]),
                                         joints: joint_indices,
                                         weights: joint_weights,
                                     });
@@ -4094,13 +4665,30 @@ fn main() {
                     // Update skeletal animation for animated species
                     // Skip pheasants - their animation is broken and causes mesh stretching
                     if model_pipeline.has_animations(model_name) && *model_name != "ring_necked_pheasant" {
-                        // Use time_of_day as animation time (cycles every 24 hours = 86400 secs)
-                        // Scale to get reasonable animation speed
-                        let anim_speed = 150.0;
-                        let anim_time = state.time_of_day * anim_speed;
+                        // Find dominant animation state for this species
+                        let dominant_state = species_anim_states.get(model_name)
+                            .and_then(|states| states.iter().max_by_key(|(_, count)| *count).map(|(state, _)| *state))
+                            .unwrap_or(animals::AnimationState::Idle);
 
-                        // Try to find an idle/default animation
-                        let anim_name = "Idle";
+                        // Map AnimationState to GLTF animation name
+                        let anim_name = match dominant_state {
+                            animals::AnimationState::Idle => "Idle",
+                            animals::AnimationState::Walking => "Walk",
+                            animals::AnimationState::Running => "Gallop",
+                            animals::AnimationState::Attacking => "Attack",
+                            animals::AnimationState::TakingDamage => "Idle_HitReact1",
+                            animals::AnimationState::Dying | animals::AnimationState::Dead => "Death",
+                        };
+
+                        // Animation speed varies by state
+                        let anim_speed = match dominant_state {
+                            animals::AnimationState::Idle => 1.0,
+                            animals::AnimationState::Walking => 1.5,
+                            animals::AnimationState::Running => 2.0,
+                            animals::AnimationState::Attacking => 2.5,
+                            _ => 1.0,
+                        };
+                        let anim_time = state.time_of_day * 150.0 * anim_speed;
 
                         if let Some(joint_matrices) = model_pipeline.compute_animation_matrices(
                             model_name,
@@ -4132,9 +4720,13 @@ fn main() {
                 });
             }
 
-            // Add dropped item orbs
+            // Add dropped item orbs (skip weapons - they're rendered as 3D models)
             let game_time = state.time_of_day; // For bounce animation
             for drop in state.dropped_items.all_drops() {
+                // Skip weapons - they're rendered as actual GLB models
+                if drop.item.item_type == economy::ItemType::Weapon {
+                    continue;
+                }
                 let scale = drop.scale();
                 let bounce = drop.bounce_offset(game_time);
                 let pos = drop.position + Vec3::new(0.0, scale * 0.5 + bounce + 0.2, 0.0);
@@ -4216,16 +4808,17 @@ fn main() {
             style.visuals.window_shadow = egui::epaint::Shadow::NONE;
             ui_ctx.set_style(style);
 
-            // Sync Cursor State with Game State (show cursor when journal is open)
+            // Sync Cursor State with Game State (show cursor when UI overlays are open)
             let journal_open = state.perks_journal.is_open;
+            let chest_open = state.open_chest_id.is_some();
             match state.game_state {
                 GameState::Menu | GameState::Loading | GameState::Paused => {
                     ctx.window.set_cursor_visible(true);
                     let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                 }
                 GameState::Playing => {
-                    if journal_open {
-                        // Show cursor when journal overlay is open
+                    if journal_open || chest_open {
+                        // Show cursor when journal or chest UI is open
                         ctx.window.set_cursor_visible(true);
                         let _ = ctx.window.set_cursor_grab(CursorGrabMode::None);
                     } else {
@@ -4442,28 +5035,26 @@ fn main() {
                                                     mgr.loaded_chunks.clear();
                                                     mgr.loading_chunks.clear();
                                                 }
-                                                // Initialize village system
-                                                let player_pos = state.player.position;
+                                                // Village system disabled for now
                                                 state.village_manager = VillageManager::new(data.seed);
-                                                state.village_manager.discover_villages(
-                                                    player_pos,
-                                                    2000.0, // 2km radius
-                                                    10,     // max 10 villages
-                                                );
+                                                // state.village_manager.discover_villages(
+                                                //     state.player.position,
+                                                //     2000.0,
+                                                //     10,
+                                                // );
                                                 // Initialize world features (rivers and caves)
                                                 state.world_features = WorldFeatures::new(data.seed);
-                                                // Spawn tame animals (horses, donkeys) in villages
-                                                {
-                                                    let village_data = state.village_manager.get_village_spawn_data();
-                                                    let seed = state.village_manager.get_seed();
-                                                    spawn_village_animals(&mut state.animal_manager, &village_data, seed);
-                                                }
+                                                // Village animals disabled for now
+                                                // {
+                                                //     let village_data = state.village_manager.get_village_spawn_data();
+                                                //     let seed = state.village_manager.get_seed();
+                                                //     spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                                // }
                                                 // Spawn wild horse herds on beaches
                                                 spawn_beach_horses(&mut state.animal_manager, data.seed);
                                                 // Spawn pheasants near player spawn for early wildlife encounters
                                                 spawn_pheasants_at_spawn(&mut state.animal_manager, data.seed);
-                                                // Register village factions
-                                                register_village_factions(&mut *state);
+                                                // register_village_factions(&mut *state);
                                             }
                                         }
                                     }
@@ -4493,25 +5084,24 @@ fn main() {
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
-                                        // Initialize village system
-                                        let player_pos = state.player.position;
+                                        // Village system disabled for now
                                         state.village_manager = VillageManager::new(seed);
-                                        state.village_manager.discover_villages(
-                                            player_pos,
-                                            2000.0, // 2km radius
-                                            10,     // max 10 villages
-                                        );
+                                        // state.village_manager.discover_villages(
+                                        //     state.player.position,
+                                        //     2000.0,
+                                        //     10,
+                                        // );
                                         // Initialize world features (rivers and caves)
                                         state.world_features = WorldFeatures::new(seed);
                                         let stats = state.world_features.stats();
                                         println!("[WORLD] Rivers: {}, Caves: {}, Waterfalls: {}",
                                             stats.river_count, stats.cave_count, stats.waterfall_count);
-                                        // Spawn tame animals (horses, donkeys) in villages
-                                        {
-                                            let village_data = state.village_manager.get_village_spawn_data();
-                                            let seed = state.village_manager.get_seed();
-                                            spawn_village_animals(&mut state.animal_manager, &village_data, seed);
-                                        }
+                                        // Village animals disabled for now
+                                        // {
+                                        //     let village_data = state.village_manager.get_village_spawn_data();
+                                        //     let seed = state.village_manager.get_seed();
+                                        //     spawn_village_animals(&mut state.animal_manager, &village_data, seed);
+                                        // }
                                         // Spawn wild horse herds on beaches
                                         spawn_beach_horses(&mut state.animal_manager, seed);
                                         // Spawn pheasants near player spawn for early wildlife encounters
@@ -4522,30 +5112,131 @@ fn main() {
                                             let base_x = spawn_pos.x;
                                             let base_z = spawn_pos.z;
 
-                                            // Spawn 5 chests scattered along the beach
+                                            // Spawn chests scattered along the beach and in shallow water
                                             let chest_offsets = [
                                                 (-3.0, 2.0, 0.0),      // Near player, facing east
                                                 (5.0, -8.0, 0.5),      // South along beach
                                                 (-2.0, 15.0, -0.3),    // North along beach
                                                 (8.0, -20.0, 0.8),     // Further south
                                                 (-5.0, 25.0, -0.6),    // Further north
+                                                (-15.0, 5.0, 0.2),     // In shallow water (west)
+                                                (-12.0, -10.0, -0.4),  // In shallow water (southwest)
                                             ];
 
-                                            for (dx, dz, rot) in chest_offsets {
+                                            for (i, (dx, dz, rot)) in chest_offsets.iter().enumerate() {
                                                 let x = base_x + dx;
                                                 let z = base_z + dz;
                                                 let (height, _) = get_height_at(x, z, seed);
-                                                let chest_pos = Vec3::new(x, height + 1.0, z); // Raise above ground
-                                                let _chest_id = state.storage_manager.spawn_container(
+                                                // Use terrain height, but if underwater, place at water surface
+                                                // Water level is ~0.0, so chests in water float at surface
+                                                let chest_y = if height < 0.5 { 0.3 } else { height };
+                                                let chest_pos = Vec3::new(x, chest_y, z);
+                                                let chest_id = state.storage_manager.spawn_container(
                                                     economy::ContainerType::WoodenChest,
                                                     chest_pos,
-                                                    rot,
+                                                    *rot,
                                                 );
+
+                                                // Add weapons to each chest - varied loadout
+                                                if let Some(chest) = state.storage_manager.get_mut(chest_id) {
+                                                    // Every chest gets a dagger
+                                                    let mut dagger = economy::Item::new(
+                                                        "dagger",
+                                                        "Dagger",
+                                                        economy::ItemType::Weapon,
+                                                        35,
+                                                    );
+                                                    dagger.rarity = economy::Rarity::Common;
+                                                    let _ = chest.add_item(dagger);
+
+                                                    // First two chests get flintlocks
+                                                    if i < 2 {
+                                                        let mut flintlock = economy::Item::new(
+                                                            "flintlock_pistol",
+                                                            "Flintlock Pistol",
+                                                            economy::ItemType::Weapon,
+                                                            50,
+                                                        );
+                                                        flintlock.rarity = economy::Rarity::Uncommon;
+                                                        let _ = chest.add_item(flintlock);
+                                                    }
+
+                                                    // Last two chests get hatchets
+                                                    if i >= 2 {
+                                                        let mut hatchet = economy::Item::new(
+                                                            "hatchet",
+                                                            "Hatchet",
+                                                            economy::ItemType::Weapon,
+                                                            40,
+                                                        );
+                                                        hatchet.rarity = economy::Rarity::Common;
+                                                        let _ = chest.add_item(hatchet);
+                                                    }
+                                                }
                                             }
-                                            println!("[STORAGE] Spawned {} starter chests on beach", chest_offsets.len());
+
+                                            // Scatter weapons throughout spawn area
+                                            let weapon_spawns = [
+                                                // Daggers scattered around spawn
+                                                (base_x + 2.0, base_z + 3.0, "dagger"),
+                                                (base_x - 4.0, base_z - 5.0, "dagger"),
+                                                (base_x + 7.0, base_z + 10.0, "dagger"),
+                                                (base_x - 6.0, base_z + 12.0, "dagger"),
+                                                // Flintlocks
+                                                (base_x + 5.0, base_z - 3.0, "flintlock_pistol"),
+                                                (base_x - 3.0, base_z + 8.0, "flintlock_pistol"),
+                                                // Hatchets
+                                                (base_x + 10.0, base_z - 8.0, "hatchet"),
+                                                (base_x - 8.0, base_z - 15.0, "hatchet"),
+                                                (base_x + 12.0, base_z + 18.0, "hatchet"),
+                                                (base_x - 10.0, base_z + 20.0, "hatchet"),
+                                            ];
+
+                                            for (wx, wz, weapon_type) in weapon_spawns {
+                                                let (height, _) = get_height_at(wx, wz, seed);
+                                                // Use actual terrain height (same as player gravity)
+                                                // Skip if underwater
+                                                if height < 1.0 { continue; }
+                                                let drop_pos = Vec3::new(wx, height + 0.05, wz); // Tiny offset for z-fighting
+
+                                                let weapon = match weapon_type {
+                                                    "dagger" => {
+                                                        let mut d = economy::Item::new(
+                                                            "dagger",
+                                                            "Dagger",
+                                                            economy::ItemType::Weapon,
+                                                            35,
+                                                        );
+                                                        d.rarity = economy::Rarity::Common;
+                                                        d
+                                                    }
+                                                    "hatchet" => {
+                                                        let mut h = economy::Item::new(
+                                                            "hatchet",
+                                                            "Hatchet",
+                                                            economy::ItemType::Weapon,
+                                                            40,
+                                                        );
+                                                        h.rarity = economy::Rarity::Uncommon;
+                                                        h
+                                                    }
+                                                    _ => {
+                                                        let mut f = economy::Item::new(
+                                                            "flintlock_pistol",
+                                                            "Flintlock Pistol",
+                                                            economy::ItemType::Weapon,
+                                                            50,
+                                                        );
+                                                        f.rarity = economy::Rarity::Uncommon;
+                                                        f
+                                                    }
+                                                };
+                                                state.dropped_items.spawn_drop(weapon, drop_pos);
+                                                println!("[WEAPON] Spawned {} at ({:.1}, {:.1}, {:.1})", weapon_type, wx, drop_pos.y, wz);
+                                            }
+                                            println!("[STORAGE] Spawned {} starter chests and {} weapons on beach", chest_offsets.len(), weapon_spawns.len());
                                         }
-                                        // Register village factions
-                                        register_village_factions(&mut *state);
+                                        // register_village_factions(&mut *state);
                                     }
                                     "Load Game" => {
                                         state.show_load_menu = true;
@@ -4621,18 +5312,16 @@ fn main() {
                                             mgr.loaded_chunks.clear();
                                             mgr.loading_chunks.clear();
                                         }
-                                        // Initialize village system
-                                        let player_pos = state.player.position;
+                                        // Village system disabled for now
                                         state.village_manager = VillageManager::new(data.seed);
-                                        state.village_manager.discover_villages(
-                                            player_pos,
-                                            2000.0, // 2km radius
-                                            10,     // max 10 villages
-                                        );
+                                        // state.village_manager.discover_villages(
+                                        //     state.player.position,
+                                        //     2000.0,
+                                        //     10,
+                                        // );
                                         // Initialize world features (rivers and caves)
                                         state.world_features = WorldFeatures::new(data.seed);
-                                        // Register village factions
-                                        register_village_factions(&mut *state);
+                                        // register_village_factions(&mut *state);
                                     }
                                 }
                                 save_y += 45.0;
@@ -4652,6 +5341,25 @@ fn main() {
                     });
                 }
                 GameState::Playing => {
+                    // Initialize inventory icon textures if not already done
+                    if !state.icon_cache.initialized {
+                        inventory_icons::initialize_icons(
+                            &mut state.icon_cache,
+                            ctx.device(),
+                            ctx.queue(),
+                            ui_ctx,
+                        );
+                    }
+
+                    // Update icon rotation each frame for animation
+                    inventory_icons::update_icons(
+                        &mut state.icon_cache,
+                        ctx.device(),
+                        ctx.queue(),
+                        ui_ctx,
+                        delta,
+                    );
+
                     // === HUD: Top-left player stats ===
                     egui::Area::new(egui::Id::new("hud_stats"))
                         .fixed_pos(egui::pos2(10.0, 10.0))
@@ -4689,6 +5397,17 @@ fn main() {
                             });
                         });
 
+                    // === HUD: Minimal center crosshair (dot) ===
+                    {
+                        // Use screen rect center for true center positioning
+                        let screen_center = ui_ctx.screen_rect().center();
+                        let color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180);
+
+                        // Minimal dot crosshair - just a small circle
+                        ui_ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("crosshair")))
+                            .circle_filled(screen_center, 2.0, color);
+                    }
+
                     // === HUD: Bottom-center hotbar ===
                     egui::Area::new(egui::Id::new("hud_hotbar"))
                         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
@@ -4718,7 +5437,7 @@ fn main() {
                                         frame.show(ui, |ui| {
                                             ui.set_min_size(egui::vec2(36.0, 36.0));
                                             if let Some(item) = state.player_economy.inventory.get_slot(slot) {
-                                                let color = match item.rarity {
+                                                let rarity_color = match item.rarity {
                                                     economy::Rarity::Crude => egui::Color32::GRAY,
                                                     economy::Rarity::Common => egui::Color32::WHITE,
                                                     economy::Rarity::Uncommon => egui::Color32::GREEN,
@@ -4728,9 +5447,15 @@ fn main() {
                                                     economy::Rarity::Mythic => egui::Color32::from_rgb(230, 30, 30),
                                                     economy::Rarity::Primordial => egui::Color32::from_rgb(255, 215, 0),
                                                 };
-                                                // Item icon (first char of name)
-                                                let icon = item.name.chars().next().unwrap_or('?');
-                                                ui.label(egui::RichText::new(icon.to_string()).color(color).size(18.0));
+                                                // Try to show 3D model icon if available
+                                                if let Some(tex) = state.icon_cache.textures.get(&item.template_id) {
+                                                    let size = egui::vec2(28.0, 28.0);
+                                                    ui.add(egui::Image::new((tex.id(), size)).tint(rarity_color));
+                                                } else {
+                                                    // Fallback to text icon
+                                                    let icon = item.name.chars().next().unwrap_or('?');
+                                                    ui.label(egui::RichText::new(icon.to_string()).color(rarity_color).size(18.0));
+                                                }
                                                 // Stack count
                                                 if item.stack_size > 1 {
                                                     ui.label(egui::RichText::new(format!("x{}", item.stack_size)).size(10.0).color(egui::Color32::LIGHT_GRAY));
@@ -4747,30 +5472,237 @@ fn main() {
                         });
 
                     // === "E to interact" prompt when looking at NPC ===
+                    // Glassmorphic futuristic tile style
                     if state.current_dialogue.is_none() {
                         if let Some((name, role, distance)) = state.village_manager.get_focused_npc_info() {
                             egui::Area::new(egui::Id::new("npc_interact_prompt"))
-                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 100.0))
+                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 80.0))
                                 .show(ui_ctx, |ui| {
+                                    // Glassmorphic frame: low opacity, subtle border, rounded
                                     let bg = egui::Frame::none()
-                                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180))
-                                        .rounding(egui::Rounding::same(8.0))
-                                        .inner_margin(egui::Margin::same(12.0));
+                                        .fill(egui::Color32::from_rgba_unmultiplied(10, 20, 30, 140))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 180, 255, 100)))
+                                        .rounding(egui::Rounding::same(12.0))
+                                        .inner_margin(egui::Margin::symmetric(16.0, 10.0));
                                     bg.show(ui, |ui| {
-                                        ui.vertical_centered(|ui| {
-                                            ui.label(egui::RichText::new(format!("{} - {}", name, role))
-                                                .color(egui::Color32::WHITE)
-                                                .size(18.0));
-                                            ui.label(egui::RichText::new(format!("{:.1}m away", distance))
-                                                .color(egui::Color32::GRAY)
-                                                .size(12.0));
-                                            ui.add_space(4.0);
-                                            ui.label(egui::RichText::new("[E] Talk")
+                                        ui.horizontal(|ui| {
+                                            // Icon placeholder (diamond shape)
+                                            ui.label(egui::RichText::new("◇")
+                                                .color(egui::Color32::from_rgb(100, 180, 255))
+                                                .size(16.0));
+                                            ui.add_space(6.0);
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(format!("{}", name))
+                                                    .color(egui::Color32::WHITE)
+                                                    .size(14.0));
+                                                ui.label(egui::RichText::new(format!("{} · {:.1}m", role, distance))
+                                                    .color(egui::Color32::from_rgba_unmultiplied(180, 180, 180, 200))
+                                                    .size(10.0));
+                                            });
+                                            ui.add_space(12.0);
+                                            ui.label(egui::RichText::new("[E]")
                                                 .color(egui::Color32::from_rgb(100, 200, 255))
-                                                .size(14.0));
+                                                .size(12.0)
+                                                .strong());
                                         });
                                     });
                                 });
+                        }
+                    }
+
+                    // === "E to open" prompt for nearby chest ===
+                    if state.open_chest_id.is_none() && state.current_dialogue.is_none() {
+                        if let Some(chest) = state.storage_manager.nearest_interactable(
+                            state.player.position,
+                            None,
+                            3.5,
+                        ) {
+                            let chest_name = chest.display_name().to_string();
+                            let distance = chest.distance_from(state.player.position);
+                            egui::Area::new(egui::Id::new("chest_interact_prompt"))
+                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 80.0))
+                                .show(ui_ctx, |ui| {
+                                    // Glassmorphic frame: warm amber tint for chests
+                                    let bg = egui::Frame::none()
+                                        .fill(egui::Color32::from_rgba_unmultiplied(40, 30, 15, 140))
+                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 180, 80, 100)))
+                                        .rounding(egui::Rounding::same(12.0))
+                                        .inner_margin(egui::Margin::symmetric(16.0, 10.0));
+                                    bg.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            // Chest icon
+                                            ui.label(egui::RichText::new("▣")
+                                                .color(egui::Color32::from_rgb(255, 200, 100))
+                                                .size(16.0));
+                                            ui.add_space(6.0);
+                                            ui.vertical(|ui| {
+                                                ui.label(egui::RichText::new(&chest_name)
+                                                    .color(egui::Color32::from_rgb(255, 230, 180))
+                                                    .size(14.0));
+                                                ui.label(egui::RichText::new(format!("{:.1}m", distance))
+                                                    .color(egui::Color32::from_rgba_unmultiplied(180, 160, 140, 200))
+                                                    .size(10.0));
+                                            });
+                                            ui.add_space(12.0);
+                                            ui.label(egui::RichText::new("[E]")
+                                                .color(egui::Color32::from_rgb(255, 200, 100))
+                                                .size(12.0)
+                                                .strong());
+                                        });
+                                    });
+                                });
+                        }
+                    }
+
+                    // === Chest UI Window (when open) ===
+                    if let Some(chest_id) = state.open_chest_id {
+                        // Close chest if player moves too far away
+                        let should_close = state.storage_manager.get(chest_id)
+                            .map(|c| c.distance_from(state.player.position) > 5.0)
+                            .unwrap_or(true);
+
+                        if should_close {
+                            if let Some(chest) = state.storage_manager.get_mut(chest_id) {
+                                chest.close();
+                            }
+                            state.open_chest_id = None;
+                        } else {
+                            // Track which slot was clicked (if any)
+                            let mut clicked_slot: Option<usize> = None;
+
+                            egui::Window::new("Chest")
+                                .collapsible(false)
+                                .resizable(false)
+                                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                                .show(ui_ctx, |ui| {
+                                    if let Some(chest) = state.storage_manager.get(chest_id) {
+                                        ui.label(egui::RichText::new(chest.display_name())
+                                            .size(16.0)
+                                            .color(egui::Color32::from_rgb(255, 220, 150)));
+                                        ui.separator();
+
+                                        // Grid of chest contents
+                                        let slot_size = 48.0;
+                                        let cols = 5;
+                                        let rows = (chest.slots.len() + cols - 1) / cols;
+
+                                        egui::Grid::new("chest_grid")
+                                            .spacing([4.0, 4.0])
+                                            .show(ui, |ui| {
+                                                for row in 0..rows {
+                                                    for col in 0..cols {
+                                                        let idx = row * cols + col;
+                                                        if idx < chest.slots.len() {
+                                                            let has_item = chest.slots[idx].is_some();
+
+                                                            // Use allocate_rect with Sense::click for clickable slots
+                                                            let (rect, response) = ui.allocate_exact_size(
+                                                                egui::vec2(slot_size, slot_size),
+                                                                if has_item { egui::Sense::click() } else { egui::Sense::hover() }
+                                                            );
+
+                                                            // Check for click
+                                                            if has_item && response.clicked() {
+                                                                clicked_slot = Some(idx);
+                                                            }
+
+                                                            // Slot background (highlight on hover if has item)
+                                                            let bg_color = if has_item && response.hovered() {
+                                                                egui::Color32::from_rgba_unmultiplied(120, 90, 60, 220)
+                                                            } else if has_item {
+                                                                egui::Color32::from_rgba_unmultiplied(80, 60, 40, 200)
+                                                            } else {
+                                                                egui::Color32::from_rgba_unmultiplied(40, 30, 20, 150)
+                                                            };
+                                                            ui.painter().rect_filled(rect, 4.0, bg_color);
+                                                            ui.painter().rect_stroke(rect, 4.0,
+                                                                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 80, 60)));
+
+                                                            // Item in slot
+                                                            if let Some(item) = &chest.slots[idx] {
+                                                                let color = egui::Color32::from_rgb(
+                                                                    (item.rarity.color()[0] * 255.0) as u8,
+                                                                    (item.rarity.color()[1] * 255.0) as u8,
+                                                                    (item.rarity.color()[2] * 255.0) as u8,
+                                                                );
+                                                                // Try to show 3D model icon if available
+                                                                if let Some(tex) = state.icon_cache.textures.get(&item.template_id) {
+                                                                    let icon_rect = rect.shrink(4.0);
+                                                                    ui.painter().image(
+                                                                        tex.id(),
+                                                                        icon_rect,
+                                                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                                                        color,
+                                                                    );
+                                                                } else {
+                                                                    // Fallback to item initial
+                                                                    let initial = item.name.chars().next().unwrap_or('?');
+                                                                    ui.painter().text(
+                                                                        rect.center(),
+                                                                        egui::Align2::CENTER_CENTER,
+                                                                        initial.to_string(),
+                                                                        egui::FontId::new(20.0, egui::FontFamily::Monospace),
+                                                                        color,
+                                                                    );
+                                                                }
+                                                                // Stack count
+                                                                if item.stack_size > 1 {
+                                                                    ui.painter().text(
+                                                                        rect.right_bottom() - egui::vec2(4.0, 4.0),
+                                                                        egui::Align2::RIGHT_BOTTOM,
+                                                                        item.stack_size.to_string(),
+                                                                        egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                                                                        egui::Color32::WHITE,
+                                                                    );
+                                                                }
+
+                                                                // Tooltip on hover
+                                                                if response.hovered() {
+                                                                    egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("chest_item_tooltip"), |ui| {
+                                                                        ui.label(egui::RichText::new(&item.name).color(color).size(14.0));
+                                                                        ui.label(egui::RichText::new(format!("{:?}", item.rarity))
+                                                                            .color(egui::Color32::GRAY).size(11.0));
+                                                                        if item.stack_size > 1 {
+                                                                            ui.label(egui::RichText::new(format!("x{}", item.stack_size))
+                                                                                .color(egui::Color32::WHITE).size(11.0));
+                                                                        }
+                                                                        ui.label(egui::RichText::new("Click to take")
+                                                                            .color(egui::Color32::from_rgb(255, 200, 100)).size(10.0));
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    ui.end_row();
+                                                }
+                                            });
+
+                                        ui.separator();
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("[E] Close")
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                            ui.label(egui::RichText::new("  [Click item] Take")
+                                                .color(egui::Color32::GRAY)
+                                                .size(12.0));
+                                        });
+                                    }
+                                });
+
+                            // Transfer clicked item from chest to player inventory
+                            if let Some(slot_idx) = clicked_slot {
+                                if let Some(chest) = state.storage_manager.get_mut(chest_id) {
+                                    if let Some(item) = chest.remove_item(slot_idx) {
+                                        let item_name = item.name.clone();
+                                        let rarity = item.rarity;
+                                        if let Err(e) = state.player_economy.inventory.add_item(item) {
+                                            log::warn!("[CHEST] Failed to add item to inventory: {:?}", e);
+                                        } else {
+                                            log::info!("[CHEST] Took {} ({:?})", item_name, rarity);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -4794,46 +5726,54 @@ fn main() {
                         let observation_count = state.systems_manager.encyclopedia.get_observation_count(species);
 
                         egui::Area::new(egui::Id::new("animal_observation_hud"))
-                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+                            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
                             .show(ui_ctx, |ui| {
+                                // Glassmorphic frame: green-tinted for fauna
                                 let bg = egui::Frame::none()
-                                    .fill(egui::Color32::from_rgba_unmultiplied(20, 40, 30, 200))
-                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 120, 80)))
-                                    .rounding(egui::Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::same(10.0));
+                                    .fill(egui::Color32::from_rgba_unmultiplied(15, 30, 20, 140))
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(80, 180, 100, 100)))
+                                    .rounding(egui::Rounding::same(12.0))
+                                    .inner_margin(egui::Margin::symmetric(16.0, 10.0));
                                 bg.show(ui, |ui| {
-                                    ui.vertical_centered(|ui| {
-                                        // Species name
-                                        let name_color = match discovery_tier {
+                                    ui.horizontal(|ui| {
+                                        // Fauna icon
+                                        let icon_color = match discovery_tier {
                                             encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
-                                            encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(150, 150, 150),
-                                            encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
-                                            encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(100, 200, 100),
+                                            encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(120, 150, 120),
+                                            encyclopedia::DiscoveryTier::Observed => egui::Color32::from_rgb(100, 200, 100),
+                                            encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(150, 220, 150),
                                             encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
                                         };
-                                        let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
-                                            "??? Unknown Creature".to_string()
-                                        } else {
-                                            species.name().to_string()
-                                        };
-                                        ui.label(egui::RichText::new(display_name).color(name_color).size(16.0));
+                                        ui.label(egui::RichText::new("●")
+                                            .color(icon_color)
+                                            .size(14.0));
+                                        ui.add_space(6.0);
+                                        ui.vertical(|ui| {
+                                            // Species name
+                                            let name_color = match discovery_tier {
+                                                encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
+                                                encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(180, 180, 180),
+                                                encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
+                                                encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(150, 230, 150),
+                                                encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
+                                            };
+                                            let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
+                                                "???".to_string()
+                                            } else {
+                                                species.name().to_string()
+                                            };
+                                            ui.label(egui::RichText::new(display_name).color(name_color).size(14.0));
 
-                                        // Distance
-                                        ui.label(egui::RichText::new(format!("{:.1}m", distance))
-                                            .color(egui::Color32::GRAY).size(11.0));
-
-                                        // Behavior (if observed enough)
-                                        if discovery_tier >= encyclopedia::DiscoveryTier::Observed {
-                                            let behavior_text = format!("{:?}", behavior);
-                                            ui.label(egui::RichText::new(behavior_text)
-                                                .color(egui::Color32::from_rgb(180, 180, 120)).size(11.0));
-                                        }
-
-                                        // Observation progress
-                                        ui.add_space(4.0);
-                                        let tier_text = format!("{:?} ({} observations)", discovery_tier, observation_count);
-                                        ui.label(egui::RichText::new(tier_text)
-                                            .color(egui::Color32::from_rgb(100, 150, 100)).size(10.0));
+                                            // Compact info line
+                                            let behavior_str = if discovery_tier >= encyclopedia::DiscoveryTier::Observed {
+                                                format!("{:?} · {:.1}m", behavior, distance)
+                                            } else {
+                                                format!("{:.1}m", distance)
+                                            };
+                                            ui.label(egui::RichText::new(behavior_str)
+                                                .color(egui::Color32::from_rgba_unmultiplied(150, 170, 150, 200))
+                                                .size(10.0));
+                                        });
                                     });
                                 });
                             });
@@ -4860,41 +5800,58 @@ fn main() {
                         let discovery_tier = state.systems_manager.encyclopedia.get_flora_tier(species);
 
                         egui::Area::new(egui::Id::new("flora_forage_hud"))
-                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 120.0))
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 80.0))
                             .show(ui_ctx, |ui| {
+                                // Glassmorphic frame: earthy green for flora
                                 let bg = egui::Frame::none()
-                                    .fill(egui::Color32::from_rgba_unmultiplied(30, 50, 30, 200))
-                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 100, 60)))
-                                    .rounding(egui::Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::same(10.0));
+                                    .fill(egui::Color32::from_rgba_unmultiplied(20, 35, 15, 140))
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(100, 180, 80, 100)))
+                                    .rounding(egui::Rounding::same(12.0))
+                                    .inner_margin(egui::Margin::symmetric(16.0, 10.0));
                                 bg.show(ui, |ui| {
-                                    ui.vertical_centered(|ui| {
-                                        // Plant name (based on knowledge)
-                                        let name_color = match discovery_tier {
-                                            encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
-                                            encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(150, 180, 150),
-                                            encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
-                                            encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(100, 200, 100),
-                                            encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
-                                        };
-                                        let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
-                                            "??? Unknown Plant".to_string()
+                                    ui.horizontal(|ui| {
+                                        // Flora icon (leaf)
+                                        let icon_color = if can_harvest {
+                                            egui::Color32::from_rgb(100, 220, 80)
                                         } else {
-                                            species.name().to_string()
+                                            egui::Color32::from_rgb(150, 120, 80)
                                         };
-                                        ui.label(egui::RichText::new(display_name).color(name_color).size(14.0));
+                                        ui.label(egui::RichText::new("❧")
+                                            .color(icon_color)
+                                            .size(16.0));
+                                        ui.add_space(6.0);
+                                        ui.vertical(|ui| {
+                                            // Plant name
+                                            let name_color = match discovery_tier {
+                                                encyclopedia::DiscoveryTier::Unknown => egui::Color32::GRAY,
+                                                encyclopedia::DiscoveryTier::Sighted => egui::Color32::from_rgb(180, 180, 180),
+                                                encyclopedia::DiscoveryTier::Observed => egui::Color32::WHITE,
+                                                encyclopedia::DiscoveryTier::Studied => egui::Color32::from_rgb(150, 230, 150),
+                                                encyclopedia::DiscoveryTier::Mastered => egui::Color32::GOLD,
+                                            };
+                                            let display_name = if discovery_tier == encyclopedia::DiscoveryTier::Unknown {
+                                                "???".to_string()
+                                            } else {
+                                                species.name().to_string()
+                                            };
+                                            ui.label(egui::RichText::new(display_name).color(name_color).size(14.0));
 
-                                        // Distance
-                                        ui.label(egui::RichText::new(format!("{:.1}m", distance))
-                                            .color(egui::Color32::GRAY).size(10.0));
-
-                                        // Harvest prompt
+                                            // Status line
+                                            ui.label(egui::RichText::new(format!("{:.1}m", distance))
+                                                .color(egui::Color32::from_rgba_unmultiplied(150, 170, 150, 200))
+                                                .size(10.0));
+                                        });
+                                        ui.add_space(12.0);
+                                        // Action hint
                                         if can_harvest {
-                                            ui.label(egui::RichText::new("[E] Harvest")
-                                                .color(egui::Color32::from_rgb(100, 200, 100)).size(12.0));
+                                            ui.label(egui::RichText::new("[E]")
+                                                .color(egui::Color32::from_rgb(100, 220, 80))
+                                                .size(12.0)
+                                                .strong());
                                         } else {
-                                            ui.label(egui::RichText::new("Not ready to harvest")
-                                                .color(egui::Color32::from_rgb(180, 100, 100)).size(11.0));
+                                            ui.label(egui::RichText::new("◌")
+                                                .color(egui::Color32::from_rgb(150, 100, 80))
+                                                .size(12.0));
                                         }
                                     });
                                 });
@@ -5884,7 +6841,8 @@ fn main() {
                             let mut rng_grass2 = rand::rngs::StdRng::seed_from_u64(grass2_seed as u64);
 
                             // Ground cover spacing (wider = fewer instances = better perf)
-                            let grass2_spacing = 4.0;
+                            // Increased from 4.0 to 25.0 = 90% instance reduction
+                            let grass2_spacing = 25.0;
 
                             let grass2_steps = (chunk_size / grass2_spacing) as i32;
                             for gz in 0..grass2_steps {
@@ -5978,7 +6936,8 @@ fn main() {
                             let mut rng_grass3 = rand::rngs::StdRng::seed_from_u64(grass3_seed as u64);
 
                             // Sparse spacing - larger clumps, fewer instances
-                            let grass3_spacing = 8.0;
+                            // Increased to 25.0 = 90% instance reduction
+                            let grass3_spacing = 25.0;
 
                             // Clumping noise for natural clustering
                             let clump_noise = noise::Perlin::new(grass3_seed);
@@ -6072,6 +7031,469 @@ fn main() {
                                 println!("[GRASS3] Created {} instances for chunk", grass3_transforms.len());
                             }
 
+                            // ================================================================
+                            // FLOWERS: Chamomile & Clover patches with surrounding groundcover
+                            // ================================================================
+                            let mut chamomile_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut chamomile_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut clover_patch_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut clover_patch_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut groundcover_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut groundcover_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+
+                            let mut chamomile_transforms: Vec<Mat4> = Vec::new();
+                            let mut clover_patch_transforms: Vec<Mat4> = Vec::new();
+                            let mut daisy_transforms: Vec<Mat4> = Vec::new();
+
+                            // Seed for flower placement
+                            let flower_seed = state.seed.wrapping_add(9999) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let mut rng_flowers = rand::rngs::StdRng::seed_from_u64(flower_seed as u64);
+
+                            // Flower patch spacing (patches every ~25m for larger clearings)
+                            let patch_spacing = 25.0;
+                            let patch_steps = (chunk_size / patch_spacing) as i32;
+                            let mut flower_debug_checks = 0;
+                            let mut flower_debug_passed = 0;
+
+                            // CHAMOMILE PATCHES
+                            for pz in 0..patch_steps {
+                                for px in 0..patch_steps {
+                                    use rand::Rng;
+                                    flower_debug_checks += 1;
+
+                                    let jitter_x = (rng_flowers.gen::<f32>() - 0.5) * patch_spacing * 0.8;
+                                    let jitter_z = (rng_flowers.gen::<f32>() - 0.5) * patch_spacing * 0.8;
+
+                                    let patch_x = offset_x as f32 + (px as f32 * patch_spacing) + jitter_x;
+                                    let patch_z = offset_z as f32 + (pz as f32 * patch_spacing) + jitter_z;
+
+                                    let (height, _color) = croatoan_wfc::get_height_at(patch_x, patch_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(patch_x, patch_z, state.seed);
+
+                                    // Forest clearings: biome_t 0.65-0.80 (wider range for more clearings)
+                                    // Height > 2m (above water, on forest floor)
+                                    if height < 2.0 || biome_t < 0.65 || biome_t > 0.80 {
+                                        continue;
+                                    }
+                                    flower_debug_passed += 1;
+
+                                    // 70% spawn chance (more patches in clearings)
+                                    if rng_flowers.gen::<f32>() > 0.7 {
+                                        continue;
+                                    }
+
+                                    // Spawn 2-3 chamomile plants in a small cluster
+                                    let chamomile_count = 2 + (rng_flowers.gen::<f32>() * 1.5) as i32;
+                                    for _c in 0..chamomile_count {
+                                        let cx = patch_x + (rng_flowers.gen::<f32>() - 0.5) * 2.0;
+                                        let cz = patch_z + (rng_flowers.gen::<f32>() - 0.5) * 2.0;
+                                        let (ch, _) = croatoan_wfc::get_height_at(cx, cz, state.seed);
+
+                                        let rotation = rng_flowers.gen::<f32>() * std::f32::consts::TAU;
+                                        let scale = 0.8 + rng_flowers.gen::<f32>() * 0.4; // 0.8-1.2
+
+                                        let transform = Mat4::from_scale_rotation_translation(
+                                            Vec3::splat(scale),
+                                            glam::Quat::from_rotation_y(rotation),
+                                            Vec3::new(cx, ch, cz),
+                                        );
+                                        chamomile_transforms.push(transform);
+                                    }
+
+                                    // Spawn 5-6 surrounding daisy groundcover
+                                    let groundcover_count = 5 + (rng_flowers.gen::<f32>() * 2.0) as i32;
+                                    for _g in 0..groundcover_count {
+                                        let angle = rng_flowers.gen::<f32>() * std::f32::consts::TAU;
+                                        let dist = 1.5 + rng_flowers.gen::<f32>() * 2.5;
+                                        let gx = patch_x + angle.cos() * dist;
+                                        let gz = patch_z + angle.sin() * dist;
+                                        let (gh, _) = croatoan_wfc::get_height_at(gx, gz, state.seed);
+
+                                        let rotation = rng_flowers.gen::<f32>() * std::f32::consts::TAU;
+                                        let scale = 0.6 + rng_flowers.gen::<f32>() * 0.4;
+
+                                        let transform = Mat4::from_scale_rotation_translation(
+                                            Vec3::splat(scale),
+                                            glam::Quat::from_rotation_y(rotation),
+                                            Vec3::new(gx, gh, gz),
+                                        );
+                                        daisy_transforms.push(transform);
+                                    }
+                                }
+                            }
+
+                            // Debug: Print flower spawning stats
+                            println!("[FLOWER DEBUG] Chunk ({},{}): checked {} positions, {} passed biome filter, {} chamomile spawned",
+                                offset_x, offset_z, flower_debug_checks, flower_debug_passed, chamomile_transforms.len());
+
+                            // CLOVER PATCHES (offset from chamomile by half spacing)
+                            let clover_seed = state.seed.wrapping_add(8888) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let mut rng_clover = rand::rngs::StdRng::seed_from_u64(clover_seed as u64);
+
+                            for pz in 0..patch_steps {
+                                for px in 0..patch_steps {
+                                    use rand::Rng;
+
+                                    // Offset clover patches by half spacing so they don't overlap chamomile
+                                    let jitter_x = (rng_clover.gen::<f32>() - 0.5) * patch_spacing * 0.8;
+                                    let jitter_z = (rng_clover.gen::<f32>() - 0.5) * patch_spacing * 0.8;
+
+                                    let patch_x = offset_x as f32 + (px as f32 * patch_spacing) + (patch_spacing * 0.5) + jitter_x;
+                                    let patch_z = offset_z as f32 + (pz as f32 * patch_spacing) + (patch_spacing * 0.5) + jitter_z;
+
+                                    let (height, _color) = croatoan_wfc::get_height_at(patch_x, patch_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(patch_x, patch_z, state.seed);
+
+                                    // Forest clearings: biome_t 0.65-0.80 (wider range for more clearings)
+                                    // Height > 2m (above water, on forest floor)
+                                    if height < 2.0 || biome_t < 0.65 || biome_t > 0.80 {
+                                        continue;
+                                    }
+
+                                    // 70% spawn chance (more patches in clearings)
+                                    if rng_clover.gen::<f32>() > 0.7 {
+                                        continue;
+                                    }
+
+                                    // Spawn 2-3 clover plants in a small cluster
+                                    let clover_count = 2 + (rng_clover.gen::<f32>() * 1.5) as i32;
+                                    for _c in 0..clover_count {
+                                        let cx = patch_x + (rng_clover.gen::<f32>() - 0.5) * 2.0;
+                                        let cz = patch_z + (rng_clover.gen::<f32>() - 0.5) * 2.0;
+                                        let (ch, _) = croatoan_wfc::get_height_at(cx, cz, state.seed);
+
+                                        let rotation = rng_clover.gen::<f32>() * std::f32::consts::TAU;
+                                        let scale = 0.7 + rng_clover.gen::<f32>() * 0.5; // 0.7-1.2
+
+                                        let transform = Mat4::from_scale_rotation_translation(
+                                            Vec3::splat(scale),
+                                            glam::Quat::from_rotation_y(rotation),
+                                            Vec3::new(cx, ch, cz),
+                                        );
+                                        clover_patch_transforms.push(transform);
+                                    }
+
+                                    // Spawn 5-6 surrounding daisy groundcover around clover patches too
+                                    let groundcover_count = 5 + (rng_clover.gen::<f32>() * 2.0) as i32;
+                                    for _g in 0..groundcover_count {
+                                        let angle = rng_clover.gen::<f32>() * std::f32::consts::TAU;
+                                        let dist = 1.5 + rng_clover.gen::<f32>() * 2.5;
+                                        let gx = patch_x + angle.cos() * dist;
+                                        let gz = patch_z + angle.sin() * dist;
+                                        let (gh, _) = croatoan_wfc::get_height_at(gx, gz, state.seed);
+
+                                        let rotation = rng_clover.gen::<f32>() * std::f32::consts::TAU;
+                                        let scale = 0.6 + rng_clover.gen::<f32>() * 0.4;
+
+                                        let transform = Mat4::from_scale_rotation_translation(
+                                            Vec3::splat(scale),
+                                            glam::Quat::from_rotation_y(rotation),
+                                            Vec3::new(gx, gh, gz),
+                                        );
+                                        daisy_transforms.push(transform);
+                                    }
+                                }
+                            }
+
+                            // Create chamomile LOD pipelines
+                            if !chamomile_transforms.is_empty() {
+                                let shadow_map_ch = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("chamomile_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_ch);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &chamomile_transforms);
+                                    chamomile_lod0_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] chamomile_lod0 mesh NOT FOUND in registry!");
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("chamomile_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_ch);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &chamomile_transforms);
+                                    chamomile_lod1_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] chamomile_lod1 mesh NOT FOUND in registry!");
+                                }
+
+                                drop(shadow_map_ch);
+                                println!("[FLOWERS] Chamomile: {} instances", chamomile_transforms.len());
+                            }
+
+                            // Create clover patch LOD pipelines
+                            if !clover_patch_transforms.is_empty() {
+                                let shadow_map_cl = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("clover_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_cl);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &clover_patch_transforms);
+                                    clover_patch_lod0_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] clover_lod0 mesh NOT FOUND in registry!");
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("clover_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_cl);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &clover_patch_transforms);
+                                    clover_patch_lod1_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] clover_lod1 mesh NOT FOUND in registry!");
+                                }
+
+                                drop(shadow_map_cl);
+                                println!("[FLOWERS] Clover patches: {} instances", clover_patch_transforms.len());
+                            }
+
+                            // Create groundcover LOD pipelines (daisy surrounding patches)
+                            if !daisy_transforms.is_empty() {
+                                let shadow_map_gc = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("daisy_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &daisy_transforms);
+                                    groundcover_lod0_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] daisy_lod0 mesh NOT FOUND in registry!");
+                                }
+                                if let Some(lod1_mesh) = state.mesh_registry.get("daisy_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_gc);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &daisy_transforms);
+                                    groundcover_lod1_pipelines.push(p);
+                                } else {
+                                    println!("[FLOWERS ERROR] daisy_lod1 mesh NOT FOUND in registry!");
+                                }
+
+                                drop(shadow_map_gc);
+                                println!("[FLOWERS] Daisy groundcover: {} instances", daisy_transforms.len());
+                            }
+
+                            // ================================================================
+                            // SPIKEGRASS: Sparse on beach, dense and tall in salt marsh
+                            // ================================================================
+                            let mut spikegrass_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut spikegrass_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut spikegrass_transforms: Vec<Mat4> = Vec::new();
+
+                            let spikegrass_seed = state.seed.wrapping_add(5555) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let mut rng_spike = rand::rngs::StdRng::seed_from_u64(spikegrass_seed as u64);
+
+                            // Beach: very sparse (spacing ~30m), tall scale 1.5-2.5
+                            // Salt marsh: dense (spacing ~4m), very tall scale 2.0-3.5
+                            let beach_spacing = 30.0;
+                            let marsh_spacing = 4.0;
+
+                            // Beach pass (sparse, biome_t 0.48-0.58, height 1-5m)
+                            let beach_steps = (chunk_size / beach_spacing) as i32;
+                            for pz in 0..beach_steps {
+                                for px in 0..beach_steps {
+                                    use rand::Rng;
+
+                                    let jitter_x = (rng_spike.gen::<f32>() - 0.5) * beach_spacing * 0.6;
+                                    let jitter_z = (rng_spike.gen::<f32>() - 0.5) * beach_spacing * 0.6;
+
+                                    let world_x = offset_x as f32 + (px as f32 * beach_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (pz as f32 * beach_spacing) + jitter_z;
+
+                                    let (height, _) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Beach zone: biome_t 0.48-0.58, height 1-5m
+                                    if height < 1.0 || height > 5.0 || biome_t < 0.48 || biome_t > 0.58 {
+                                        continue;
+                                    }
+
+                                    // 10% spawn chance on beach (very sparse)
+                                    if rng_spike.gen::<f32>() > 0.10 {
+                                        continue;
+                                    }
+
+                                    let rotation = rng_spike.gen::<f32>() * std::f32::consts::TAU;
+                                    let scale = 1.5 + rng_spike.gen::<f32>() * 1.0; // 1.5-2.5 (tall)
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height, world_z),
+                                    );
+                                    spikegrass_transforms.push(transform);
+                                }
+                            }
+
+                            // Salt marsh pass (dense + tall, biome_t 0.55-0.65, height 0.5-3m)
+                            let marsh_steps = (chunk_size / marsh_spacing) as i32;
+                            for pz in 0..marsh_steps {
+                                for px in 0..marsh_steps {
+                                    use rand::Rng;
+
+                                    let jitter_x = (rng_spike.gen::<f32>() - 0.5) * marsh_spacing * 0.6;
+                                    let jitter_z = (rng_spike.gen::<f32>() - 0.5) * marsh_spacing * 0.6;
+
+                                    let world_x = offset_x as f32 + (px as f32 * marsh_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (pz as f32 * marsh_spacing) + jitter_z;
+
+                                    let (height, _) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Salt marsh zone: biome_t 0.55-0.65, height 0.5-3m (low wet areas)
+                                    if height < 0.5 || height > 3.0 || biome_t < 0.55 || biome_t > 0.65 {
+                                        continue;
+                                    }
+
+                                    // 70% spawn chance in marsh (dense)
+                                    if rng_spike.gen::<f32>() > 0.7 {
+                                        continue;
+                                    }
+
+                                    let rotation = rng_spike.gen::<f32>() * std::f32::consts::TAU;
+                                    // Very tall scale for marsh: 2.0-3.5
+                                    let scale = 2.0 + rng_spike.gen::<f32>() * 1.5;
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height, world_z),
+                                    );
+                                    spikegrass_transforms.push(transform);
+                                }
+                            }
+
+                            // Create spikegrass LOD pipelines
+                            if !spikegrass_transforms.is_empty() {
+                                let shadow_map_sg = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("spikegrass_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_sg);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &spikegrass_transforms);
+                                    spikegrass_lod0_pipelines.push(p);
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("spikegrass_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_sg);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &spikegrass_transforms);
+                                    spikegrass_lod1_pipelines.push(p);
+                                }
+
+                                drop(shadow_map_sg);
+                                println!("[SPIKEGRASS] {} instances (beach + salt marsh)", spikegrass_transforms.len());
+                            }
+
+                            // ================================================================
+                            // HEDGE: Forest edges and beach transition zones
+                            // ================================================================
+                            let mut hedge_lod0_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut hedge_lod1_pipelines: Vec<TreePipeline> = Vec::new();
+                            let mut hedge_transforms: Vec<Mat4> = Vec::new();
+
+                            let hedge_seed = state.seed.wrapping_add(4444) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
+                            let mut rng_hedge = rand::rngs::StdRng::seed_from_u64(hedge_seed as u64);
+
+                            // FOREST EDGE pass: Dense thickets (spacing ~5m, 85% spawn, large scale 1.5-2.5)
+                            let forest_hedge_spacing = 5.0;
+                            let forest_hedge_steps = (chunk_size / forest_hedge_spacing) as i32;
+
+                            for pz in 0..forest_hedge_steps {
+                                for px in 0..forest_hedge_steps {
+                                    use rand::Rng;
+
+                                    let jitter_x = (rng_hedge.gen::<f32>() - 0.5) * forest_hedge_spacing * 0.7;
+                                    let jitter_z = (rng_hedge.gen::<f32>() - 0.5) * forest_hedge_spacing * 0.7;
+
+                                    let world_x = offset_x as f32 + (px as f32 * forest_hedge_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (pz as f32 * forest_hedge_spacing) + jitter_z;
+
+                                    let (height, _) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Forest edge only (0.68-0.72), height > 3m
+                                    if height < 3.0 || biome_t < 0.68 || biome_t > 0.72 {
+                                        continue;
+                                    }
+
+                                    // 85% spawn chance (dense thicket along forest edge)
+                                    if rng_hedge.gen::<f32>() > 0.85 {
+                                        continue;
+                                    }
+
+                                    let rotation = rng_hedge.gen::<f32>() * std::f32::consts::TAU;
+                                    let scale = 1.5 + rng_hedge.gen::<f32>() * 1.0; // 1.5-2.5 (large bushes)
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height, world_z),
+                                    );
+                                    hedge_transforms.push(transform);
+                                }
+                            }
+
+                            // BEACH EDGE pass: Very sparse (spacing ~25m, 15% spawn, medium-large scale 1.3-2.0)
+                            let beach_hedge_spacing = 25.0;
+                            let beach_hedge_steps = (chunk_size / beach_hedge_spacing) as i32;
+
+                            for pz in 0..beach_hedge_steps {
+                                for px in 0..beach_hedge_steps {
+                                    use rand::Rng;
+
+                                    let jitter_x = (rng_hedge.gen::<f32>() - 0.5) * beach_hedge_spacing * 0.7;
+                                    let jitter_z = (rng_hedge.gen::<f32>() - 0.5) * beach_hedge_spacing * 0.7;
+
+                                    let world_x = offset_x as f32 + (px as f32 * beach_hedge_spacing) + jitter_x;
+                                    let world_z = offset_z as f32 + (pz as f32 * beach_hedge_spacing) + jitter_z;
+
+                                    let (height, _) = croatoan_wfc::get_height_at(world_x, world_z, state.seed);
+                                    let biome_t = croatoan_wfc::get_biome_t(world_x, world_z, state.seed);
+
+                                    // Beach edge/transition only (0.58-0.65), height > 3m
+                                    if height < 3.0 || biome_t < 0.58 || biome_t > 0.65 {
+                                        continue;
+                                    }
+
+                                    // 15% spawn chance (very sparse on beach)
+                                    if rng_hedge.gen::<f32>() > 0.15 {
+                                        continue;
+                                    }
+
+                                    let rotation = rng_hedge.gen::<f32>() * std::f32::consts::TAU;
+                                    let scale = 1.3 + rng_hedge.gen::<f32>() * 0.7; // 1.3-2.0 (medium-large)
+
+                                    let transform = Mat4::from_scale_rotation_translation(
+                                        Vec3::splat(scale),
+                                        glam::Quat::from_rotation_y(rotation),
+                                        Vec3::new(world_x, height, world_z),
+                                    );
+                                    hedge_transforms.push(transform);
+                                }
+                            }
+
+                            // Create hedge LOD pipelines
+                            if !hedge_transforms.is_empty() {
+                                let shadow_map_hg = shadow_map_mutex.safe_lock();
+
+                                if let Some(lod0_mesh) = state.mesh_registry.get("hedge0_lod0") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_hg);
+                                    p.set_mesh(lod0_mesh.clone());
+                                    p.upload_instances(ctx.device(), &hedge_transforms);
+                                    hedge_lod0_pipelines.push(p);
+                                }
+
+                                if let Some(lod1_mesh) = state.mesh_registry.get("hedge0_lod1") {
+                                    let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_hg);
+                                    p.set_mesh(lod1_mesh.clone());
+                                    p.upload_instances(ctx.device(), &hedge_transforms);
+                                    hedge_lod1_pipelines.push(p);
+                                }
+
+                                drop(shadow_map_hg);
+                                println!("[HEDGE] {} instances (forest/beach edges)", hedge_transforms.len());
+                            }
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
@@ -6097,6 +7519,16 @@ fn main() {
                                 conifer_shrubs_lod0,
                                 conifer_shrubs_lod1,
                                 conifer_shrubs_lod2,
+                                chamomile_lod0: chamomile_lod0_pipelines,
+                                chamomile_lod1: chamomile_lod1_pipelines,
+                                clover_patch_lod0: clover_patch_lod0_pipelines,
+                                clover_patch_lod1: clover_patch_lod1_pipelines,
+                                groundcover_lod0: groundcover_lod0_pipelines,
+                                groundcover_lod1: groundcover_lod1_pipelines,
+                                spikegrass_lod0: spikegrass_lod0_pipelines,
+                                spikegrass_lod1: spikegrass_lod1_pipelines,
+                                hedge_lod0: hedge_lod0_pipelines,
+                                hedge_lod1: hedge_lod1_pipelines,
                                 buildings: building_pipelines,
                                 river_water: Vec::new(), // TODO: implement river water
                                 bounds,
@@ -6293,6 +7725,12 @@ fn main() {
                 water.update(ctx.queue(), elapsed, delta);
                 water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
                 water.dispatch(&mut encoder);
+            }
+
+            // Update Pond Water (inland bodies)
+            {
+                let mut pond_water = pond_water_system_mutex.safe_lock();
+                pond_water.update(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array(), delta);
             }
 
             // 0. Shadow Pass
@@ -6513,6 +7951,7 @@ fn main() {
             // 2. Main Render Pass
             {
                 let water_system_guard = water_system_mutex.safe_lock();
+                let pond_water_guard = pond_water_system_mutex.safe_lock();
                 let orb_pipeline = animal_orb_pipeline_mutex.safe_lock();
                 // Lock model_pipeline early so it outlives render_pass
                 let model_pipeline = animal_model_pipeline_mutex.safe_lock();
@@ -6524,6 +7963,8 @@ fn main() {
                 let mut container_pipelines: Vec<TreePipeline> = Vec::new();
                 // Campfire pipelines must be declared here to outlive render_pass
                 let mut campfire_pipelines: Vec<TreePipeline> = Vec::new();
+                // Weapon pipelines for dropped weapons (daggers, flintlocks, hatchets)
+                let mut weapon_pipelines: Vec<TreePipeline> = Vec::new();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -6933,6 +8374,140 @@ fn main() {
                         }
                     }
 
+                    // ================================================================
+                    // FLOWERS: Chamomile, Clover patches, and groundcover (forest floor)
+                    // ================================================================
+                    // Chamomile LOD: 0-60 (LOD0), 50-150 (LOD1)
+                    // Clover patch LOD: 0-50 (LOD0), 40-120 (LOD1)
+                    // Groundcover LOD: 0-40 (LOD0), 30-100 (LOD1)
+                    let chamomile_lod0_end = 60.0;
+                    let chamomile_lod1_end = 150.0;
+                    let clover_patch_lod0_end = 50.0;
+                    let clover_patch_lod1_end = 120.0;
+                    let groundcover_lod0_end = 40.0;
+                    let groundcover_lod1_end = 100.0;
+
+                    // Chamomile rendering
+                    if dist <= chamomile_lod0_end {
+                        for flower in &chunk.chamomile_lod0 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    } else if dist <= chamomile_lod1_end {
+                        for flower in &chunk.chamomile_lod1 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    }
+
+                    // Clover patch rendering
+                    if dist <= clover_patch_lod0_end {
+                        for flower in &chunk.clover_patch_lod0 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    } else if dist <= clover_patch_lod1_end {
+                        for flower in &chunk.clover_patch_lod1 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    }
+
+                    // Groundcover (daisy) rendering
+                    if dist <= groundcover_lod0_end {
+                        for flower in &chunk.groundcover_lod0 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    } else if dist <= groundcover_lod1_end {
+                        for flower in &chunk.groundcover_lod1 {
+                            flower.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            flower.render(&mut render_pass);
+                        }
+                    }
+
+                    // Spikegrass (beach sparse, salt marsh dense)
+                    let spikegrass_lod0_end = 50.0;
+                    let spikegrass_lod1_end = 120.0;
+
+                    if dist <= spikegrass_lod0_end {
+                        for sg in &chunk.spikegrass_lod0 {
+                            sg.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            sg.render(&mut render_pass);
+                        }
+                    } else if dist <= spikegrass_lod1_end {
+                        for sg in &chunk.spikegrass_lod1 {
+                            sg.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            sg.render(&mut render_pass);
+                        }
+                    }
+
+                    // Hedge (forest/beach edges)
+                    let hedge_lod0_end = 80.0;
+                    let hedge_lod1_end = 200.0;
+
+                    if dist <= hedge_lod0_end {
+                        for hg in &chunk.hedge_lod0 {
+                            hg.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            hg.render(&mut render_pass);
+                        }
+                    } else if dist <= hedge_lod1_end {
+                        for hg in &chunk.hedge_lod1 {
+                            hg.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
+                            hg.render(&mut render_pass);
+                        }
+                    }
+
                     // Ferns (forest understory - same max distance as LOD2 trees)
                     for fern in &chunk.ferns {
                         if dist <= lod_config.lod2_max_distance {
@@ -7132,10 +8707,13 @@ fn main() {
                             continue;
                         }
 
+                        // Chest model origin is at center - lift up by half scaled height
+                        // Scale 4.0 with base model height ~0.2 = scaled height ~0.8, half = 0.4
+                        let chest_pos = container.position + Vec3::new(0.0, 0.4, 0.0);
                         let transform = Mat4::from_scale_rotation_translation(
-                            Vec3::splat(5.0), // 5x scale for visibility
+                            Vec3::splat(4.0), // 4x scale for visible chest
                             Quat::from_rotation_y(container.rotation),
-                            container.position,
+                            chest_pos,
                         );
 
                         let is_lod1 = dist < lod_threshold;
@@ -7220,10 +8798,12 @@ fn main() {
                             // Single instance at origin (mesh is already in world space)
                             let transforms = vec![Mat4::IDENTITY];
                             pipeline.upload_instances(ctx.device(), &transforms);
-                            pipeline.update_camera_full(
+                            // Use no_wind variant - campfire stones should not sway
+                            pipeline.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
+                                LODFadeMode::Disabled, 0.0, 0.0
                             );
                             campfire_pipelines.push(pipeline);
                         }
@@ -7238,6 +8818,97 @@ fn main() {
 
                     // Render all campfire pipelines
                     for pipeline in &campfire_pipelines {
+                        pipeline.render(&mut render_pass);
+                    }
+
+                    // Render Dropped Weapons (actual 3D models, not orbs)
+                    {
+                        let shadow_map_weapons = shadow_map_mutex.safe_lock();
+
+                        // Group dropped items by weapon type
+                        let mut dagger_transforms: Vec<Mat4> = Vec::new();
+                        let mut flintlock_transforms: Vec<Mat4> = Vec::new();
+                        let mut hatchet_transforms: Vec<Mat4> = Vec::new();
+
+                        let game_time = state.time_of_day;
+                        for drop in state.dropped_items.all_drops() {
+                            // Only render weapon items as models
+                            if drop.item.item_type != economy::ItemType::Weapon {
+                                continue;
+                            }
+
+                            let bounce = drop.bounce_offset(game_time);
+                            // Position on ground with gentle bob animation
+                            let pos = drop.position + Vec3::new(0.0, bounce * 0.05, 0.0);
+                            let rotation = Quat::from_rotation_y(drop.rotation + game_time * 0.5); // Slow spin
+
+                            // Scale per weapon type (models have different base sizes)
+                            // Models are exported at ~10m scale, need ~0.01-0.03 for realistic world size
+                            let scale = match drop.item.template_id.as_str() {
+                                "dagger" => 0.015,        // Small blade (~15cm)
+                                "flintlock_pistol" => 0.03, // Medium pistol (~30cm)
+                                "hatchet" => 0.02,        // Small axe (~20cm)
+                                _ => 0.02,
+                            };
+
+                            let transform = Mat4::from_scale_rotation_translation(
+                                Vec3::splat(scale),
+                                rotation,
+                                pos,
+                            );
+
+                            match drop.item.template_id.as_str() {
+                                "dagger" => dagger_transforms.push(transform),
+                                "flintlock_pistol" => flintlock_transforms.push(transform),
+                                "hatchet" => hatchet_transforms.push(transform),
+                                _ => {}
+                            }
+                        }
+
+                        // Render daggers
+                        if !dagger_transforms.is_empty() {
+                            if let Some(mesh) = state.mesh_registry.get("dagger_lod0") {
+                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                p.set_mesh(mesh.clone());
+                                p.upload_instances(ctx.device(), &dagger_transforms);
+                                p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
+                                    LODFadeMode::Disabled, 0.0, 0.0);
+                                weapon_pipelines.push(p);
+                            }
+                        }
+
+                        // Render flintlocks
+                        if !flintlock_transforms.is_empty() {
+                            if let Some(mesh) = state.mesh_registry.get("flintlock_lod0") {
+                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                p.set_mesh(mesh.clone());
+                                p.upload_instances(ctx.device(), &flintlock_transforms);
+                                p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
+                                    LODFadeMode::Disabled, 0.0, 0.0);
+                                weapon_pipelines.push(p);
+                            }
+                        }
+
+                        // Render hatchets
+                        if !hatchet_transforms.is_empty() {
+                            if let Some(mesh) = state.mesh_registry.get("hatchet_lod0") {
+                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                p.set_mesh(mesh.clone());
+                                p.upload_instances(ctx.device(), &hatchet_transforms);
+                                p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
+                                    LODFadeMode::Disabled, 0.0, 0.0);
+                                weapon_pipelines.push(p);
+                            }
+                        }
+                    }
+
+                    for pipeline in &weapon_pipelines {
                         pipeline.render(&mut render_pass);
                     }
 
@@ -7270,6 +8941,9 @@ fn main() {
 
                 // Render Water
                 water_system_guard.draw(&mut render_pass);
+
+                // Render Pond/Lake Water (inland bodies)
+                pond_water_guard.draw(&mut render_pass);
 
                 // Render Rain Particles (when stormy)
                 rain_pipeline.update(

@@ -1,0 +1,65 @@
+{
+  "asset": "fir_0",
+  "description": "Fir tree - PERFORMANCE REEXPORT. Current LODs are 25-26MB each (no reduction).",
+
+  "current_problem": {
+    "lod0_size": "26MB",
+    "lod1_size": "26MB (should be ~3MB)",
+    "lod2_size": "26MB (should be ~500KB)",
+    "issue": "Embedded textures are full resolution in all LODs"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "2000-3000",
+      "texture_resolution": "1024x1024",
+      "distance": "0-100 units",
+      "target_filesize": "3-5MB"
+    },
+    "lod1": {
+      "triangles": "400-600",
+      "texture_resolution": "512x512",
+      "distance": "100-300 units",
+      "target_filesize": "800KB-1.5MB"
+    },
+    "lod2": {
+      "triangles": "80-120",
+      "texture_resolution": "256x256",
+      "distance": "300-800 units",
+      "target_filesize": "200-400KB"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 2500,
+    "lod1": 500,
+    "lod2": 100
+  },
+
+  "textures": {
+    "uv_required": true,
+    "material_setup": "Principled BSDF with Image Texture -> Base Color",
+    "embedding": "Textures embedded in GLB",
+    "critical": "DOWNSCALE TEXTURES PER LOD",
+    "lod0_texture": "1024x1024 max",
+    "lod1_texture": "512x512",
+    "lod2_texture": "256x256"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF (Draco NOT supported)",
+    "path": "assets/models/trees/",
+    "filenames": ["fir_0.glb", "fir_0_lod1.glb", "fir_0_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "TreePipeline",
+    "registry_keys": ["fir_0_lod0", "fir_0_lod1", "fir_0_lod2"],
+    "lod_distances": {
+      "lod0_max": 100.0,
+      "lod1_max": 300.0,
+      "lod2_max": 800.0
+    }
+  }
+}

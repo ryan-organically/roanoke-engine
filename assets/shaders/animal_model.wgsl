@@ -46,29 +46,32 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    // Vertex color (from model COLOR_0 or material baseColorFactor)
+    @location(3) vertex_color: vec4<f32>,
     // Skinning attributes (joint indices and weights)
-    @location(3) joint_indices: vec4<u32>,
-    @location(4) joint_weights: vec4<f32>,
+    @location(4) joint_indices: vec4<u32>,
+    @location(5) joint_weights: vec4<f32>,
 }
 
 struct InstanceInput {
-    @location(5) model_matrix_0: vec4<f32>,
-    @location(6) model_matrix_1: vec4<f32>,
-    @location(7) model_matrix_2: vec4<f32>,
-    @location(8) model_matrix_3: vec4<f32>,
-    @location(9) color: vec3<f32>,
-    @location(10) emissive: f32,
+    @location(6) model_matrix_0: vec4<f32>,
+    @location(7) model_matrix_1: vec4<f32>,
+    @location(8) model_matrix_2: vec4<f32>,
+    @location(9) model_matrix_3: vec4<f32>,
+    @location(10) instance_color: vec3<f32>,
+    @location(11) emissive: f32,
 }
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) world_position: vec3<f32>,
-    @location(2) color: vec3<f32>,
+    @location(2) instance_color: vec3<f32>,
     @location(3) emissive: f32,
     @location(4) uv: vec2<f32>,
     @location(5) view_distance: f32,
     @location(6) shadow_pos: vec3<f32>,
+    @location(7) vertex_color: vec4<f32>,
 }
 
 // Apply skeletal skinning to position and normal
@@ -176,11 +179,12 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.clip_position = camera.view_proj * world_pos;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    out.color = instance.color;
+    out.instance_color = instance.instance_color;
     out.emissive = instance.emissive;
     out.uv = vertex.uv;
     out.view_distance = view_distance;
     out.shadow_pos = shadow_pos;
+    out.vertex_color = vertex.vertex_color;
 
     return out;
 }
@@ -253,8 +257,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Add subtle fur texture variation
     let fur_noise = hash(in.uv * 50.0) * 0.04;
 
-    // Base color from texture, tinted by instance color
-    var base_color = tex_color.rgb * in.color;
+    // Base color: vertex color * texture * instance tint
+    // vertex_color: from model's COLOR_0 attribute or material baseColorFactor (deer browns)
+    // tex_color: from texture (white 1x1 for untextured models)
+    // instance_color: per-instance variation/tint
+    var base_color = in.vertex_color.rgb * tex_color.rgb * in.instance_color;
 
     // Wet surfaces are darker
     if (camera.rain_wetness > 0.0) {
@@ -280,5 +287,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let fog_amount = 1.0 - exp(-fog_factor * camera.fog_density);
     final_color = mix(final_color, camera.fog_color, fog_amount);
 
-    return vec4<f32>(final_color, tex_color.a);
+    // Use minimum of texture alpha and vertex alpha for transparency
+    let final_alpha = min(tex_color.a, in.vertex_color.a);
+    return vec4<f32>(final_color, final_alpha);
 }

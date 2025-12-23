@@ -1,0 +1,63 @@
+{
+  "asset": "birch_0",
+  "description": "Birch tree - PERFORMANCE REEXPORT. LODs have some reduction but still 8-12MB each.",
+
+  "current_problem": {
+    "lod0_size": "12MB",
+    "lod1_size": "9MB (should be ~2MB)",
+    "lod2_size": "8MB (should be ~400KB)",
+    "issue": "Textures not downscaled per LOD"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "1500-2500",
+      "texture_resolution": "1024x1024",
+      "distance": "0-100 units",
+      "target_filesize": "2-4MB"
+    },
+    "lod1": {
+      "triangles": "300-500",
+      "texture_resolution": "512x512",
+      "distance": "100-300 units",
+      "target_filesize": "500KB-1MB"
+    },
+    "lod2": {
+      "triangles": "60-100",
+      "texture_resolution": "256x256",
+      "distance": "300-800 units",
+      "target_filesize": "150-300KB"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 2000,
+    "lod1": 400,
+    "lod2": 80
+  },
+
+  "textures": {
+    "uv_required": true,
+    "critical": "DOWNSCALE TEXTURES PER LOD",
+    "lod0_texture": "1024x1024 max",
+    "lod1_texture": "512x512",
+    "lod2_texture": "256x256"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "assets/models/trees/",
+    "filenames": ["birch_0.glb", "birch_0_lod1.glb", "birch_0_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "TreePipeline",
+    "registry_keys": ["birch_0_lod0", "birch_0_lod1", "birch_0_lod2"],
+    "lod_distances": {
+      "lod0_max": 100.0,
+      "lod1_max": 300.0,
+      "lod2_max": 800.0
+    }
+  }
+}

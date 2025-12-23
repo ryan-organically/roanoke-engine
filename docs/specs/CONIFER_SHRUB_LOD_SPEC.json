@@ -1,0 +1,65 @@
+{
+  "asset": "conifer_shrub_0",
+  "description": "Conifer shrub - CRITICAL PERFORMANCE ISSUE. 26MB per LOD, instanced 100-200x per chunk.",
+
+  "current_problem": {
+    "lod0_size": "26MB",
+    "lod1_size": "26MB (should be ~1MB)",
+    "lod2_size": "26MB (should be ~200KB)",
+    "instances_per_chunk": "100-200",
+    "issue": "26MB shrub x 200 instances = catastrophic memory usage"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "600-1000",
+      "texture_resolution": "512x512",
+      "distance": "0-50 units",
+      "target_filesize": "800KB-1.5MB",
+      "notes": "Shrubs don't need 1024 textures - they're small"
+    },
+    "lod1": {
+      "triangles": "150-250",
+      "texture_resolution": "256x256",
+      "distance": "50-150 units",
+      "target_filesize": "200-400KB"
+    },
+    "lod2": {
+      "triangles": "30-50",
+      "texture_resolution": "128x128",
+      "distance": "150-400 units",
+      "target_filesize": "50-100KB"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 800,
+    "lod1": 200,
+    "lod2": 40
+  },
+
+  "textures": {
+    "uv_required": true,
+    "critical": "SHRUBS DO NOT NEED LARGE TEXTURES - max 512x512 for LOD0",
+    "lod0_texture": "512x512",
+    "lod1_texture": "256x256",
+    "lod2_texture": "128x128"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "assets/models/shrubs/",
+    "filenames": ["conifer_shrub_0.glb", "conifer_shrub_0_lod1.glb", "conifer_shrub_0_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "TreePipeline",
+    "registry_keys": ["conifer_shrub_0_lod0", "conifer_shrub_0_lod1", "conifer_shrub_0_lod2"],
+    "lod_distances": {
+      "lod0_max": 50.0,
+      "lod1_max": 150.0,
+      "lod2_max": 400.0
+    }
+  }
+}

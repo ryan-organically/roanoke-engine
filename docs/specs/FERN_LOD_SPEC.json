@@ -1,0 +1,63 @@
+{
+  "asset": "fern_02",
+  "description": "Fern - 3.5MB, needs LODs for forest floor instancing.",
+
+  "current_problem": {
+    "lod0_size": "3.5MB",
+    "lod1_size": "MISSING",
+    "lod2_size": "MISSING",
+    "note": "fern_01.glb is 132 bytes (placeholder/broken)"
+  },
+
+  "lods": {
+    "lod0": {
+      "triangles": "200-400",
+      "texture_resolution": "256x256",
+      "distance": "0-25 units",
+      "target_filesize": "100-200KB"
+    },
+    "lod1": {
+      "triangles": "50-100",
+      "texture_resolution": "128x128",
+      "distance": "25-60 units",
+      "target_filesize": "30-60KB"
+    },
+    "lod2": {
+      "triangles": "12-24",
+      "texture_resolution": "64x64",
+      "distance": "60-150 units",
+      "target_filesize": "10-25KB"
+    }
+  },
+
+  "decimation_targets": {
+    "lod0": 300,
+    "lod1": 75,
+    "lod2": 18
+  },
+
+  "textures": {
+    "uv_required": true,
+    "lod0_texture": "256x256",
+    "lod1_texture": "128x128",
+    "lod2_texture": "64x64",
+    "alpha_cutout": "Use alpha for frond silhouette"
+  },
+
+  "export": {
+    "format": "GLB",
+    "compression": "OFF",
+    "path": "assets/models/shrubs/",
+    "filenames": ["fern_02.glb", "fern_02_lod1.glb", "fern_02_lod2.glb"]
+  },
+
+  "pipeline": {
+    "renderer": "TreePipeline",
+    "registry_keys": ["fern_02_lod0", "fern_02_lod1", "fern_02_lod2"],
+    "lod_distances": {
+      "lod0_max": 25.0,
+      "lod1_max": 60.0,
+      "lod2_max": 150.0
+    }
+  }
+}

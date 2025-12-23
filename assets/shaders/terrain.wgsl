@@ -215,18 +215,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let sand_noise = fract(sin(dot(input.world_pos.xz * 0.3, vec2<f32>(12.9898, 78.233))) * 43758.5453);
         let sand_noise2 = fract(sin(dot(input.world_pos.xz * 0.1, vec2<f32>(39.346, 11.135))) * 43758.5453);
 
-        // Beach sand gradient: wet near water, dry higher up
-        let beach_dryness = clamp((height - 0.5) / 2.0, 0.0, 1.0);
+        // Beach sand gradient: wide smooth transition from wet to dry
+        let beach_t = clamp((height - 0.5) / 2.0, 0.0, 1.0);
+        // Smoothstep for gradual S-curve blend (no harsh divide)
+        let beach_dryness = beach_t * beach_t * (3.0 - 2.0 * beach_t);
 
-        // Wet sand (darker, more saturated)
-        let wet_sand = vec3<f32>(0.55, 0.45, 0.32);
-        // Dry sand (lighter, more yellow)
-        let dry_sand = vec3<f32>(0.82, 0.72, 0.55);
+        // Wet sand (dark, saturated)
+        let wet_sand = vec3<f32>(0.35, 0.28, 0.20);
+        // Dry sand (muted tan, not blinding)
+        let dry_sand = vec3<f32>(0.50, 0.42, 0.32);
         // Mix based on height
         let base_sand = mix(wet_sand, dry_sand, beach_dryness);
 
-        // Add variation
-        let sand_variation = mix(base_sand * 0.9, base_sand * 1.1, sand_noise * 0.6 + sand_noise2 * 0.4);
+        // Add variation - stronger noise to break up gradient banding
+        let combined_noise = sand_noise * 0.5 + sand_noise2 * 0.5;
+        let sand_variation = mix(base_sand * 0.85, base_sand * 1.15, combined_noise);
         surface_color = sand_variation;
 
         // Wet sand zone: height 0.5 - 1.2 (close to waves)
@@ -269,8 +272,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Softer specular than water (wet sand, not mirror)
         let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 32.0);
 
-        // Subtle but visible shine, scaled by wetness
-        let wet_specular = 0.6 * spec * sun_color * shadow * wet_sand_factor * day_factor;
+        // Reduced shine to prevent beach glare at midday
+        let wet_specular = 0.25 * spec * sun_color * shadow * wet_sand_factor * day_factor;
         final_color += wet_specular;
     }
 
@@ -307,19 +310,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             let light_dist = length(light_to_surface);
             let light_dir = light_to_surface / max(light_dist, 0.001);
 
-            // Campfire light properties - softer falloff than muzzle flash
-            let campfire_radius = 12.0;
-            let attenuation = 1.0 / (1.0 + light_dist * 0.2 + light_dist * light_dist * 0.02);
+            // Campfire light properties - larger radius for dramatic fire effect
+            let campfire_radius = 25.0;
+            let attenuation = 1.0 / (1.0 + light_dist * 0.15 + light_dist * light_dist * 0.008);
             let range_falloff = max(0.0, 1.0 - light_dist / campfire_radius);
 
             // Diffuse lighting from campfire
             let n_dot_l = max(dot(normal, -light_dir), 0.0);
 
-            // Warm orange campfire color (slightly more saturated than muzzle flash)
-            let campfire_color = vec3<f32>(1.0, 0.5, 0.15);
+            // Warm orange campfire color (rich fire glow)
+            let campfire_color = vec3<f32>(1.0, 0.55, 0.18);
 
-            // Apply campfire lighting
-            let contribution = campfire_color * n_dot_l * attenuation * range_falloff * light_intensity * 5.0;
+            // Apply campfire lighting - much stronger for dramatic fire effect
+            let contribution = campfire_color * n_dot_l * attenuation * range_falloff * light_intensity * 18.0;
             final_color += contribution;
         }
     }

@@ -70,6 +70,7 @@ pub mod caves;
 pub mod rivers;
 pub mod terrain;
 pub mod biome_spawner;
+pub mod pond_water;
 
 // Existing systems
 pub mod vegetation;
@@ -87,6 +88,12 @@ pub use seed::WorldSeed;
 // Legacy terrain (for backward compatibility)
 pub use mesh_gen::generate_terrain_chunk;
 pub use mesh_gen::get_height_at;
+pub use mesh_gen::get_water_bodies;
+pub use mesh_gen::calculate_wetland_zone;
+
+// Water body mesh generation
+pub use pond_water::{WaterBody, WaterBodyType, WaterMeshData, WaterParams};
+pub use pond_water::{generate_pond_mesh, generate_all_water_meshes, get_water_params};
 pub use mesh_gen::distance_to_shoreline;
 pub use mesh_gen::get_biome_t;
 pub use mesh_gen::calculate_river_depth;

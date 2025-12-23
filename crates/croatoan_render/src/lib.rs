@@ -23,6 +23,7 @@ pub mod animal_model_pipeline;
 pub mod foliage_pipeline;
 pub mod rain_pipeline;
 pub mod ember_pipeline;
+pub mod icon_render_pipeline;
 
 pub use terrain_pipeline::{TerrainPipeline, TerrainTextures, MAX_CAMPFIRE_LIGHTS};
 pub use grass_pipeline::GrassPipeline;
@@ -43,6 +44,7 @@ pub use animal_orb_pipeline::{AnimalOrbPipeline, OrbInstance};
 pub use animal_model_pipeline::{AnimalModelPipeline, AnimalVertex, AnimalInstance, SkeletonGpu, AnimationGpu, JointKeyframes};
 pub use rain_pipeline::RainPipeline;
 pub use ember_pipeline::EmberPipeline;
+pub use icon_render_pipeline::{IconRenderPipeline, IconVertex, RenderedIcon, ICON_SIZE};
 pub use pipeline_validation::{PipelineError, PipelineResult, MeshValidator};
 pub use security::{SecurityError, SecurityResult, SecurityStatus, get_security_status};
 
