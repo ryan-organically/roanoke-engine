@@ -187,6 +187,11 @@ pub fn generate_ferns_for_chunk(
 
             let (height, _) = get_height_at(world_x, world_z, seed);
 
+            // River ferns still need minimum elevation (above beach/water)
+            if height < FOREST_HEIGHT_MIN || height > FOREST_HEIGHT_MAX {
+                continue;
+            }
+
             // River zone: use actual river detection
             // calculate_river_depth returns 0.0-1.0 where >0 means in/near river
             let river_depth = calculate_river_depth(world_x, world_z, seed);
@@ -236,13 +241,6 @@ pub fn generate_ferns_for_chunk(
                 model_index: model_idx,
             });
         }
-    }
-
-    if !result.ferns.is_empty() {
-        println!(
-            "[FERN] Chunk ({}, {}): {} ferns (forest + river)",
-            offset_x, offset_z, result.ferns.len()
-        );
     }
 
     result

@@ -48,6 +48,7 @@ pub struct RenderedIcon {
 }
 
 /// Pipeline for rendering 3D icons
+#[allow(dead_code)] // Texture/depth resources stored for render target management
 pub struct IconRenderPipeline {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
@@ -501,7 +502,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let model = self.models.get(template_id)?;
 
         // Setup view-projection for icon (orthographic, looking at model)
-        let aspect = 1.0; // Square
+        let _aspect = 1.0; // Square (reserved for non-square icons)
         let view = Mat4::look_at_rh(
             Vec3::new(0.0, 0.0, 2.0),  // Eye position
             Vec3::ZERO,                  // Look at center

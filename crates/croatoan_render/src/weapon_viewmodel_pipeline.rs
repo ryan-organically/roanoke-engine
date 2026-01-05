@@ -42,6 +42,7 @@ pub struct WeaponMeshGpu {
 }
 
 /// Pipeline for rendering first-person weapon viewmodels
+#[allow(dead_code)] // Default texture fields stored for untextured model fallback
 pub struct WeaponViewModelPipeline {
     pipeline: RenderPipeline,
     uniform_buffer: Buffer,

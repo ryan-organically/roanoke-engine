@@ -297,8 +297,12 @@ mod tests {
         assert_eq!(safe_range_area(2), Some(25));  // (2*2+1)^2 = 25
         assert_eq!(safe_range_area(5), Some(121)); // (5*2+1)^2 = 121
 
-        // Overflow protection
+        // Overflow protection - i32::MAX * 2 overflows i32
         assert_eq!(safe_range_area(i32::MAX), None);
+        // On 64-bit: 1B works fine; on 32-bit: would overflow usize multiplication
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(safe_range_area(1_000_000_000), Some(4_000_000_004_000_000_001));
+        #[cfg(target_pointer_width = "32")]
         assert_eq!(safe_range_area(1_000_000_000), None);
     }
 

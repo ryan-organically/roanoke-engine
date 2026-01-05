@@ -113,6 +113,7 @@ pub struct TreeMesh {
     pub texture_bind_group: Option<Arc<BindGroup>>, // Added for textures
 }
 
+#[allow(dead_code)] // Fields stored for future extensibility
 pub struct TreePipeline {
     pipeline: RenderPipeline,
     mesh: Option<TreeMesh>,

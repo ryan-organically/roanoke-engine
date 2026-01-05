@@ -177,6 +177,7 @@ pub struct AnimalMeshGpu {
 }
 
 /// Pipeline for rendering animal models
+#[allow(dead_code)] // Default buffers/textures stored for non-animated/untextured fallbacks
 pub struct AnimalModelPipeline {
     pipeline: RenderPipeline,
     camera_buffer: Buffer,

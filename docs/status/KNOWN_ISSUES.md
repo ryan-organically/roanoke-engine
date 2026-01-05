@@ -2,28 +2,19 @@
 
 ## Flora/Medicinal System Enum Mismatch
 
-**Status:** Build-blocking
+**Status:** ✅ Resolved (2026-01-05)
 **Location:** `roanoke_game/src/flora/medicinal.rs`
 
 ### Description
-The `PlantEffect` enum in `medicinal.rs` has mismatched variants. Code references variants that don't exist in the enum definition:
+~~The `PlantEffect` enum in `medicinal.rs` has mismatched variants.~~
 
-**Missing variants in enum (line 11):**
-- `Antibacterial`
-- `Antiseptic`
-- `AntiNausea`
-- `Antihistamine`
-- `FeverReducer` (should be `FeverReduction`)
-- `BloodClotting`
-
-**Affected code:** Lines 588-600+ in `medicinal.rs`
-
-### Fix
-Either:
-1. Add missing variants to `PlantEffect` enum
-2. Or update the match arms to use existing variants
+**Resolution:** The enum and all usages are now consistent. The codebase compiles cleanly and all tests pass. The originally reported missing variants were either fixed or never existed in the actual codebase.
 
 ### Related Files
 - `roanoke_game/src/flora/mod.rs` - FloraSpecies methods
 - `roanoke_game/src/flora/medicinal.rs` - PlantEffect enum and usage
 - `roanoke_game/src/encyclopedia/mod.rs` - PlantCategory usage
+
+---
+
+*No current build-blocking issues.*

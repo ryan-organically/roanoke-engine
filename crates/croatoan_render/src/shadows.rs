@@ -1,5 +1,4 @@
 use glam::Mat4;
-use wgpu::util::DeviceExt;
 
 pub struct ShadowMap {
     pub texture: wgpu::Texture,

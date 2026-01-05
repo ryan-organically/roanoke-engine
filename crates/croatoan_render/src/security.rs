@@ -258,7 +258,8 @@ const SUSPICIOUS_PATTERNS: &[(&str, &str)] = &[
     // Add more patterns as needed
 ];
 
-/// Maximum loop iterations allowed in shader
+/// Maximum loop iterations allowed in shader (reserved for future validation)
+#[allow(dead_code)]
 const MAX_SHADER_LOOP_ITERATIONS: usize = 10000;
 
 /// Validate shader source for security issues
