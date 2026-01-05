@@ -109,14 +109,14 @@ impl WaterSystem {
         let ocean_center_x = shoreline_x + (patch_size / 2.0); // Center mesh so edge is at shoreline
         let ocean_center_z = 0.0;
 
-        // Uniforms - dramatic visible waves
+        // Uniforms - visible waves that blend into base layer
         let uniforms = WaterUniforms {
             time: 0.0,
             delta_time: 0.0,
             wind_direction: [-1.0, 0.0], // West (towards shore)
-            wind_speed: 8.0,
-            amplitude: 1.5,   // Large dramatic waves
-            choppiness: 1.2,  // Strong horizontal displacement
+            wind_speed: 6.0,
+            amplitude: 0.8,   // Lower waves that blend smoothly
+            choppiness: 0.6,  // Gentle horizontal displacement
             size: patch_size,
             world_offset_x: ocean_center_x,
             world_offset_z: ocean_center_z,

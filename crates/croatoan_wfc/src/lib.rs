@@ -67,6 +67,7 @@ pub mod mesh_gen;
 // New comprehensive systems
 pub mod biome;
 pub mod caves;
+pub mod cave_mesh;
 pub mod rivers;
 pub mod terrain;
 pub mod biome_spawner;
@@ -82,7 +83,7 @@ pub mod buildings;
 pub mod villages;
 
 // Re-export commonly used items
-pub use noise_util::{fbm, ridged, turbulence, hash};
+pub use noise_util::{fbm, ridged, turbulence, hash, fbm_3d, turbulence_3d, perlin_3d, noise_gradient_3d};
 pub use seed::WorldSeed;
 
 // Legacy terrain (for backward compatibility)
@@ -142,6 +143,28 @@ pub use caves::{
     ArtifactInstance,
     generate_bones_for_section,
     generate_artifacts_for_section,
+    // Perlin worm cave system
+    WormPoint,
+    WormTunnel,
+    WormConfig,
+    generate_perlin_worm,
+    worm_to_cave_system,
+    sample_worm_sdf,
+    get_worm_bounds,
+    generate_worm_cave_items,
+    // Bioluminescent orbs
+    BioOrbType,
+    BioOrb,
+    generate_bio_orbs,
+};
+
+// Cave mesh generation (marching cubes)
+pub use cave_mesh::{
+    CaveMeshData,
+    CaveMeshConfig,
+    generate_cave_mesh,
+    generate_cave_mesh_for_chunk,
+    calculate_smooth_normals,
 };
 
 // River system

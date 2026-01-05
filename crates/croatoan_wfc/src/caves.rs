@@ -9,7 +9,7 @@
 //!
 //! All generation is seed-based using 3D Perlin noise.
 
-use crate::noise_util::{self, fbm, turbulence};
+use crate::noise_util::{self, fbm, turbulence, fbm_3d, noise_gradient_3d};
 use glam::{Vec2, Vec3};
 
 // ============================================================================
@@ -107,6 +107,91 @@ pub struct CaveFeatureInstance {
     pub scale: f32,
     pub section_index: u32,
     pub rarity: ArtifactRarity,
+}
+
+// ============================================================================
+// PERLIN WORM STRUCTURES
+// ============================================================================
+
+/// A point along a Perlin worm tunnel path
+#[derive(Debug, Clone)]
+pub struct WormPoint {
+    pub position: Vec3,
+    pub radius: f32,              // Tunnel radius at this point
+    pub tangent: Vec3,            // Direction of travel (normalized)
+    pub humidity: f32,            // 0.0-1.0, affects orb spawning
+    pub depth_from_surface: f32,  // Distance below terrain surface
+}
+
+/// A complete Perlin worm tunnel (can have branches)
+#[derive(Debug, Clone)]
+pub struct WormTunnel {
+    pub seed: u32,
+    pub entrance: Vec3,
+    pub points: Vec<WormPoint>,
+    pub branches: Vec<WormTunnel>,
+    pub total_length: f32,
+    pub max_depth: f32,
+}
+
+/// Configuration for Perlin worm generation
+#[derive(Debug, Clone)]
+pub struct WormConfig {
+    pub seed: u32,
+    pub step_size: f32,           // Distance between sample points (2.0)
+    pub min_radius: f32,          // Minimum tunnel radius (2.0)
+    pub max_radius: f32,          // Maximum tunnel radius (12.0)
+    pub radius_frequency: f32,    // Noise frequency for radius variation (0.02)
+    pub direction_frequency: f32, // Noise frequency for direction changes (0.015)
+    pub branch_probability: f32,  // Chance per step to branch (0.02)
+    pub min_tunnel_length: f32,   // Minimum worm length before termination (50.0)
+    pub max_tunnel_length: f32,   // Maximum worm length (400.0)
+    pub descent_bias: f32,        // Tendency to go downward (0.15)
+    pub humidity_frequency: f32,  // Noise freq for humidity zones (0.05)
+}
+
+impl Default for WormConfig {
+    fn default() -> Self {
+        Self {
+            seed: 12345,
+            step_size: 2.0,
+            min_radius: 2.0,
+            max_radius: 12.0,
+            radius_frequency: 0.02,
+            direction_frequency: 0.015,
+            branch_probability: 0.15, // Increased for testing (was 0.02)
+            min_tunnel_length: 50.0,
+            max_tunnel_length: 400.0,
+            descent_bias: 0.15,
+            humidity_frequency: 0.05,
+        }
+    }
+}
+
+// ============================================================================
+// BIOLUMINESCENT ORB STRUCTURES
+// ============================================================================
+
+/// Type of bioluminescent organism
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BioOrbType {
+    Fungi,       // Mushroom-like clusters (blue-green)
+    Moss,        // Spreading patches (cyan)
+    Crystal,     // Crystalline formations (purple)
+    Pool,        // Glowing water puddle (warm yellow)
+}
+
+/// A bioluminescent orb/fungi cluster in a cave
+#[derive(Debug, Clone)]
+pub struct BioOrb {
+    pub position: Vec3,
+    pub normal: Vec3,         // Surface normal (for wall/ceiling attachment)
+    pub color: [f32; 3],      // RGB glow color
+    pub intensity: f32,       // Base intensity (0.5-2.0)
+    pub pulse_phase: f32,     // Random phase for pulsing (0-2*PI)
+    pub pulse_speed: f32,     // Pulse frequency (0.3-0.8 Hz)
+    pub cluster_size: f32,    // Scale factor (0.5-2.0)
+    pub orb_type: BioOrbType,
 }
 
 /// Configuration for cave generation
@@ -642,6 +727,676 @@ impl CaveGenerator {
         let xz = turbulence(Vec2::new(pos.x, pos.z), octaves, lacunarity, persistence, seed + 1);
         let yz = turbulence(Vec2::new(pos.y, pos.z), octaves, lacunarity, persistence, seed + 2);
         (xy + xz + yz) / 3.0
+    }
+}
+
+// ============================================================================
+// PERLIN WORM GENERATION
+// ============================================================================
+
+/// Generate a Perlin worm tunnel using 3D noise gradient following
+///
+/// The worm follows the gradient of 3D Perlin noise, creating natural
+/// winding tunnels that feel organic and cave-like.
+pub fn generate_perlin_worm<F>(
+    entrance: Vec3,
+    entrance_direction: Vec3,
+    config: &WormConfig,
+    terrain_height_fn: &F,
+) -> WormTunnel
+where
+    F: Fn(f32, f32) -> f32,
+{
+    let mut points = Vec::new();
+    let mut branches = Vec::new();
+    let mut current_pos = entrance;
+    let mut current_dir = entrance_direction.normalize();
+    let mut total_length = 0.0;
+    let mut max_depth: f32 = 0.0;
+
+    // Seed offsets for different noise channels
+    let dir_seed = config.seed;
+    let radius_seed = config.seed.wrapping_add(3000);
+    let humidity_seed = config.seed.wrapping_add(4000);
+    let branch_seed = config.seed.wrapping_add(5000);
+
+    let max_steps = (config.max_tunnel_length / config.step_size) as usize + 1;
+
+    for step in 0..max_steps {
+        let surface_height = terrain_height_fn(current_pos.x, current_pos.z);
+        let depth = (surface_height - current_pos.y).max(0.0);
+
+        // Sample 3D noise for direction influence
+        let noise_scale = config.direction_frequency;
+        let sample_pos = current_pos * noise_scale;
+
+        // Get noise gradient to guide worm direction
+        let gradient = noise_gradient_3d(sample_pos, dir_seed);
+
+        // Blend current direction with noise gradient
+        let noise_influence = 0.4;
+        let new_dir = (current_dir * (1.0 - noise_influence)
+            + gradient * noise_influence
+            + Vec3::new(0.0, -config.descent_bias, 0.0))
+            .normalize();
+
+        // Clamp vertical component to prevent going back up too steeply
+        let clamped_dir = Vec3::new(
+            new_dir.x,
+            new_dir.y.min(0.1), // Mostly downward or horizontal
+            new_dir.z,
+        )
+        .normalize();
+
+        current_dir = clamped_dir;
+
+        // Calculate radius at this point using separate noise channel
+        let radius_sample = fbm_3d(
+            current_pos * config.radius_frequency,
+            2,
+            2.0,
+            0.5,
+            radius_seed,
+        );
+        let radius = lerp(
+            config.min_radius,
+            config.max_radius,
+            (radius_sample + 1.0) * 0.5,
+        );
+
+        // Calculate humidity for orb placement
+        let humidity_sample = fbm_3d(
+            Vec3::new(
+                current_pos.x * config.humidity_frequency,
+                current_pos.y * config.humidity_frequency * 0.5,
+                current_pos.z * config.humidity_frequency,
+            ),
+            2,
+            2.0,
+            0.5,
+            humidity_seed,
+        );
+        let humidity = ((humidity_sample + 1.0) * 0.5).clamp(0.0, 1.0);
+
+        // Add point to worm
+        points.push(WormPoint {
+            position: current_pos,
+            radius,
+            tangent: current_dir,
+            humidity,
+            depth_from_surface: depth,
+        });
+
+        max_depth = max_depth.max(depth);
+
+        // Check for branching (only after initial tunnel length)
+        if total_length > config.min_tunnel_length * 0.3 {
+            let branch_roll = noise_util::hash(branch_seed.wrapping_add(step as u32));
+            if branch_roll < config.branch_probability {
+                // Create branch with perpendicular-ish direction
+                let up = Vec3::Y;
+                let right = current_dir.cross(up).normalize();
+
+                // Alternate branch direction
+                let branch_angle = if step % 2 == 0 { 0.7 } else { -0.7 };
+                let branch_dir = (current_dir + right * branch_angle).normalize();
+
+                let branch_config = WormConfig {
+                    seed: config.seed.wrapping_add(step as u32 * 1000),
+                    max_tunnel_length: config.max_tunnel_length * 0.4,
+                    branch_probability: config.branch_probability * 0.3, // Reduce branching in branches
+                    ..config.clone()
+                };
+
+                let branch = generate_perlin_worm(
+                    current_pos,
+                    branch_dir,
+                    &branch_config,
+                    terrain_height_fn,
+                );
+                branches.push(branch);
+            }
+        }
+
+        // Step forward
+        current_pos += current_dir * config.step_size;
+        total_length += config.step_size;
+
+        // Termination conditions
+        if total_length >= config.max_tunnel_length {
+            break;
+        }
+        if depth > config.max_tunnel_length * 0.5 {
+            break; // Too deep
+        }
+        if radius < config.min_radius * 0.5 {
+            break; // Tunnel pinched off
+        }
+        // Don't go above surface
+        if current_pos.y > surface_height - 2.0 {
+            current_dir.y = -0.3; // Force downward
+        }
+    }
+
+    WormTunnel {
+        seed: config.seed,
+        entrance,
+        points,
+        branches,
+        total_length,
+        max_depth,
+    }
+}
+
+/// Convert a WormTunnel to a CaveSystem for compatibility with existing code
+pub fn worm_to_cave_system(worm: &WormTunnel, config: &CaveGenConfig) -> CaveSystem {
+    let mut sections = Vec::new();
+    let mut features = Vec::new();
+
+    // Create entrance section
+    if let Some(first) = worm.points.first() {
+        sections.push(CaveSection {
+            section_type: CaveSectionType::Entrance,
+            center: first.position,
+            radius: first.radius,
+            length: 0.0,
+            direction: first.tangent,
+            connections: if worm.points.len() > 1 { vec![1] } else { vec![] },
+            has_water: first.humidity > 0.7,
+            light_level: 1.0,
+        });
+    }
+
+    // Convert worm points to sections (sample every few points)
+    let sample_interval = 5.max(worm.points.len() / 20);
+    for (i, point) in worm.points.iter().enumerate().skip(1) {
+        if i % sample_interval != 0 && i != worm.points.len() - 1 {
+            continue;
+        }
+
+        // Determine section type based on radius and depth
+        let section_type = if point.radius > config.passage_width * 2.5 {
+            if point.humidity > 0.8 && point.depth_from_surface > 20.0 {
+                CaveSectionType::SacredChamber
+            } else {
+                CaveSectionType::Chamber
+            }
+        } else if point.depth_from_surface > worm.max_depth * 0.8 {
+            CaveSectionType::DeadEnd
+        } else {
+            CaveSectionType::Passage
+        };
+
+        let light_level = (1.0 - point.depth_from_surface / 30.0).max(0.0);
+
+        sections.push(CaveSection {
+            section_type,
+            center: point.position,
+            radius: point.radius,
+            length: config.passage_width,
+            direction: point.tangent,
+            connections: vec![],
+            has_water: point.humidity > 0.7,
+            light_level,
+        });
+
+        // Generate features for high-humidity areas
+        if point.humidity > 0.6 && point.depth_from_surface > 10.0 {
+            features.push(CaveFeatureInstance {
+                feature: CaveFeature::GlowingMoss,
+                position: point.position,
+                rotation: 0.0,
+                scale: 1.0 + point.humidity * 0.5,
+                section_index: sections.len() as u32 - 1,
+                rarity: ArtifactRarity::Common,
+            });
+        }
+    }
+
+    // Count chambers
+    let num_chambers = sections
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.section_type,
+                CaveSectionType::Chamber | CaveSectionType::SacredChamber
+            )
+        })
+        .count() as u32;
+
+    CaveSystem {
+        entrance_pos: worm.entrance,
+        seed: worm.seed,
+        total_length: worm.total_length,
+        max_depth: worm.max_depth,
+        num_chambers,
+        sections,
+        features,
+    }
+}
+
+// ============================================================================
+// BIOLUMINESCENT ORB GENERATION
+// ============================================================================
+
+/// Generate bioluminescent orbs for a Perlin worm tunnel
+///
+/// Orbs are placed on cave walls and ceilings in humid, deep areas
+pub fn generate_bio_orbs(worm: &WormTunnel, density: f32) -> Vec<BioOrb> {
+    let mut orbs = Vec::new();
+    let mut rng_seed = worm.seed.wrapping_add(10000);
+
+    generate_orbs_recursive(worm, density, &mut orbs, &mut rng_seed);
+
+    orbs
+}
+
+fn generate_orbs_recursive(worm: &WormTunnel, density: f32, orbs: &mut Vec<BioOrb>, rng_seed: &mut u32) {
+    for (_i, point) in worm.points.iter().enumerate() {
+        // Only spawn in humid and deep areas
+        if point.humidity < 0.4 || point.depth_from_surface < 8.0 {
+            continue;
+        }
+
+        // Spawn probability based on humidity and depth
+        let spawn_chance = point.humidity * 0.6 + (point.depth_from_surface / 50.0).min(0.4);
+
+        let roll = noise_util::hash(*rng_seed);
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        if roll > spawn_chance * density {
+            continue;
+        }
+
+        // Position on wall/ceiling (random angle around tunnel axis)
+        let angle = noise_util::hash(*rng_seed) * std::f32::consts::TAU;
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        // Prefer ceiling and upper walls (adjust angle to favor top)
+        let adjusted_angle = angle * 0.6 + std::f32::consts::PI * 0.2;
+
+        // Calculate position on tunnel wall
+        let tangent = point.tangent;
+        let up = Vec3::Y;
+        let right = tangent.cross(up);
+        let right = if right.length() > 0.001 {
+            right.normalize()
+        } else {
+            Vec3::X
+        };
+        let local_up = right.cross(tangent).normalize();
+
+        let offset =
+            (right * adjusted_angle.cos() + local_up * adjusted_angle.sin()) * (point.radius - 0.3);
+        let position = point.position + offset;
+        let normal = -offset.normalize(); // Points into tunnel
+
+        // Select orb type and color
+        let type_roll = noise_util::hash(*rng_seed);
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        let (orb_type, color) = if type_roll < 0.4 {
+            // Blue-green fungi (most common)
+            (BioOrbType::Fungi, [0.2, 0.8, 0.6])
+        } else if type_roll < 0.7 {
+            // Cyan moss
+            (BioOrbType::Moss, [0.3, 0.9, 0.9])
+        } else if type_roll < 0.9 {
+            // Purple crystal
+            (BioOrbType::Crystal, [0.6, 0.3, 0.9])
+        } else {
+            // Warm yellow pool (only on floor-ish areas)
+            if adjusted_angle > std::f32::consts::PI * 0.8 {
+                (BioOrbType::Pool, [0.9, 0.8, 0.3])
+            } else {
+                (BioOrbType::Moss, [0.3, 0.9, 0.9])
+            }
+        };
+
+        // Deeper = more intense (darker surroundings need brighter orbs)
+        let depth_factor = (point.depth_from_surface / 40.0).min(1.0);
+        let intensity = 0.5 + depth_factor * 1.0 + noise_util::hash(*rng_seed) * 0.5;
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        let pulse_phase = noise_util::hash(*rng_seed) * std::f32::consts::TAU;
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        let pulse_speed = 0.3 + noise_util::hash(*rng_seed) * 0.5;
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        let cluster_size = 0.5 + noise_util::hash(*rng_seed) * 1.5;
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        orbs.push(BioOrb {
+            position,
+            normal,
+            color,
+            intensity,
+            pulse_phase,
+            pulse_speed,
+            cluster_size,
+            orb_type,
+        });
+
+        // Sometimes spawn a cluster of smaller orbs nearby
+        if noise_util::hash(*rng_seed) < 0.3 {
+            *rng_seed = rng_seed.wrapping_add(1);
+            let cluster_count = 2 + (noise_util::hash(*rng_seed) * 3.0) as usize;
+            *rng_seed = rng_seed.wrapping_add(1);
+
+            for _ in 0..cluster_count {
+                let offset_dist = 0.3 + noise_util::hash(*rng_seed) * 0.5;
+                *rng_seed = rng_seed.wrapping_add(1);
+                let offset_angle = noise_util::hash(*rng_seed) * std::f32::consts::TAU;
+                *rng_seed = rng_seed.wrapping_add(1);
+
+                let cluster_offset = Vec3::new(
+                    offset_angle.cos() * offset_dist,
+                    (noise_util::hash(*rng_seed) - 0.5) * offset_dist,
+                    offset_angle.sin() * offset_dist,
+                );
+                *rng_seed = rng_seed.wrapping_add(1);
+
+                orbs.push(BioOrb {
+                    position: position + cluster_offset,
+                    normal,
+                    color,
+                    intensity: intensity * 0.6,
+                    pulse_phase: pulse_phase + noise_util::hash(*rng_seed) * 0.5,
+                    pulse_speed,
+                    cluster_size: cluster_size * 0.4,
+                    orb_type,
+                });
+                *rng_seed = rng_seed.wrapping_add(1);
+            }
+        }
+    }
+
+    // Process branches
+    for branch in &worm.branches {
+        generate_orbs_recursive(branch, density * 0.8, orbs, rng_seed);
+    }
+}
+
+/// Sample the worm tunnel as a Signed Distance Field
+/// Returns negative values inside the cave, positive outside
+pub fn sample_worm_sdf(pos: Vec3, worm: &WormTunnel) -> f32 {
+    let mut min_dist = f32::MAX;
+
+    // Check distance to each worm segment
+    for i in 0..worm.points.len().saturating_sub(1) {
+        let p0 = &worm.points[i];
+        let p1 = &worm.points[i + 1];
+
+        // Capsule SDF: distance to line segment minus interpolated radius
+        let segment = p1.position - p0.position;
+        let seg_len_sq = segment.length_squared();
+
+        let t = if seg_len_sq > 0.0001 {
+            ((pos - p0.position).dot(segment) / seg_len_sq).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let closest = p0.position + segment * t;
+        let radius = lerp(p0.radius, p1.radius, t);
+        let dist = (pos - closest).length() - radius;
+
+        min_dist = min_dist.min(dist);
+    }
+
+    // Handle single-point case
+    if worm.points.len() == 1 {
+        let p = &worm.points[0];
+        min_dist = (pos - p.position).length() - p.radius;
+    }
+
+    // Recursively check branches (smooth union)
+    for branch in &worm.branches {
+        let branch_dist = sample_worm_sdf(pos, branch);
+        // Smooth minimum for organic blending at junctions
+        let k = 2.0; // Smoothing factor
+        let h = (0.5 + 0.5 * (branch_dist - min_dist) / k).clamp(0.0, 1.0);
+        min_dist = lerp(branch_dist, min_dist, h) - k * h * (1.0 - h);
+    }
+
+    min_dist
+}
+
+/// Get the bounds of a worm tunnel (for chunk culling)
+pub fn get_worm_bounds(worm: &WormTunnel) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+
+    fn update_bounds(worm: &WormTunnel, min: &mut Vec3, max: &mut Vec3) {
+        for point in &worm.points {
+            let r = point.radius;
+            *min = min.min(point.position - Vec3::splat(r));
+            *max = max.max(point.position + Vec3::splat(r));
+        }
+        for branch in &worm.branches {
+            update_bounds(branch, min, max);
+        }
+    }
+
+    update_bounds(worm, &mut min, &mut max);
+
+    (min, max)
+}
+
+// ============================================================================
+// WORM CAVE BONE/ARTIFACT/FOSSIL GENERATION
+// ============================================================================
+
+/// Generate bones, fossils, and artifacts scattered throughout a Perlin worm cave
+pub fn generate_worm_cave_items(worm: &WormTunnel, config: &CaveGenConfig) -> (Vec<BoneInstance>, Vec<ArtifactInstance>) {
+    let mut bones = Vec::new();
+    let mut artifacts = Vec::new();
+    let mut rng_seed = worm.seed.wrapping_add(20000);
+
+    generate_items_recursive(worm, config, &mut bones, &mut artifacts, &mut rng_seed, 1.0);
+
+    (bones, artifacts)
+}
+
+fn generate_items_recursive(
+    worm: &WormTunnel,
+    config: &CaveGenConfig,
+    bones: &mut Vec<BoneInstance>,
+    artifacts: &mut Vec<ArtifactInstance>,
+    rng_seed: &mut u32,
+    density_mult: f32,
+) {
+    // Sample points for item placement (not every point, creates clumps)
+    let sample_interval = 8.max(worm.points.len() / 30);
+
+    for (i, point) in worm.points.iter().enumerate() {
+        // Only check at intervals or at large chambers
+        let is_chamber = point.radius > config.passage_width * 2.0;
+        if i % sample_interval != 0 && !is_chamber {
+            continue;
+        }
+
+        // More items deeper in the cave and in larger areas
+        let depth_factor = (point.depth_from_surface / 30.0).min(1.0);
+        let size_factor = (point.radius / 10.0).min(1.0);
+        let base_density = (config.bone_density + config.artifact_density) * density_mult;
+
+        // Bones are more common than artifacts
+        let bone_chance = base_density * 1.5 * (0.5 + depth_factor * 0.5) * size_factor;
+        let artifact_chance = base_density * 0.5 * depth_factor * size_factor;
+
+        // Roll for bones
+        let bone_roll = noise_util::hash(*rng_seed);
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        if bone_roll < bone_chance {
+            let num_bones = if is_chamber {
+                2 + (noise_util::hash(*rng_seed) * 4.0) as usize
+            } else {
+                1 + (noise_util::hash(*rng_seed) * 2.0) as usize
+            };
+            *rng_seed = rng_seed.wrapping_add(1);
+
+            for _ in 0..num_bones {
+                let bone = generate_single_bone(point, *rng_seed, depth_factor);
+                *rng_seed = rng_seed.wrapping_add(10);
+                bones.push(bone);
+            }
+        }
+
+        // Roll for artifacts (rarer, more valuable)
+        let artifact_roll = noise_util::hash(*rng_seed);
+        *rng_seed = rng_seed.wrapping_add(1);
+
+        if artifact_roll < artifact_chance {
+            let artifact = generate_single_artifact(point, *rng_seed, depth_factor);
+            *rng_seed = rng_seed.wrapping_add(10);
+            artifacts.push(artifact);
+
+            // Deep sacred chambers can have multiple artifacts
+            if is_chamber && depth_factor > 0.6 && noise_util::hash(*rng_seed) < 0.3 {
+                *rng_seed = rng_seed.wrapping_add(1);
+                let extra_count = 1 + (noise_util::hash(*rng_seed) * 2.0) as usize;
+                *rng_seed = rng_seed.wrapping_add(1);
+
+                for _ in 0..extra_count {
+                    let extra = generate_single_artifact(point, *rng_seed, depth_factor);
+                    *rng_seed = rng_seed.wrapping_add(10);
+                    artifacts.push(extra);
+                }
+            }
+        }
+    }
+
+    // Process branches with reduced density
+    for branch in &worm.branches {
+        generate_items_recursive(branch, config, bones, artifacts, rng_seed, density_mult * 0.7);
+    }
+}
+
+fn generate_single_bone(point: &WormPoint, seed: u32, depth_factor: f32) -> BoneInstance {
+    // Position on cave floor (bottom of tunnel)
+    let floor_offset = -point.radius * 0.9;
+    let scatter_r = noise_util::hash(seed) * point.radius * 0.6;
+    let scatter_angle = noise_util::hash(seed + 1) * std::f32::consts::TAU;
+
+    let pos = point.position + Vec3::new(
+        scatter_angle.cos() * scatter_r,
+        floor_offset + noise_util::hash(seed + 2) * 0.3,
+        scatter_angle.sin() * scatter_r,
+    );
+
+    // Select bone type - deeper = more ancient/prehistoric
+    let type_roll = noise_util::hash(seed + 3);
+    let bone_type = if depth_factor > 0.7 && type_roll < 0.3 {
+        // Deep caves have prehistoric remains
+        let prehistoric_roll = noise_util::hash(seed + 4);
+        if prehistoric_roll < 0.3 {
+            BoneType::MastodonBone
+        } else if prehistoric_roll < 0.5 {
+            BoneType::GiantSlothClaw
+        } else if prehistoric_roll < 0.7 {
+            BoneType::SabertoothSkull
+        } else {
+            BoneType::AncientTurtleShell
+        }
+    } else if type_roll < 0.4 {
+        // Human remains
+        let human_roll = noise_util::hash(seed + 5);
+        if human_roll < 0.2 {
+            BoneType::HumanSkull
+        } else if human_roll < 0.4 {
+            BoneType::HumanRibcage
+        } else if human_roll < 0.6 {
+            BoneType::HumanSpine
+        } else if human_roll < 0.8 {
+            BoneType::HumanLimb
+        } else {
+            BoneType::ScatteredHumanBones
+        }
+    } else {
+        // Animal remains (most common)
+        let animal_roll = noise_util::hash(seed + 6);
+        if animal_roll < 0.3 {
+            BoneType::DeerSkull
+        } else if animal_roll < 0.5 {
+            BoneType::BearSkull
+        } else if animal_roll < 0.75 {
+            BoneType::SmallAnimalSkeleton
+        } else {
+            BoneType::LargeAnimalRibcage
+        }
+    };
+
+    // Deeper bones are more fossilized
+    let age_factor = depth_factor * 0.7 + noise_util::hash(seed + 7) * 0.3;
+
+    BoneInstance {
+        bone_type,
+        position: pos,
+        rotation: Vec3::new(
+            noise_util::hash(seed + 8) * std::f32::consts::PI * 0.3,
+            noise_util::hash(seed + 9) * std::f32::consts::TAU,
+            noise_util::hash(seed + 10) * std::f32::consts::PI * 0.3,
+        ),
+        scale: 0.6 + noise_util::hash(seed + 11) * 0.8,
+        age_factor,
+        completeness: 0.2 + noise_util::hash(seed + 12) * 0.8,
+    }
+}
+
+fn generate_single_artifact(point: &WormPoint, seed: u32, depth_factor: f32) -> ArtifactInstance {
+    // Position near walls or on floor
+    let wall_or_floor = noise_util::hash(seed) < 0.7; // 70% on floor
+    let pos = if wall_or_floor {
+        let floor_offset = -point.radius * 0.85;
+        let scatter_r = noise_util::hash(seed + 1) * point.radius * 0.5;
+        let scatter_angle = noise_util::hash(seed + 2) * std::f32::consts::TAU;
+        point.position + Vec3::new(
+            scatter_angle.cos() * scatter_r,
+            floor_offset,
+            scatter_angle.sin() * scatter_r,
+        )
+    } else {
+        // Against wall (cached supplies, hidden)
+        let wall_angle = noise_util::hash(seed + 1) * std::f32::consts::TAU;
+        point.position + Vec3::new(
+            wall_angle.cos() * point.radius * 0.8,
+            -point.radius * 0.7,
+            wall_angle.sin() * point.radius * 0.8,
+        )
+    };
+
+    // Deeper = rarer artifacts
+    let rarity_roll = noise_util::hash(seed + 3);
+    let rarity = if depth_factor > 0.8 && rarity_roll > 0.9 {
+        ArtifactRarity::Legendary
+    } else if depth_factor > 0.5 && rarity_roll > 0.8 {
+        ArtifactRarity::Rare
+    } else if depth_factor > 0.3 && rarity_roll > 0.6 {
+        ArtifactRarity::Uncommon
+    } else {
+        ArtifactRarity::Common
+    };
+
+    let artifact_type = select_artifact_by_rarity(rarity, seed + 4);
+
+    // Cultural period based on depth (deeper = older)
+    let cultural_period = (depth_factor * 5.0) as u32;
+
+    ArtifactInstance {
+        artifact_type,
+        position: pos,
+        rotation: Vec3::new(
+            noise_util::hash(seed + 5) * std::f32::consts::PI * 0.2,
+            noise_util::hash(seed + 6) * std::f32::consts::TAU,
+            noise_util::hash(seed + 7) * std::f32::consts::PI * 0.2,
+        ),
+        scale: 0.7 + noise_util::hash(seed + 8) * 0.5,
+        rarity,
+        condition: 0.1 + noise_util::hash(seed + 9) * 0.9,
+        cultural_period,
     }
 }
 

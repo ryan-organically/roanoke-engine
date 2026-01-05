@@ -1,0 +1,561 @@
+/* CSS Variables */
+:root {
+  --color-bg: #0a0908;
+  --color-bg-secondary: #1a1815;
+  --color-bg-tertiary: #2a2520;
+  --color-text: #e8e4dc;
+  --color-text-muted: #9a958a;
+  --color-accent: #c9a962;
+  --color-accent-dim: #8a7542;
+  --font-display: 'Cinzel', serif;
+  --font-body: 'Crimson Text', serif;
+}
+
+/* Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.7;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+/* App Layout */
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+main {
+  flex: 1;
+}
+
+/* Navigation */
+.navigation {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem 3rem;
+  background: linear-gradient(to bottom, var(--color-bg) 0%, transparent 100%);
+}
+
+.nav-brand a {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  color: var(--color-accent);
+  text-decoration: none;
+  letter-spacing: 0.1em;
+}
+
+.nav-links {
+  display: flex;
+  gap: 2.5rem;
+  list-style: none;
+}
+
+.nav-links a {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  transition: color 0.3s ease;
+}
+
+.nav-links a:hover {
+  color: var(--color-accent);
+}
+
+/* Hero Section */
+.hero {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  position: relative;
+  background: radial-gradient(ellipse at center, var(--color-bg-secondary) 0%, var(--color-bg) 70%);
+}
+
+.hero-content {
+  max-width: 800px;
+  padding: 2rem;
+}
+
+.hero-title {
+  font-family: var(--font-display);
+  font-size: clamp(4rem, 12vw, 8rem);
+  font-weight: 400;
+  color: var(--color-text);
+  letter-spacing: 0.2em;
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+}
+
+.hero-subtitle {
+  font-family: var(--font-display);
+  font-size: clamp(1rem, 3vw, 1.5rem);
+  color: var(--color-accent);
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  margin-bottom: 3rem;
+}
+
+.hero-tagline {
+  margin-bottom: 3rem;
+}
+
+.hero-tagline p {
+  font-size: 1.25rem;
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.hero-cta {
+  display: inline-block;
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  color: var(--color-accent);
+  text-decoration: none;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 1rem 2.5rem;
+  border: 1px solid var(--color-accent-dim);
+  transition: all 0.3s ease;
+}
+
+.hero-cta:hover {
+  background-color: var(--color-accent);
+  color: var(--color-bg);
+}
+
+.hero-fade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 150px;
+  background: linear-gradient(to bottom, transparent, var(--color-bg));
+}
+
+/* Section Styles */
+.section-content {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 6rem 2rem;
+}
+
+.section-title {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 400;
+  color: var(--color-accent);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 3rem;
+  text-align: center;
+}
+
+/* Plot Section */
+.plot {
+  background-color: var(--color-bg);
+}
+
+.plot-intro {
+  margin-bottom: 2.5rem;
+}
+
+.plot-lead {
+  font-size: 1.5rem;
+  font-style: italic;
+  color: var(--color-text);
+  text-align: center;
+  line-height: 1.8;
+}
+
+.plot-body p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.plot-quote {
+  font-size: 1.25rem;
+  font-style: italic;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-accent-dim);
+  padding-left: 1.5rem;
+  margin: 3rem 0;
+}
+
+.dramatic-line {
+  font-size: 1.25rem;
+  font-style: italic;
+  color: var(--color-text) !important;
+  text-align: center;
+  margin-top: 2.5rem;
+}
+
+/* John White Section */
+.john-white {
+  background-color: var(--color-bg-secondary);
+}
+
+.interpreters-aside {
+  background-color: var(--color-bg-tertiary);
+  padding: 1.5rem 2rem;
+  margin: 2rem 0;
+  border-left: 3px solid var(--color-accent-dim);
+}
+
+.interpreters-aside p {
+  font-style: italic;
+  color: var(--color-text);
+  margin-bottom: 0;
+}
+
+/* Thanksgiving Section */
+.thanksgiving {
+  background-color: var(--color-bg);
+}
+
+.event-date {
+  display: block;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  color: var(--color-accent-dim);
+  letter-spacing: 0.1em;
+  margin-top: -2rem;
+  margin-bottom: 3rem;
+}
+
+.feast-description {
+  background-color: var(--color-bg-secondary);
+  padding: 2rem;
+  margin: 2rem 0;
+  border-left: 3px solid var(--color-accent-dim);
+}
+
+.feast-description p {
+  margin-bottom: 1rem;
+}
+
+.feast-description p:last-child {
+  margin-bottom: 0;
+}
+
+/* Virginia Dare Section */
+.virginia-dare {
+  background-color: var(--color-bg-secondary);
+}
+
+.virginia-dare .timeline-content h3 {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 400;
+  color: var(--color-text);
+  letter-spacing: 0.05em;
+  margin-bottom: 1rem;
+}
+
+/* Mystery Section */
+.mystery {
+  background-color: var(--color-bg);
+}
+
+.virginia-fate {
+  margin-top: 3rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+}
+
+.virginia-fate h3,
+.mystery-conclusion h3 {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--color-text);
+  letter-spacing: 0.1em;
+  margin-bottom: 1.5rem;
+}
+
+.virginia-fate p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.virginia-fate em {
+  color: var(--color-accent);
+}
+
+.mystery-conclusion {
+  margin-top: 3rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+  text-align: center;
+}
+
+.mystery-conclusion p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.mystery-answer {
+  font-size: 1.35rem;
+  font-style: italic;
+  color: var(--color-text) !important;
+}
+
+.croatoan-final {
+  margin-top: 4rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+  text-align: center;
+}
+
+.croatoan-word {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 2.5rem;
+  color: var(--color-accent);
+  letter-spacing: 0.3em;
+  margin-bottom: 1.5rem;
+}
+
+.croatoan-final p {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+/* Unraveling Section */
+.unraveling {
+  background-color: var(--color-bg-secondary);
+}
+
+/* Jamestown Section */
+.jamestown {
+  background-color: var(--color-bg);
+}
+
+.era-header {
+  text-align: center;
+  margin-bottom: 3rem;
+}
+
+.era-label {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  color: var(--color-accent-dim);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.era-header .section-title {
+  margin-bottom: 0.5rem;
+}
+
+.era-date {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  letter-spacing: 0.1em;
+}
+
+.character-section {
+  margin-top: 4rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+}
+
+.character-section h3 {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 400;
+  color: var(--color-text);
+  letter-spacing: 0.1em;
+  margin-bottom: 1.5rem;
+}
+
+.character-section p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.character-section em {
+  color: var(--color-accent);
+}
+
+/* Pocahontas Section */
+.pocahontas {
+  background-color: var(--color-bg-secondary);
+}
+
+.timeline-event {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 2rem;
+  margin-bottom: 3rem;
+  padding-bottom: 3rem;
+  border-bottom: 1px solid var(--color-bg-tertiary);
+}
+
+.timeline-event:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.timeline-year {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  color: var(--color-accent);
+  letter-spacing: 0.05em;
+  padding-top: 0.3rem;
+}
+
+.timeline-content p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.timeline-content strong {
+  color: var(--color-accent);
+  letter-spacing: 0.05em;
+}
+
+.timeline-content em {
+  color: var(--color-text);
+}
+
+.final-words {
+  font-size: 1.1rem;
+  text-align: center;
+  color: var(--color-text);
+  border-left: none;
+  padding-left: 0;
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+}
+
+.final-words .quote-text {
+  display: block;
+  font-size: 1.35rem;
+  margin-top: 1rem;
+  color: var(--color-accent);
+}
+
+/* Themes Section */
+.themes {
+  background-color: var(--color-bg-secondary);
+}
+
+.themes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 2rem;
+}
+
+.theme-card {
+  background-color: var(--color-bg);
+  padding: 2.5rem;
+  border: 1px solid var(--color-bg-tertiary);
+  transition: border-color 0.3s ease;
+}
+
+.theme-card:hover {
+  border-color: var(--color-accent-dim);
+}
+
+.theme-title {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--color-accent);
+  letter-spacing: 0.05em;
+  margin-bottom: 1rem;
+}
+
+.theme-description {
+  font-size: 1rem;
+  color: var(--color-text-muted);
+  line-height: 1.8;
+}
+
+/* Footer */
+.footer {
+  background-color: var(--color-bg);
+  border-top: 1px solid var(--color-bg-tertiary);
+  padding: 3rem 2rem;
+  text-align: center;
+}
+
+.footer-brand {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  letter-spacing: 0.1em;
+  margin-bottom: 0.5rem;
+}
+
+.footer-version {
+  font-size: 0.8rem;
+  color: var(--color-accent-dim);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .navigation {
+    padding: 1rem 1.5rem;
+  }
+
+  .nav-links {
+    gap: 1.5rem;
+  }
+
+  .nav-links a {
+    font-size: 0.75rem;
+  }
+
+  .section-content {
+    padding: 4rem 1.5rem;
+  }
+
+  .themes-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-event {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .timeline-year {
+    font-size: 1.25rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav-links {
+    display: none;
+  }
+}

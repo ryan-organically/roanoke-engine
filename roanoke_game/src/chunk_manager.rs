@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use glam::Vec3;
 use croatoan_render::{TerrainPipeline, GrassPipeline, TreePipeline, DetritusPipeline, BuildingPipeline, ChunkBounds};
-use croatoan_wfc::CornFieldBounds;
+use croatoan_wfc::{CornFieldBounds, BioOrb, BoneInstance, ArtifactInstance};
 
 /// Coordinates for a chunk in chunk space (not world space)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -60,6 +60,10 @@ pub struct LoadedChunk {
     pub hedge_lod1: Vec<TreePipeline>,         // Hedge LOD1 (60-200 units)
     pub buildings: Vec<BuildingPipeline>, // List of pipelines for different building types in this chunk
     pub river_water: Vec<TreePipeline>, // Flat calm water quads for rivers
+    pub cave_mesh: Option<TreePipeline>, // Cave mesh from Perlin worm tunnels
+    pub bio_orbs: Vec<BioOrb>, // Bioluminescent orbs in caves (fungi, moss, crystals)
+    pub cave_bones: Vec<BoneInstance>, // Prehistoric bones in caves
+    pub cave_artifacts: Vec<ArtifactInstance>, // Artifacts/tools in caves
     pub bounds: ChunkBounds,
 }
 
@@ -105,16 +109,6 @@ impl ChunkManager {
         let new_player_chunk = ChunkCoord::from_world_pos(player_pos, self.chunk_size);
 
         // Debug: Track calls to update
-        static mut CALL_COUNT: u32 = 0;
-        unsafe {
-            CALL_COUNT += 1;
-            if CALL_COUNT % 300 == 1 {
-                println!("[CHUNK DEBUG] update called: player_chunk=({},{}), loaded={}, loading={}",
-                    new_player_chunk.x, new_player_chunk.z,
-                    self.loaded_chunks.len(), self.loading_chunks.len());
-            }
-        }
-
         // Only update if player moved to a different chunk
         if new_player_chunk == self.player_chunk && !self.loaded_chunks.is_empty() {
             return Vec::new();
@@ -194,11 +188,6 @@ impl ChunkManager {
                 village_centers: village_centers.to_vec(),
                 corn_field_exclusions: corn_field_exclusions.to_vec(),
             });
-        }
-
-        if !requests.is_empty() {
-            println!("[CHUNK] Requesting {} new chunks around ({}, {})",
-                     requests.len(), new_player_chunk.x, new_player_chunk.z);
         }
 
         requests

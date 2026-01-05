@@ -451,6 +451,15 @@ pub fn get_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
         base_color = lerp_color(base_color, [0.15, 0.12, 0.10], cave_entrance);
     }
 
+    // Procedural Perlin worm cave entrances (in hilly/mountain areas)
+    let worm_entrance = calculate_worm_cave_entrance(x, z, seed);
+    if worm_entrance > 0.0 {
+        // Carve bowl-shaped depression for cave entrance
+        height = lerp(height, height - 8.0, worm_entrance);
+        // Darken to rock/cave floor color
+        base_color = lerp_color(base_color, [0.12, 0.10, 0.08], worm_entrance * 0.8);
+    }
+
     // Mine entrance on beach (around 150, -30)
     let mine_entrance = calculate_mine_entrance(x, z);
     if mine_entrance > 0.0 {
@@ -754,6 +763,92 @@ fn calculate_cave_entrance(x: f32, z: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Calculate procedural Perlin worm cave entrance depression
+/// Uses same noise as main.rs cave generation for consistency
+pub fn calculate_worm_cave_entrance(x: f32, z: f32, seed: u32) -> f32 {
+    // Determine which chunk this point is in (256x256 chunks)
+    let chunk_size = 256.0;
+    let chunk_x = (x / chunk_size).floor() * chunk_size;
+    let chunk_z = (z / chunk_size).floor() * chunk_size;
+    let chunk_center_x = chunk_x + chunk_size * 0.5;
+    let chunk_center_z = chunk_z + chunk_size * 0.5;
+
+    // Same noise check as main.rs cave generation
+    let cave_entrance_noise = noise_util::fbm_3d(
+        Vec3::new(chunk_x * 0.003, 0.0, chunk_z * 0.003),
+        2, 2.0, 0.5, seed.wrapping_add(99999)
+    );
+
+    // Only ~5% of chunks get cave entrances (noise > 0.7)
+    if cave_entrance_noise <= 0.7 {
+        return 0.0;
+    }
+
+    // Check terrain height at chunk center (caves only in hills/mountains)
+    let (entrance_height, _) = crate::mesh_gen::get_base_height_at(chunk_center_x, chunk_center_z, seed);
+    if entrance_height <= 15.0 {
+        return 0.0;
+    }
+
+    // Calculate distance from cave entrance
+    let entrance_pos = Vec2::new(chunk_center_x, chunk_center_z);
+    let point = Vec2::new(x, z);
+    let dist = entrance_pos.distance(point);
+
+    // Cave entrance radius (bowl-shaped depression)
+    let entrance_radius = 12.0;
+    if dist < entrance_radius {
+        let depth = 1.0 - (dist / entrance_radius);
+        depth * depth * 0.6 // Gentler bowl than static caves
+    } else {
+        0.0
+    }
+}
+
+/// Get base height without cave carving (for cave entrance checks)
+fn get_base_height_at(x: f32, z: f32, seed: u32) -> (f32, [f32; 3]) {
+    // Simplified version of get_height_at without cave entrance logic
+    let biome_scale = 0.002;
+    let biome_noise = noise_util::fbm(
+        Vec2::new(x * biome_scale, z * biome_scale),
+        3, 2.0, 0.5, seed + 100
+    );
+    let noise_norm = (biome_noise + 1.0) * 0.5;
+    let gradient = -x * 0.001;
+    let t = (noise_norm * 0.3 + gradient + 0.5).clamp(0.0, 1.0);
+
+    let detail_noise = noise_util::fbm(
+        Vec2::new(x * 0.05, z * 0.05),
+        4, 2.0, 0.5, seed
+    );
+
+    let inland_dist = (-x - 200.0).max(0.0);
+    let hill_strength = (inland_dist / 500.0).min(1.0);
+    let hill_noise = noise_util::fbm(
+        Vec2::new(x * 0.008, z * 0.008),
+        3, 2.0, 0.5, seed + 500
+    );
+    let rolling_hills = hill_noise * 25.0 * hill_strength;
+
+    let (base_height, height_mult, base_color) = if t < 0.45 {
+        (-2.0, 0.1, [0.1, 0.3, 0.4])
+    } else if t < 0.65 {
+        let blend = (t - 0.45) / 0.20;
+        (lerp(0.0, 6.0, blend), 0.4, [0.55, 0.48, 0.38])
+    } else if t < 0.72 {
+        let blend = (t - 0.65) / 0.07;
+        (lerp(6.0, 10.0, blend), 0.6, [0.40, 0.42, 0.28])
+    } else {
+        let blend = (t - 0.72) / 0.28;
+        let far_inland = ((t - 0.82) / 0.18).clamp(0.0, 1.0);
+        let adjusted_hills = rolling_hills * far_inland;
+        (lerp(10.0, 15.0, blend) + adjusted_hills, 0.7, [0.15, 0.30, 0.09])
+    };
+
+    let height = base_height + detail_noise * height_mult;
+    (height, base_color)
 }
 
 /// Calculate mine entrance on beach

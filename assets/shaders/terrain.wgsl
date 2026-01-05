@@ -240,26 +240,38 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Apply lighting to surface color
     var final_color = surface_color * lighting;
 
-    // Water: Override color with proper ocean blue (vertex colors can be wrong at boundaries)
+    // Water: Override color with proper ocean blue + Fresnel reflection
     if (is_water) {
         // Depth-based water color: deeper = darker teal, shallow = lighter cyan
-        // Use original_y for consistent depth calculation (not animated position)
         let water_depth = clamp((0.5 - input.original_y) / 5.0, 0.0, 1.0);
         let deep_color = vec3<f32>(0.02, 0.18, 0.30);   // Deep ocean - dark teal/blue
         let shallow_color = vec3<f32>(0.08, 0.35, 0.45);   // Shallow - cyan
         let water_base = mix(shallow_color, deep_color, water_depth);
-        final_color = water_base * lighting;
-    }
 
-    // Water Specular Highlight (Sun Sparkle)
-    if (is_water) {
+        // Fresnel - Schlick approximation for water (IOR ~1.33, F0 ≈ 0.02)
+        let NdotV = max(dot(normal, view_dir_to_cam), 0.001);
+        let F0 = 0.02;
+        let fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+
+        // Sky reflection color (matches sun elevation)
+        let sky_reflect = mix(
+            vec3<f32>(0.15, 0.20, 0.35),  // Night sky
+            mix(
+                vec3<f32>(0.6, 0.5, 0.45),   // Sunrise/sunset sky
+                vec3<f32>(0.5, 0.65, 0.85),  // Midday sky
+                clamp(sun_elevation * 2.0, 0.0, 1.0)
+            ),
+            day_factor
+        );
+
+        // Blend water color with sky reflection based on fresnel
+        let water_lit = water_base * lighting;
+        final_color = mix(water_lit, sky_reflect, fresnel);
+
+        // Specular highlight (sun sparkle) - additive on top
         let reflect_dir = reflect(-light_dir, normal);
-
-        // Tighter specular for sharp sparkles
-        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 64.0);
-
-        // Brighter sparkles for distance visibility
-        let specular = 1.8 * spec * sun_color * shadow;
+        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 128.0);
+        let specular = 2.5 * spec * sun_color * shadow;
         final_color += specular;
     }
 

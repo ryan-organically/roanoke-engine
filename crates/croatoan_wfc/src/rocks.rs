@@ -632,6 +632,7 @@ pub fn generate_deadwood_for_chunk(
         let tilt_z = noise.get([world_x as f64, world_z as f64 * 3.0]) as f32 * 0.26;
 
         let rotation = Quat::from_euler(glam::EulerRot::YXZ, angle, tilt_x, tilt_z);
+        // Optimized dead_log model exported on Blender origin - no offset needed
         let translation = Vec3::new(world_x, height, world_z);
         let scale = Vec3::splat(scale_var);
 

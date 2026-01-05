@@ -19,15 +19,10 @@ pub const TREE_SPECIES_NOBLEFIR: usize = 4;    // noblefir0 (bushy fir, forest e
 
 /// Per-species Y offset to ground models correctly
 /// Positive = raise model up, Negative = sink into ground
-pub fn tree_species_y_offset(species: usize) -> f32 {
-    match species {
-        TREE_SPECIES_BIRCH => 0.0,         // birch exported with correct anchor
-        TREE_SPECIES_PINE => 0.0,          // pine exported with correct anchor
-        TREE_SPECIES_DEAD_CONIFER => 3.0,  // dead conifer needs raising (was half underground)
-        TREE_SPECIES_FIR => 0.0,           // fir exported with correct anchor
-        TREE_SPECIES_NOBLEFIR => 3.5,      // noblefir needs +3.5 Y offset
-        _ => 0.0,
-    }
+/// NOTE: Optimized models should be exported with base at Y=0 (on origin)
+pub fn tree_species_y_offset(_species: usize) -> f32 {
+    // All optimized models should be on origin - no offset needed
+    0.0
 }
 
 /// Shrub model indices - must match order in main.rs shrub_models array
@@ -191,7 +186,7 @@ impl FoliageInstances {
                 TREE_SPECIES_PINE => "pine_0".to_string(),
                 TREE_SPECIES_DEAD_CONIFER => "dead_conifer_0".to_string(),
                 TREE_SPECIES_FIR => "fir_0".to_string(),
-                TREE_SPECIES_NOBLEFIR => "noblefir0".to_string(),
+                TREE_SPECIES_NOBLEFIR => "fir_1".to_string(),
                 _ => "birch_0".to_string(), // fallback to birch
             };
             result.entry(model_name).or_insert_with(Vec::new).push(inst.transform);
@@ -387,17 +382,12 @@ pub fn generate_foliage_for_chunk(
                     tree_scale *= 4.0;
                 }
 
-                // Y-anchor: Use smaller sink for low terrain to prevent floating
-                // At height 2-4: sink 0.3m, at height 10+: sink 1.0m
-                let sink_amount = ((th - 2.0) / 8.0).clamp(0.0, 1.0) * 0.7 + 0.3;
-                // Apply per-species Y offset to ground models correctly
-                let species_y_offset = tree_species_y_offset(model_idx);
-
+                // Optimized models exported on Blender origin - place directly at terrain height
                 result.trees.push(FoliageInstance {
                     transform: Mat4::from_scale_rotation_translation(
                         Vec3::splat(tree_scale),
                         Quat::from_rotation_y(tree_angle),
-                        Vec3::new(tx, th - sink_amount + species_y_offset, tz),
+                        Vec3::new(tx, th, tz),
                     ),
                     model_index: model_idx,
                     is_megaflora: mega,
@@ -464,14 +454,12 @@ pub fn generate_foliage_for_chunk(
             scale *= 4.0;
         }
 
-        // Apply per-species Y offset to ground models correctly
-        let species_y_offset = tree_species_y_offset(model_idx);
-
+        // Optimized models exported on Blender origin - place directly at terrain height
         result.trees.push(FoliageInstance {
             transform: Mat4::from_scale_rotation_translation(
                 Vec3::splat(scale),
                 Quat::from_rotation_y(angle),
-                Vec3::new(world_x, height + species_y_offset, world_z),
+                Vec3::new(world_x, height, world_z),
             ),
             model_index: model_idx,
             is_megaflora: mega,
@@ -489,13 +477,6 @@ pub fn generate_foliage_for_chunk(
     //     &noise,
     // );
 
-    println!(
-        "[FOLIAGE] Chunk ({}, {}): {} trees, {} shrubs",
-        offset_x,
-        offset_z,
-        result.trees.len(),
-        result.shrubs.len()
-    );
     result
 }
 

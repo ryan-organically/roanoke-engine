@@ -205,6 +205,133 @@ impl WeatherAmbience {
     }
 }
 
+/// Coastal/environmental ambience based on player location
+#[derive(Debug, Clone)]
+pub struct CoastalAmbience {
+    // Current volumes
+    pub waves_near_volume: f32,
+    pub beach_wind_volume: f32,
+    pub forest_wind_volume: f32,      // Constant loop in forest
+    pub forest_breeze_volume: f32,    // Occasional gusts
+    pub mockingjay_volume: f32,       // Occasional bird calls
+
+    // Target volumes (for smooth transitions)
+    pub target_waves_near: f32,
+    pub target_beach_wind: f32,
+    pub target_forest_wind: f32,
+    pub target_forest_breeze: f32,
+    pub target_mockingjay: f32,
+
+    // Distance thresholds
+    pub waves_max_distance: f32,      // Full fade at this distance from surf
+    pub beach_wind_max_distance: f32,
+    pub forest_breeze_chance: f32,    // Random trigger chance per second
+    pub mockingjay_chance: f32,       // Random trigger chance per second
+}
+
+impl CoastalAmbience {
+    pub fn new() -> Self {
+        Self {
+            waves_near_volume: 0.0,
+            beach_wind_volume: 0.0,
+            forest_wind_volume: 0.0,
+            forest_breeze_volume: 0.0,
+            mockingjay_volume: 0.0,
+            target_waves_near: 0.0,
+            target_beach_wind: 0.0,
+            target_forest_wind: 0.0,
+            target_forest_breeze: 0.0,
+            target_mockingjay: 0.0,
+            waves_max_distance: 150.0,      // Waves audible deep inland toward forest
+            beach_wind_max_distance: 100.0, // Beach wind carries far
+            forest_breeze_chance: 0.02,     // 2% chance per second when in forest
+            mockingjay_chance: 0.008,       // ~1 call every 2 minutes on average
+        }
+    }
+
+    /// Update target volumes based on player distance to coastline/forest
+    /// biome_t: 0.0 = deep ocean, 0.5 = beach, 0.72+ = forest
+    pub fn set_for_location(&mut self, distance_to_surf: f32, biome_t: f32) {
+        // Waves: loud at surf, taper toward forest
+        // Full volume at surf, still faintly audible at forest edge
+        if distance_to_surf < self.waves_max_distance {
+            let t = distance_to_surf / self.waves_max_distance;
+            // Cubic falloff - loud near surf, gentle fade inland
+            self.target_waves_near = (1.0 - t * t * t).max(0.0);
+        } else {
+            self.target_waves_near = 0.0;
+        }
+
+        // Beach wind: similar but extends further
+        if distance_to_surf < self.beach_wind_max_distance {
+            let t = distance_to_surf / self.beach_wind_max_distance;
+            self.target_beach_wind = (1.0 - t).max(0.0) * 0.5;
+        } else {
+            self.target_beach_wind = 0.0;
+        }
+
+        // Forest wind: gradient fade-in from coastal forest to deep woods
+        // biome_t 0.65 = coastal forest edge, 0.72 = treeline, 0.85+ = deep forest
+        let forest_start = 0.65;
+        let forest_full = 0.80;
+        if biome_t > forest_start {
+            let forest_t = ((biome_t - forest_start) / (forest_full - forest_start)).clamp(0.0, 1.0);
+            self.target_forest_wind = forest_t * 0.7; // Gradual fade-in
+        } else {
+            self.target_forest_wind = 0.0;
+        }
+
+        // Mockingjay: continuous loop in forest, layered with forest wind
+        let in_forest = biome_t >= 0.72;
+        if in_forest {
+            self.target_mockingjay = 0.6; // Steady presence with birds
+        } else {
+            self.target_mockingjay = 0.0;
+        }
+
+        // Forest breeze gusts: handled externally via trigger
+        if !in_forest {
+            self.target_forest_breeze = 0.0;
+        }
+    }
+
+    /// Check if player is in forest based on biome_t
+    pub fn is_forest(biome_t: f32) -> bool {
+        biome_t >= 0.72
+    }
+
+    /// Trigger a forest breeze gust
+    pub fn trigger_forest_breeze(&mut self) {
+        self.target_forest_breeze = 0.7;
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        let transition_speed = 0.8; // Slightly faster than weather for responsiveness
+        let forest_transition = 0.4; // Slower fade for forest ambience
+        let breeze_fade_speed = 0.3; // Slower fade for breeze gusts
+
+        self.waves_near_volume += (self.target_waves_near - self.waves_near_volume) * dt * transition_speed;
+        self.beach_wind_volume += (self.target_beach_wind - self.beach_wind_volume) * dt * transition_speed;
+        self.forest_wind_volume += (self.target_forest_wind - self.forest_wind_volume) * dt * forest_transition;
+        self.mockingjay_volume += (self.target_mockingjay - self.mockingjay_volume) * dt * forest_transition;
+
+        // Forest breeze fades out after trigger
+        self.forest_breeze_volume += (self.target_forest_breeze - self.forest_breeze_volume) * dt * breeze_fade_speed;
+        if self.target_forest_breeze > 0.0 {
+            self.target_forest_breeze -= dt * 0.15;
+            if self.target_forest_breeze < 0.01 {
+                self.target_forest_breeze = 0.0;
+            }
+        }
+    }
+}
+
+impl Default for CoastalAmbience {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The main audio system managing all game audio
 pub struct AudioSystem {
     manager: Option<AudioManager>,
@@ -225,8 +352,26 @@ pub struct AudioSystem {
     birds_handle: Option<StaticSoundHandle>,
     crickets_handle: Option<StaticSoundHandle>,
 
+    // Coastal/environmental sound handles
+    waves_near_handle: Option<StaticSoundHandle>,
+    beach_wind_handle: Option<StaticSoundHandle>,
+    forest_wind_handle: Option<StaticSoundHandle>,
+    forest_breeze_handle: Option<StaticSoundHandle>,
+    mockingjay_handle: Option<StaticSoundHandle>,
+
+    // Footsteps - elastic loop that adjusts to player speed
+    footsteps_gravel_handle: Option<StaticSoundHandle>,
+    footsteps_gravel_data: Option<StaticSoundData>,
+    footsteps_water_handle: Option<StaticSoundHandle>,
+    footsteps_water_data: Option<StaticSoundData>,
+    footsteps_playing: bool,
+    footsteps_in_water: bool, // Track which type is currently playing
+
     // Weather ambience system
     pub weather_ambience: WeatherAmbience,
+
+    // Coastal ambience system
+    pub coastal_ambience: CoastalAmbience,
 
     // Procedural soundtrack
     pub soundtrack_config: SoundtrackConfig,
@@ -288,7 +433,19 @@ impl AudioSystem {
             thunder_handle: None,
             birds_handle: None,
             crickets_handle: None,
+            waves_near_handle: None,
+            beach_wind_handle: None,
+            forest_wind_handle: None,
+            forest_breeze_handle: None,
+            mockingjay_handle: None,
+            footsteps_gravel_handle: None,
+            footsteps_gravel_data: None,
+            footsteps_water_handle: None,
+            footsteps_water_data: None,
+            footsteps_playing: false,
+            footsteps_in_water: false,
             weather_ambience: WeatherAmbience::new(),
+            coastal_ambience: CoastalAmbience::new(),
             soundtrack_config: SoundtrackConfig::default(),
             layers,
             beat_timer: 0.0,
@@ -318,6 +475,43 @@ impl AudioSystem {
     pub fn load_sound(&mut self, path: &str) -> Result<StaticSoundData, String> {
         StaticSoundData::from_file(path)
             .map_err(|e| format!("Failed to load sound '{}': {:?}", path, e))
+    }
+
+    /// Load all coastal/environmental ambient sounds
+    pub fn load_coastal_sounds(&mut self) {
+        // Waves near - loops when player is close to surf, audible toward forest
+        if let Ok(sound) = self.load_sound("assets/audio/ambience/waves near.mp3") {
+            self.load_ambient_loop("waves_near", sound);
+            log::info!("[AUDIO] Loaded coastal sound: waves_near");
+        } else {
+            log::warn!("[AUDIO] Could not load waves near.mp3");
+        }
+
+        // Forest wind - constant ambient loop in the woods
+        if let Ok(sound) = self.load_sound("assets/audio/ambience/forest wind.mp3") {
+            self.load_ambient_loop("forest_wind", sound);
+            log::info!("[AUDIO] Loaded coastal sound: forest_wind");
+        } else {
+            log::warn!("[AUDIO] Could not load forest wind.mp3");
+        }
+
+        // Mockingjay - occasional bird calls in the forest
+        if let Ok(sound) = self.load_sound("assets/audio/ambience/mockingjay.mp3") {
+            self.load_ambient_loop("mockingjay", sound);
+            log::info!("[AUDIO] Loaded coastal sound: mockingjay");
+        } else {
+            log::warn!("[AUDIO] Could not load mockingjay.mp3");
+        }
+
+        // Beach wind - future: uncomment when file is added
+        // if let Ok(sound) = self.load_sound("assets/audio/ambience/beach_wind.ogg") {
+        //     self.load_ambient_loop("beach_wind", sound);
+        // }
+
+        // Forest breeze gusts - future: uncomment when file is added
+        // if let Ok(sound) = self.load_sound("assets/audio/ambience/forest_breeze.ogg") {
+        //     self.load_ambient_loop("forest_breeze", sound);
+        // }
     }
 
     /// Play menu music with fade in
@@ -373,6 +567,11 @@ impl AudioSystem {
                         "thunder" => self.thunder_handle = Some(handle),
                         "birds" => self.birds_handle = Some(handle),
                         "crickets" => self.crickets_handle = Some(handle),
+                        "waves_near" => self.waves_near_handle = Some(handle),
+                        "beach_wind" => self.beach_wind_handle = Some(handle),
+                        "forest_wind" => self.forest_wind_handle = Some(handle),
+                        "forest_breeze" => self.forest_breeze_handle = Some(handle),
+                        "mockingjay" => self.mockingjay_handle = Some(handle),
                         _ => log::warn!("[AUDIO] Unknown ambient type: {}", ambient_type),
                     }
                     log::info!("[AUDIO] Loaded ambient loop: {}", ambient_type);
@@ -570,6 +769,51 @@ impl AudioSystem {
         }
     }
 
+    /// Update coastal ambient sound volumes based on player location
+    fn update_coastal_volumes(&mut self) {
+        let master = self.master_volume * self.ambience_volume;
+
+        if let Some(ref mut handle) = self.waves_near_handle {
+            let vol = self.coastal_ambience.waves_near_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
+        if let Some(ref mut handle) = self.beach_wind_handle {
+            let vol = self.coastal_ambience.beach_wind_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
+        if let Some(ref mut handle) = self.forest_wind_handle {
+            let vol = self.coastal_ambience.forest_wind_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
+        if let Some(ref mut handle) = self.forest_breeze_handle {
+            let vol = self.coastal_ambience.forest_breeze_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
+        if let Some(ref mut handle) = self.mockingjay_handle {
+            let vol = self.coastal_ambience.mockingjay_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
+    }
+
+    /// Update coastal ambience based on player position
+    /// Call this from game code with distance to nearest coastline and biome_t value
+    pub fn update_coastal(&mut self, dt: f32, distance_to_surf: f32, biome_t: f32) {
+        self.coastal_ambience.set_for_location(distance_to_surf, biome_t);
+
+        let in_forest = CoastalAmbience::is_forest(biome_t);
+
+        // Random forest breeze gusts
+        if in_forest && self.coastal_ambience.forest_breeze_volume < 0.1 {
+            let chance = self.coastal_ambience.forest_breeze_chance * dt;
+            if rand::random::<f32>() < chance {
+                self.coastal_ambience.trigger_forest_breeze();
+            }
+        }
+
+        self.coastal_ambience.update(dt);
+        self.update_coastal_volumes();
+    }
+
     /// Update menu music volume with fade
     fn update_menu_music(&mut self, dt: f32) {
         if self.music_state == MusicState::MainMenu {
@@ -638,6 +882,107 @@ impl AudioSystem {
                 log::error!("[AUDIO] Failed to play SFX: {:?}", e);
             }
         }
+    }
+
+    /// Load footsteps sounds for elastic playback (gravel and water variants)
+    pub fn load_footsteps(&mut self) {
+        if let Ok(sound) = self.load_sound("assets/audio/sfx/gravel foosteps elastic.wav") {
+            self.footsteps_gravel_data = Some(sound);
+            log::info!("[AUDIO] Loaded gravel footsteps sound");
+        } else {
+            log::warn!("[AUDIO] Could not load gravel footsteps sound");
+        }
+
+        if let Ok(sound) = self.load_sound("assets/audio/sfx/shallow water foosteps elastic.wav") {
+            self.footsteps_water_data = Some(sound);
+            log::info!("[AUDIO] Loaded water footsteps sound");
+        } else {
+            log::warn!("[AUDIO] Could not load water footsteps sound");
+        }
+    }
+
+    /// Update footsteps based on player movement speed and terrain
+    /// speed: horizontal movement speed (0 = idle, ~5 = walking, ~10+ = sprinting)
+    /// near_water: true if player is within ~5 yards of shoreline or in shallow water
+    pub fn update_footsteps(&mut self, speed: f32, near_water: bool) {
+        let is_moving = speed > 0.5;
+
+        // Check if we need to switch footstep types
+        let needs_type_switch = self.footsteps_playing && (near_water != self.footsteps_in_water);
+
+        if needs_type_switch {
+            // Stop current footsteps to switch types
+            self.stop_footsteps();
+        }
+
+        if is_moving && !self.footsteps_playing {
+            // Start appropriate footsteps loop
+            let sound_data = if near_water {
+                self.footsteps_water_data.clone()
+            } else {
+                self.footsteps_gravel_data.clone()
+            };
+
+            if let Some(sound) = sound_data {
+                if let Some(ref mut manager) = self.manager {
+                    let vol = self.master_volume * self.sfx_volume * 0.6;
+                    let settings = StaticSoundSettings::new()
+                        .volume(Volume::Amplitude(vol as f64))
+                        .loop_region(..);
+
+                    if let Ok(handle) = manager.play(sound.with_settings(settings)) {
+                        if near_water {
+                            self.footsteps_water_handle = Some(handle);
+                        } else {
+                            self.footsteps_gravel_handle = Some(handle);
+                        }
+                        self.footsteps_playing = true;
+                        self.footsteps_in_water = near_water;
+                        log::debug!("[AUDIO] Started {} footsteps loop", if near_water { "water" } else { "gravel" });
+                    }
+                }
+            }
+        } else if !is_moving && self.footsteps_playing {
+            self.stop_footsteps();
+        }
+
+        // Adjust playback rate based on speed
+        if self.footsteps_playing {
+            let handle = if self.footsteps_in_water {
+                self.footsteps_water_handle.as_mut()
+            } else {
+                self.footsteps_gravel_handle.as_mut()
+            };
+
+            if let Some(h) = handle {
+                // Map speed to playback rate: 0.7x at slow walk, 1.0x at normal, 1.5x at sprint
+                let rate = (speed / 7.0).clamp(0.7, 1.5);
+                let _ = h.set_playback_rate(rate as f64, Tween {
+                    duration: Duration::from_millis(50),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    /// Stop any playing footsteps
+    fn stop_footsteps(&mut self) {
+        if let Some(ref mut handle) = self.footsteps_gravel_handle {
+            let _ = handle.stop(Tween {
+                duration: Duration::from_millis(100),
+                ..Default::default()
+            });
+        }
+        if let Some(ref mut handle) = self.footsteps_water_handle {
+            let _ = handle.stop(Tween {
+                duration: Duration::from_millis(100),
+                ..Default::default()
+            });
+        }
+        self.footsteps_gravel_handle = None;
+        self.footsteps_water_handle = None;
+        self.footsteps_playing = false;
+        log::debug!("[AUDIO] Stopped footsteps loop");
     }
 
     /// Get current layer volumes for external synthesis/visualization

@@ -33,7 +33,7 @@ pub fn get_icon_configs() -> Vec<IconModelConfig> {
         IconModelConfig {
             template_id: "dagger",
             model_path: "assets/models/weapons/dagger_lod2.glb",
-            scale: 8.0,  // Dagger model is small, scale up significantly
+            scale: 1.5,  // Dagger model is large, scale down to fit view
         },
         IconModelConfig {
             template_id: "hatchet",

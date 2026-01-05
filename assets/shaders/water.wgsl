@@ -108,36 +108,34 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ========================================================================
-    // LIGHTING - Shiny reflective surface
+    // LIGHTING - Blue water with subtle reflections
     // ========================================================================
 
     let sun_dir = normalize(vec3<f32>(0.3, 0.8, 0.4));  // High sun
-    let sun_color = vec3<f32>(1.0, 0.98, 0.92);  // Warm sunlight
+    let sun_color = vec3<f32>(1.0, 0.95, 0.85);  // Warm sunlight
 
-    // Fresnel - controls reflection vs refraction
+    // Fresnel - proper Schlick approximation for water (IOR ~1.33, F0 ≈ 0.02)
     let NdotV = max(dot(normal, view_dir), 0.001);
-    let fresnel = 0.02 + 0.98 * pow(1.0 - NdotV, 4.0);  // Schlick approximation
+    let F0 = 0.02;
+    let fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // Specular highlight - sharp sun reflection
+    // Specular highlight - sun sparkles on water
     let half_vec = normalize(view_dir + sun_dir);
     let NdotH = max(dot(normal, half_vec), 0.0);
-    let specular = pow(NdotH, 512.0) * 2.0;  // Very sharp highlight
+    let specular = pow(NdotH, 256.0) * 0.8;  // Softer, less intense
 
-    // Secondary softer specular
-    let spec_soft = pow(NdotH, 64.0) * 0.3;
-
-    // Diffuse lighting
+    // Diffuse lighting - subtle shading
     let NdotL = max(dot(normal, sun_dir), 0.0);
-    let diffuse = NdotL * 0.3 + 0.7;  // Subtle shading
+    let diffuse = NdotL * 0.2 + 0.8;  // Mostly ambient
 
-    // Sky reflection
-    let sky_color = vec3<f32>(0.5, 0.7, 0.95);
-    let horizon_color = vec3<f32>(0.7, 0.8, 0.9);
+    // Sky reflection - brighter, more realistic sky colors
+    let sky_zenith = vec3<f32>(0.4, 0.6, 0.9);   // Bright blue sky above
+    let sky_horizon = vec3<f32>(0.7, 0.75, 0.8); // Pale horizon
 
     // Reflect view dir around normal for sky sampling
     let reflect_dir = reflect(-view_dir, normal);
-    let sky_blend = smoothstep(-0.1, 0.5, reflect_dir.y);
-    let reflected_sky = mix(horizon_color, sky_color, sky_blend);
+    let sky_blend = smoothstep(-0.2, 0.6, reflect_dir.y);
+    let reflected_sky = mix(sky_horizon, sky_zenith, sky_blend);
 
     // ========================================================================
     // FOAM - Only at breaking wave crests
@@ -147,20 +145,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let foam_amount = clamp(foam, 0.0, 1.0);
 
     // ========================================================================
-    // COMBINE
+    // COMBINE - Fresnel-driven reflection
     // ========================================================================
 
-    // Base water with diffuse
+    // Base water with diffuse lighting
     var color = water_color * diffuse;
 
-    // Add sky reflection based on fresnel
-    color = mix(color, reflected_sky, fresnel * 0.7);
+    // Fresnel reflection - at grazing angles, reflect sky; looking down, see water
+    color = mix(color, reflected_sky, fresnel);
 
-    // Add specular highlights
-    color += sun_color * (specular + spec_soft);
+    // Add specular highlights (sun sparkle) - stronger for glint
+    color += sun_color * specular * 1.5;
 
-    // Add foam on top
-    color = mix(color, foam_color, foam_amount * 0.9);
+    // Foam only at breaking crests - reduced intensity
+    color = mix(color, foam_color, foam_amount * 0.6);
 
     // ========================================================================
     // TRANSPARENCY
@@ -181,7 +179,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Fresnel makes glancing angles more opaque (realistic)
-    alpha = mix(alpha, 0.95, fresnel * 0.3);
+    alpha = mix(alpha, 0.98, fresnel);
 
     // Foam is opaque
     alpha = mix(alpha, 0.98, foam_amount);

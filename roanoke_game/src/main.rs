@@ -5,9 +5,10 @@
 
 use croatoan_core::{App, CursorGrabMode, DeviceEvent, ElementState, KeyCode, MouseButton, PhysicalKey, WinitEvent as Event, WinitWindowEvent as WindowEvent};
 use croatoan_wfc::{generate_terrain_chunk, generate_vegetation_for_chunk, generate_detritus_for_chunk, generate_rocks_for_chunk_with_exclusions, generate_deadwood_for_chunk, generate_buildings_for_chunk, generate_foliage_for_chunk, generate_ferns_for_chunk};
-use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, MoonPipeline, SkyPipeline, ViewModelPipeline, WeaponViewModelPipeline, WeaponVertex, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline, EmberPipeline};
+use croatoan_wfc::{WormConfig, WormTunnel, generate_perlin_worm, generate_bio_orbs, generate_worm_cave_items, generate_cave_mesh_for_chunk, CaveMeshConfig, CaveGenConfig, sample_worm_sdf, get_worm_bounds, get_biome_t};
+use croatoan_render::{Camera, TerrainPipeline, TerrainTextures, ShadowMap, ShadowPipeline, InstancedShadowPipeline, GrassPipeline, TreePipeline, TreeMesh, TreeLODConfig, LODFadeMode, DetritusPipeline, BuildingPipeline, BuildingMesh, BuildingVertex, Frustum, ChunkBounds, SunPipeline, MoonPipeline, SkyPipeline, ViewModelPipeline, WeaponViewModelPipeline, WeaponVertex, LightShaftPipeline, AnimalOrbPipeline, OrbInstance, AnimalModelPipeline, AnimalVertex, AnimalInstance, FoliagePipeline, FoliageVertex, RainPipeline, EmberPipeline, BioOrbPipeline, BioOrbInstance};
 use croatoan_procgen::{generate_simple_tree_mesh, generate_deciduous_tree, generate_conifer_tree, ProceduralTreeConfig, generate_enhanced_tree, generate_default_lod1_tree, generate_lod1_tree_mesh, RockRecipe, generate_rock, BuildingRecipe, generate_building};
-use glam::{Vec3, Mat4, Quat};
+use glam::{Vec2, Vec3, Mat4, Quat};
 use wgpu;
 use image; // Added image crate
 use std::sync::{Arc, Mutex, OnceLock};
@@ -100,6 +101,7 @@ enum PauseMenuPage {
     Controls,
     LoadGame,
     CharacterSheet,
+    Network,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,6 +395,7 @@ struct SharedState {
     fog_level: u8, // 0=Off, 1=Light, 2=Medium, 3=Heavy, 4=Dense
     // Audio state tracking
     was_in_village: bool,
+    coastal_sounds_loaded: bool,
     // Data Pipeline
     data_pipeline: DataPipeline,
     npc_audio: NpcAudioIntegration,
@@ -408,6 +411,8 @@ struct SharedState {
     ship_manager: naval::ships::ShipManager,
     // World Features (rivers, caves)
     world_features: WorldFeatures,
+    // Worm tunnels for cave collision (generated per-chunk, stored for player traversal)
+    worm_tunnels: Vec<WormTunnel>,
     // Dialogue UI state
     current_dialogue: Option<npc::interaction::DialogueUIData>,
     // Character Sheet (Tab menu)
@@ -421,6 +426,12 @@ struct SharedState {
     campfire_manager: campfire::CampfireManager,
     // Currently open chest (for UI interaction)
     open_chest_id: Option<economy::ContainerId>,
+    // Multiplayer Networking
+    network: network::NetworkManager,
+    // Network UI state
+    network_host_port: String,
+    network_join_address: String,
+    network_player_name: String,
 }
 
 impl SharedState {
@@ -1596,6 +1607,7 @@ fn main() {
         fog_level: 0, // Start with fog off
         // Audio state tracking
         was_in_village: false,
+        coastal_sounds_loaded: false,
         // Data Pipeline
         data_pipeline: DataPipeline::new(),
         npc_audio: NpcAudioIntegration::new(),
@@ -1611,6 +1623,8 @@ fn main() {
         ship_manager: naval::ships::ShipManager::new(),
         // World Features (rivers and caves - will be re-seeded when game starts)
         world_features: WorldFeatures::new(12345),
+        // Worm tunnels (populated during chunk generation)
+        worm_tunnels: Vec::new(),
         // Dialogue state
         current_dialogue: None,
         // Character Sheet (Tab menu)
@@ -1624,6 +1638,37 @@ fn main() {
         campfire_manager: campfire::CampfireManager::new(),
         // Currently open chest
         open_chest_id: None,
+        // Multiplayer Networking - initialize based on CLI args
+        network: {
+            let net_mode = network::NetworkLaunchMode::from_args();
+            println!("[NET] Launch mode: {}", net_mode.description());
+            match net_mode {
+                network::NetworkLaunchMode::Offline => network::NetworkManager::offline(12345),
+                network::NetworkLaunchMode::Host { port } => {
+                    let seed: u32 = rand::random();
+                    match network::NetworkManager::host(port, seed) {
+                        Ok(nm) => nm,
+                        Err(e) => {
+                            eprintln!("[NET] Failed to start host: {}", e);
+                            network::NetworkManager::offline(12345)
+                        }
+                    }
+                }
+                network::NetworkLaunchMode::Join { address, player_name } => {
+                    match network::NetworkManager::join(&address, &player_name) {
+                        Ok(nm) => nm,
+                        Err(e) => {
+                            eprintln!("[NET] Failed to join: {}", e);
+                            network::NetworkManager::offline(12345)
+                        }
+                    }
+                }
+            }
+        },
+        // Network UI state
+        network_host_port: "7878".to_string(),
+        network_join_address: "127.0.0.1:7878".to_string(),
+        network_player_name: format!("Player_{}", rand::random::<u16>()),
     }));
 
     // ... (Channel setup) ...
@@ -1660,7 +1705,6 @@ fn main() {
         let chunk_tx = chunk_tx.clone();
 
         thread::spawn(move || {
-            println!("[GEN-{}] Worker thread started.", worker_id);
             loop {
                 // Try to get a request from the shared queue
                 let req = {
@@ -1670,13 +1714,8 @@ fn main() {
 
                 let req = match req {
                     Ok(r) => r,
-                    Err(_) => {
-                        println!("[GEN-{}] Channel closed, stopping worker.", worker_id);
-                        break;
-                    }
+                    Err(_) => break,
                 };
-
-                println!("[GEN-{}] Processing chunk ({}, {})", worker_id, req.coord.x, req.coord.z);
                 let chunk_world_size = 256.0;
                 let chunk_resolution = 64;
                 let scale = 4.0;
@@ -1698,7 +1737,7 @@ fn main() {
                     chunk_world_size,
                     offset_x as f32,
                     offset_z as f32,
-                    5, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0, noblefir0
+                    5, // tree model count: birch_0, pine_0, dead_conifer_0, fir_0, fir_1
                     1, // shrub model count: conifer_shrub_0 (beach_grass_0 disabled - using grass3 LOD)
                 );
                 let tree_groups = foliage.trees_by_model(5);
@@ -1765,10 +1804,8 @@ fn main() {
                     fern_instances,
                     offset_x, offset_z
                 )).is_err() {
-                    println!("[GEN-{}] Receiver dropped, stopping worker.", worker_id);
                     break;
                 }
-                println!("[GEN-{}] Chunk ({}, {}) complete!", worker_id, req.coord.x, req.coord.z);
             }
         });
     }
@@ -2159,6 +2196,10 @@ fn main() {
                                             chest.open();
                                         }
                                         state.open_chest_id = Some(chest_id);
+                                        // Play chest creak sound
+                                        if let Ok(sfx) = state.audio_system.load_sound("assets/audio/sfx/chest open creak.wav") {
+                                            state.audio_system.play_sfx(sfx);
+                                        }
                                         log::info!("[CHEST] Opened {}", chest_name);
                                     }
                                     // Otherwise pickup closest item
@@ -2328,14 +2369,19 @@ fn main() {
                 // Each tree GLB contains multiple meshes (bark + leaves) with different textures.
                 // We create TWO meshes per tree: one for bark (OPAQUE), one for leaves (BLEND).
                 // NOTE: tree_0, tree_1 are single-LOD placeholders - DISABLED
-                let tree_models = [
-                    // "tree_0", "tree_1", // DISABLED - single LOD placeholders
-                    "birch_0", "pine_0", "dead_conifer_0", "fir_0", "noblefir0",
+                // Species names map to their file names; some LOD0 models have special names with y-offset
+                let tree_models: Vec<(&str, &str)> = vec![
+                    // (registry_name, file_name) - file_name is what to load from disk
+                    ("birch_0", "birch_0_lod0_highpoly_yoffset"), // Use highpoly version with y-offset fix
+                    ("pine_0", "pine_0"),
+                    ("dead_conifer_0", "dead_conifer_0"),
+                    ("fir_0", "fir_0"),
+                    ("fir_1", "fir_1"),
                 ];
                 // OPTIMIZED: Using models_optimized for reduced texture/poly models
                 let mut tree_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
-                for name in &tree_models {
-                    if let Some(model) = tree_cache.load(name) {
+                for (registry_name, file_name) in &tree_models {
+                    if let Some(model) = tree_cache.load(file_name) {
                         // Separate meshes into bark (OPAQUE) and leaves (BLEND)
                         let mut bark_positions: Vec<[f32; 3]> = Vec::new();
                         let mut bark_normals: Vec<[f32; 3]> = Vec::new();
@@ -2419,19 +2465,17 @@ fn main() {
                             let texture_bind_group = bark_texture.map(|tex_data| {
                                 let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                     ctx.device(), ctx.queue(), tex_data,
-                                    Some(&format!("{}_bark_texture", name)),
+                                    Some(&format!("{}_bark_texture", registry_name)),
                                 );
                                 std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", name)),
+                                    ctx.device(), &tex_view, Some(&format!("{}_bark_bind", registry_name)),
                                 ))
                             });
                             let gpu_mesh = TreePipeline::create_mesh(
                                 ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices,
                                 texture_bind_group,
                             );
-                            state.mesh_registry.insert(format!("{}_bark", name), gpu_mesh);
-                            println!("[FOLIAGE] Registered {}_bark: {} verts, {} tris",
-                                name, bark_positions.len(), bark_indices.len() / 3);
+                            state.mesh_registry.insert(format!("{}_bark", registry_name), gpu_mesh);
                         }
 
                         // Create leaves mesh
@@ -2439,20 +2483,17 @@ fn main() {
                             let texture_bind_group = leaf_texture.map(|tex_data| {
                                 let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                     ctx.device(), ctx.queue(), tex_data,
-                                    Some(&format!("{}_leaf_texture", name)),
+                                    Some(&format!("{}_leaf_texture", registry_name)),
                                 );
-                                println!("[FOLIAGE] Created leaf texture for {}: {}x{}", name, tex_data.width, tex_data.height);
                                 std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", name)),
+                                    ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", registry_name)),
                                 ))
                             });
                             let gpu_mesh = TreePipeline::create_mesh(
                                 ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices,
                                 texture_bind_group,
                             );
-                            state.mesh_registry.insert(format!("{}_leaves", name), gpu_mesh);
-                            println!("[FOLIAGE] Registered {}_leaves: {} verts, {} tris",
-                                name, leaf_positions.len(), leaf_indices.len() / 3);
+                            state.mesh_registry.insert(format!("{}_leaves", registry_name), gpu_mesh);
                         }
 
                         // Also register combined mesh for backwards compatibility
@@ -2469,28 +2510,27 @@ fn main() {
                             let texture_bind_group = bark_texture.map(|tex_data| {
                                 let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                     ctx.device(), ctx.queue(), tex_data,
-                                    Some(&format!("{}_combined_texture", name)),
+                                    Some(&format!("{}_combined_texture", registry_name)),
                                 );
                                 std::sync::Arc::new(texture_helper.create_texture_bind_group(
-                                    ctx.device(), &tex_view, Some(&format!("{}_combined_bind", name)),
+                                    ctx.device(), &tex_view, Some(&format!("{}_combined_bind", registry_name)),
                                 ))
                             });
                             let gpu_mesh = TreePipeline::create_mesh(
                                 ctx.device(), &all_positions, &all_normals, &all_uvs, &all_indices,
                                 texture_bind_group,
                             );
-                            state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                            println!("[FOLIAGE] Registered {} (combined): {} verts", name, all_positions.len());
+                            state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
                         }
                     } else {
                         // FALLBACK: Generate procedural tree when GLB not found
-                        println!("[FOLIAGE] Tree model '{}' not found - generating procedural fallback", name);
+                        println!("[WARN] Tree '{}' (file: {}) NOT FOUND - using procedural fallback!", registry_name, file_name);
 
                         // Choose tree style based on name
-                        let proc_mesh = if name.contains("pine") || name.contains("1") {
-                            generate_conifer_tree(name.as_bytes().iter().map(|&b| b as u64).sum())
+                        let proc_mesh = if registry_name.contains("pine") || registry_name.contains("1") {
+                            generate_conifer_tree(registry_name.as_bytes().iter().map(|&b| b as u64).sum())
                         } else {
-                            generate_deciduous_tree(name.as_bytes().iter().map(|&b| b as u64).sum())
+                            generate_deciduous_tree(registry_name.as_bytes().iter().map(|&b| b as u64).sum())
                         };
 
                         let positions: Vec<[f32; 3]> = proc_mesh.vertices.iter().map(|v| v.position).collect();
@@ -2506,9 +2546,7 @@ fn main() {
                             &proc_mesh.indices,
                             None, // No texture - uses procedural coloring in shader
                         );
-                        state.mesh_registry.insert(name.to_string(), gpu_mesh);
-                        println!("[FOLIAGE] Registered procedural '{}': {} verts, {} tris",
-                            name, positions.len(), proc_mesh.indices.len() / 3);
+                        state.mesh_registry.insert(registry_name.to_string(), gpu_mesh);
                     }
                 }
 
@@ -2521,7 +2559,7 @@ fn main() {
                     ("pine_0_lod1", "pine_0"),
                     ("dead_conifer_0_lod1", "dead_conifer_0"),
                     ("fir_0_lod1", "fir_0"),
-                    ("noblefir0_lod1", "noblefir0"),
+                    ("fir_1_lod1", "fir_1"),
                 ];
                 // OPTIMIZED: Using models_optimized for reduced texture/poly models
                 let mut lod1_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
@@ -2542,13 +2580,8 @@ fn main() {
                         let mut leaf_indices: Vec<u32> = Vec::new();
                         let mut leaf_texture: Option<&gltf_loader::LoadedTexture> = None;
 
-                        println!("[LOD1] {} has {} meshes", lod1_name, model.meshes.len());
-                        for (mesh_idx, mesh) in model.meshes.iter().enumerate() {
+                        for mesh in model.meshes.iter() {
                             let is_leaves = mesh.material.alpha_mode == "BLEND" || mesh.material.alpha_mode == "MASK";
-                            let has_tex = mesh.material.base_color_texture_data.is_some();
-                            println!("[LOD1]   mesh[{}]: {} verts, alpha_mode={}, has_texture={}, is_leaves={}",
-                                mesh_idx, mesh.positions.len(), mesh.material.alpha_mode, has_tex, is_leaves);
-
                             if is_leaves {
                                 let base_idx = leaf_positions.len() as u32;
                                 leaf_positions.extend_from_slice(&mesh.positions);
@@ -2573,7 +2606,6 @@ fn main() {
                         // Create bark mesh for LOD1
                         if !bark_positions.is_empty() {
                             let texture_bind_group = bark_texture.map(|tex_data| {
-                                println!("[LOD1]   -> bark texture {}x{}", tex_data.width, tex_data.height);
                                 let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                     ctx.device(), ctx.queue(), tex_data,
                                     Some(&format!("{}_lod1_bark_texture", base_name)),
@@ -2587,14 +2619,11 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_lod1_bark", base_name), gpu_mesh);
-                            println!("[LOD1] Registered {}_lod1_bark: {} verts, {} tris",
-                                base_name, bark_positions.len(), bark_indices.len() / 3);
                         }
 
                         // Create leaves mesh for LOD1
                         if !leaf_positions.is_empty() {
                             let texture_bind_group = leaf_texture.map(|tex_data| {
-                                println!("[LOD1]   -> leaf texture {}x{}", tex_data.width, tex_data.height);
                                 let (_gpu_tex, tex_view) = gltf_loader::create_gpu_texture(
                                     ctx.device(), ctx.queue(), tex_data,
                                     Some(&format!("{}_lod1_leaf_texture", base_name)),
@@ -2608,8 +2637,6 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_lod1_leaves", base_name), gpu_mesh);
-                            println!("[LOD1] Registered {}_lod1_leaves: {} verts, {} tris",
-                                base_name, leaf_positions.len(), leaf_indices.len() / 3);
                         }
                     } else {
                         // Fall back to procedural generation
@@ -2634,8 +2661,6 @@ fn main() {
                             ctx.device(), &positions, &normals, &uvs, &lod1_mesh.indices, None,
                         );
                         state.mesh_registry.insert(lod1_name.to_string(), gpu_mesh);
-                        println!("[LOD1] Generated '{}' procedurally: {} verts, {} tris",
-                            lod1_name, positions.len(), lod1_mesh.indices.len() / 3);
                     }
                 }
 
@@ -2648,7 +2673,7 @@ fn main() {
                     ("pine_0_lod2", "pine_0"),
                     ("dead_conifer_0_lod2", "dead_conifer_0"),
                     ("fir_0_lod2", "fir_0"),
-                    ("noblefir0_lod2", "noblefir0"),
+                    ("fir_1_lod2", "fir_1"),
                 ];
                 // OPTIMIZED: Using models_optimized for reduced texture/poly models
                 let mut lod2_cache = gltf_loader::ModelCache::new("assets/models_optimized/trees");
@@ -2706,8 +2731,6 @@ fn main() {
                                 ctx.device(), &bark_positions, &bark_normals, &bark_uvs, &bark_indices, bark_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_lod2_bark", base_name), bark_mesh);
-                            println!("[LOD2] Loaded '{}_bark' from GLB: {} verts, {} tris",
-                                lod2_name, bark_positions.len(), bark_indices.len() / 3);
                         }
 
                         // Create leaves mesh with texture
@@ -2725,8 +2748,6 @@ fn main() {
                                 ctx.device(), &leaf_positions, &leaf_normals, &leaf_uvs, &leaf_indices, leaf_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_lod2_leaves", base_name), leaf_mesh);
-                            println!("[LOD2] Loaded '{}_leaves' from GLB: {} verts, {} tris",
-                                lod2_name, leaf_positions.len(), leaf_indices.len() / 3);
                         }
                     }
                 }
@@ -2804,7 +2825,6 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_bark", name), gpu_mesh);
-                            println!("[FOLIAGE] Registered {}_bark: {} verts", name, bark_positions.len());
                         }
 
                         // Create leaves mesh
@@ -2814,7 +2834,6 @@ fn main() {
                                     ctx.device(), ctx.queue(), tex_data,
                                     Some(&format!("{}_leaf_texture", name)),
                                 );
-                                println!("[FOLIAGE] Created leaf texture for {}: {}x{}", name, tex_data.width, tex_data.height);
                                 std::sync::Arc::new(texture_helper.create_texture_bind_group(
                                     ctx.device(), &tex_view, Some(&format!("{}_leaf_bind", name)),
                                 ))
@@ -2824,23 +2843,16 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_leaves", name), gpu_mesh);
-                            println!("[FOLIAGE] Registered {}_leaves: {} verts", name, leaf_positions.len());
                         }
                     } else {
-                        println!("[FOLIAGE] WARNING: Shrub model '{}' not found", name);
+                        println!("[WARN] Shrub '{}' NOT FOUND!", name);
                     }
                 }
 
                 // Load conifer_shrub_0 LOD1 and LOD2 with bark/leaves separation
-                println!("[SHRUB_LOD] === Starting conifer shrub LOD loading ===");
                 for lod in 1..=2 {
                     let lod_name = format!("conifer_shrub_0_lod{}", lod);
-                    println!("[SHRUB_LOD_DEBUG] Attempting to load '{}'", lod_name);
                     if let Some(model) = shrub_cache.load(&lod_name) {
-                        println!("[SHRUB_LOD_DEBUG] Loaded '{}' with {} meshes", lod_name, model.meshes.len());
-                        for (i, mesh) in model.meshes.iter().enumerate() {
-                            println!("[SHRUB_LOD_DEBUG]   mesh[{}]: alpha_mode={}, verts={}", i, mesh.material.alpha_mode, mesh.positions.len());
-                        }
                         // Separate bark (OPAQUE) and leaves (BLEND) like LOD0
                         let mut bark_positions: Vec<[f32; 3]> = Vec::new();
                         let mut bark_normals: Vec<[f32; 3]> = Vec::new();
@@ -2878,9 +2890,6 @@ fn main() {
                             }
                         }
 
-                        println!("[SHRUB_LOD_DEBUG] '{}' after separation: bark={} verts, leaves={} verts",
-                            lod_name, bark_positions.len(), leaf_positions.len());
-
                         // Create bark mesh
                         if !bark_positions.is_empty() {
                             let texture_bind_group = bark_texture.map(|tex_data| {
@@ -2897,7 +2906,6 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_bark", lod_name), gpu_mesh);
-                            println!("[SHRUB] Registered {}_bark: {} verts", lod_name, bark_positions.len());
                         }
 
                         // Create leaves mesh
@@ -2916,7 +2924,6 @@ fn main() {
                                 texture_bind_group,
                             );
                             state.mesh_registry.insert(format!("{}_leaves", lod_name), gpu_mesh);
-                            println!("[SHRUB] Registered {}_leaves: {} verts", lod_name, leaf_positions.len());
                         }
                     }
                 }
@@ -3402,7 +3409,8 @@ fn main() {
                 }
 
                 // 3. Boulder LODs - loaded from GLB models
-                let mut boulder_cache = gltf_loader::ModelCache::new("assets/models/rocks");
+                // OPTIMIZED: 16.3MB -> 6.2MB (5.5MB LOD0, 560KB LOD1, 150KB LOD2)
+                let mut boulder_cache = gltf_loader::ModelCache::new("assets/models_optimized/rocks");
                 let shadow_map_for_boulders = shadow_map_mutex.safe_lock();
                 let boulder_texture_helper = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_for_boulders);
                 drop(shadow_map_for_boulders);
@@ -3515,10 +3523,11 @@ fn main() {
                     }
                 }
 
-                // 5. Storage Containers - Chests (LOD1 and LOD2 only for now)
-                let mut container_cache = gltf_loader::ModelCache::new("assets/models/containers");
+                // 5. Storage Containers - Chests (all LODs from optimized folder)
+                // OPTIMIZED: Using models_optimized/containers for reduced texture/poly models
+                let mut container_cache = gltf_loader::ModelCache::new("assets/models_optimized/containers");
                 let chest_variants = ["chest_closed", "chest_open"];
-                let chest_lods = [1, 2]; // Skip LOD0 for now, use LOD1 (2006 tris) and LOD2 (48 tris)
+                let chest_lods = [0, 1, 2]; // All LODs now available
 
                 for variant in &chest_variants {
                     for &lod in &chest_lods {
@@ -3559,7 +3568,7 @@ fn main() {
                                 name, positions.len(), indices.len() / 3);
                             state.mesh_registry.insert(name, gpu_mesh);
                         } else {
-                            println!("[CONTAINER] Model '{}' not found in assets/models/containers/", name);
+                            println!("[CONTAINER] Model '{}' not found in assets/models_optimized/containers/", name);
                         }
                     }
                 }
@@ -3797,6 +3806,12 @@ fn main() {
             Mutex::new(EmberPipeline::new(ctx.device(), ctx.surface_format()))
         });
 
+        // BioOrb Pipeline (bioluminescent cave orbs)
+        static BIO_ORB_PIPELINE: OnceLock<Mutex<BioOrbPipeline>> = OnceLock::new();
+        let bio_orb_pipeline_mutex = BIO_ORB_PIPELINE.get_or_init(|| {
+            Mutex::new(BioOrbPipeline::new(ctx.device(), ctx.surface_format()))
+        });
+
         // Container Pipelines created fresh each frame (same pattern as rocks/trees)
 
         // Animal Model Cache (loads GLTF models)
@@ -3852,7 +3867,7 @@ fn main() {
                         "assets/models/weapons/dagger_lod0.glb",
                         Vec3::new(0.40, -0.30, -0.55), // Right hand position (same as others)
                         Vec3::new(0.0, 1.57, 0.0),     // Rotated 180° - dagger model faces opposite direction
-                        1.2f32,                        // Same scale as others
+                        0.4f32,                        // Dagger model is larger, reduced scale
                     ),
                     Some("hatchet") => (
                         "assets/models/weapons/hatchet_lod0.glb",
@@ -3964,6 +3979,19 @@ fn main() {
             // Update Weather
             state.weather.update(delta);
 
+            // Update Network (multiplayer sync)
+            let game_time = state.game_progression.game_time;
+            state.network.update(delta, game_time);
+
+            // Send player position to network
+            state.network.send_position(
+                state.player.position,
+                state.player.velocity,
+                state.player.yaw,
+                state.player.pitch,
+                state.player.on_ground,
+            );
+
             // Update Campfires (flickering animation)
             state.campfire_manager.update(delta);
 
@@ -3978,6 +4006,28 @@ fn main() {
             let time_normalized = state.time_of_day / 24.0; // Normalize to 0.0-1.0
             let current_weather = state.weather.current_weather;
             state.audio_system.update(delta, current_weather, time_normalized);
+
+            // Load coastal sounds and footsteps once when playing starts
+            if !state.coastal_sounds_loaded {
+                state.audio_system.load_coastal_sounds();
+                state.audio_system.load_footsteps();
+                state.coastal_sounds_loaded = true;
+            }
+
+            // Update coastal ambience based on player distance to shoreline
+            {
+                let player_x = state.player.position.x;
+                let player_z = state.player.position.z;
+                let seed = state.seed;
+
+                // Calculate distance to nearest shoreline
+                let dist_to_surf = croatoan_wfc::distance_to_shoreline(player_x, player_z, seed);
+
+                // Get biome_t for gradient-based forest wind and overlap zones
+                let biome_t = croatoan_wfc::get_biome_t(player_x, player_z, seed);
+
+                state.audio_system.update_coastal(delta, dist_to_surf, biome_t);
+            }
 
             // Sync audio music state with game state
             let audio_music_state = match state.game_state {
@@ -4765,10 +4815,82 @@ fn main() {
             state.player.speed = original_speed * speed_multiplier;
 
             let seed = state.seed; // Copy seed to avoid borrow error
-            state.player.update(delta, input_dir, seed);
+            let player_y = state.player.position.y;
+
+            // Clone worm tunnels to avoid borrow conflict with player
+            let worm_tunnels: Vec<WormTunnel> = state.worm_tunnels.clone();
+
+            // Create cave-aware height function
+            // Check if player is inside any worm tunnel - if so, allow traversal below terrain
+            state.player.update_with_height_fn(delta, input_dir, seed, |x, z| {
+                let (terrain_height, _) = croatoan_wfc::get_height_at(x, z, seed);
+
+                // Check if we're inside or near any worm tunnel at this XZ position
+                for tunnel in worm_tunnels.iter() {
+                    // First check if there's a tunnel at terrain level (entrance detection)
+                    let surface_test = Vec3::new(x, terrain_height - 1.0, z);
+                    let surface_sdf = sample_worm_sdf(surface_test, tunnel);
+
+                    // If tunnel exists near surface, check if we should be in it
+                    if surface_sdf < 2.0 {
+                        // Sample at current player Y position
+                        let test_pos = Vec3::new(x, player_y, z);
+                        let sdf = sample_worm_sdf(test_pos, tunnel);
+
+                        if sdf < 0.0 {
+                            // Inside tunnel - find tunnel floor
+                            let mut floor_y = player_y;
+                            for step in 0..50 {
+                                let check_y = player_y - step as f32 * 0.5;
+                                let check_pos = Vec3::new(x, check_y, z);
+                                let check_sdf = sample_worm_sdf(check_pos, tunnel);
+                                if check_sdf >= 0.0 {
+                                    floor_y = check_y + 0.5;
+                                    break;
+                                }
+                                floor_y = check_y;
+                            }
+                            return floor_y;
+                        } else if surface_sdf < 0.0 {
+                            // At cave entrance but above tunnel - allow falling in
+                            // Find where the tunnel air space starts
+                            let mut cave_floor = terrain_height;
+                            for step in 0..30 {
+                                let check_y = terrain_height - step as f32 * 0.5;
+                                let check_pos = Vec3::new(x, check_y, z);
+                                let check_sdf = sample_worm_sdf(check_pos, tunnel);
+                                if check_sdf < 0.0 {
+                                    // Found tunnel air - now find the floor
+                                    for floor_step in 0..50 {
+                                        let floor_check_y = check_y - floor_step as f32 * 0.5;
+                                        let floor_check_pos = Vec3::new(x, floor_check_y, z);
+                                        let floor_sdf = sample_worm_sdf(floor_check_pos, tunnel);
+                                        if floor_sdf >= 0.0 {
+                                            cave_floor = floor_check_y + 0.5;
+                                            break;
+                                        }
+                                        cave_floor = floor_check_y;
+                                    }
+                                    return cave_floor;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Not in any tunnel, use terrain height
+                terrain_height
+            });
 
             // Restore original speed
             state.player.speed = original_speed;
+
+            // Update footsteps audio based on horizontal movement speed and terrain
+            let horizontal_speed = Vec2::new(state.player.velocity.x, state.player.velocity.z).length();
+            // Check if near water: biome_t < 0.5 is beach/shoreline (within ~5 yards of surf)
+            let biome_t = get_biome_t(state.player.position.x, state.player.position.z, state.seed);
+            let near_water = biome_t < 0.5;
+            state.audio_system.update_footsteps(horizontal_speed, near_water);
 
             // Sync Camera to Player
             state.camera.position = state.player.position;
@@ -5953,8 +6075,22 @@ fn main() {
                             ui.label("T/Y keys: Change time");
                             ui.separator();
 
-                            // Dev Stats - Weather/Fog/Render
+                            // Dev Stats - Weather/Fog/Render/Network
                             ui.collapsing("Dev Stats", |ui| {
+                                // Network Status
+                                if state.network.is_online() {
+                                    ui.label(format!("Network: {}", state.network.status_string()));
+                                    for (_id, player) in state.network.remote_players() {
+                                        ui.label(format!("  {} @ ({:.0}, {:.0}, {:.0})",
+                                            player.name,
+                                            player.position.x,
+                                            player.position.y,
+                                            player.position.z
+                                        ));
+                                    }
+                                    ui.separator();
+                                }
+
                                 ui.label(format!("Weather: {:?}", state.weather.current_weather));
                                 ui.label(format!("Render Dist: {:.0}", state.render_distance));
                                 let fog = state.atmosphere.fog_params();
@@ -6069,6 +6205,16 @@ fn main() {
                                     ui.add_space(10.0);
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Load Game")).clicked() {
                                         state.pause_menu_page = PauseMenuPage::LoadGame;
+                                    }
+                                    ui.add_space(10.0);
+                                    // Multiplayer button - shows current status
+                                    let mp_label = if state.network.is_online() {
+                                        format!("Multiplayer ({})", state.network.player_count())
+                                    } else {
+                                        "Multiplayer".to_string()
+                                    };
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new(mp_label)).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Network;
                                     }
                                     ui.add_space(10.0);
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Exit to Main Menu")).clicked() {
@@ -6316,6 +6462,115 @@ fn main() {
                                         state.pause_menu_page = PauseMenuPage::Main;
                                     }
                                 }
+                                PauseMenuPage::Network => {
+                                    ui.heading("Multiplayer");
+                                    ui.add_space(20.0);
+
+                                    // Show current status
+                                    let status = state.network.status_string();
+                                    ui.label(egui::RichText::new(format!("Status: {}", status)).size(16.0).color(egui::Color32::BLACK));
+                                    ui.add_space(20.0);
+
+                                    if state.network.is_online() {
+                                        // Show connected players
+                                        ui.label(egui::RichText::new("Connected Players:").size(14.0).color(egui::Color32::DARK_GRAY));
+                                        ui.add_space(10.0);
+
+                                        // Show self
+                                        ui.label("  You (Host)" .to_string());
+
+                                        // Show remote players
+                                        for (_id, player) in state.network.remote_players() {
+                                            ui.label(format!("  {} at ({:.0}, {:.0}, {:.0})",
+                                                player.name,
+                                                player.position.x,
+                                                player.position.y,
+                                                player.position.z
+                                            ));
+                                        }
+
+                                        ui.add_space(20.0);
+
+                                        // Disconnect button
+                                        if ui.add_sized([200.0, 40.0], egui::Button::new("Disconnect")).clicked() {
+                                            // Create new offline manager
+                                            state.network = network::NetworkManager::offline(state.seed);
+                                            println!("[NET] Disconnected from multiplayer");
+                                        }
+                                    } else {
+                                        // Not connected - show host/join options
+                                        ui.separator();
+                                        ui.add_space(10.0);
+
+                                        // === HOST SECTION ===
+                                        ui.label(egui::RichText::new("Host a Game (Open to LAN)").size(18.0).color(egui::Color32::BLACK));
+                                        ui.add_space(10.0);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Port:");
+                                            ui.add(egui::TextEdit::singleline(&mut state.network_host_port).desired_width(80.0));
+                                        });
+                                        ui.add_space(5.0);
+
+                                        if ui.add_sized([200.0, 40.0], egui::Button::new("🌐 Open to LAN")).clicked() {
+                                            let port: u16 = state.network_host_port.parse().unwrap_or(7878);
+                                            match network::NetworkManager::host(port, state.seed) {
+                                                Ok(nm) => {
+                                                    state.network = nm;
+                                                    println!("[NET] Now hosting on port {}", port);
+                                                    println!("[NET] Others can join with: --join <your-ip>:{}", port);
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("[NET] Failed to host: {}", e);
+                                                }
+                                            }
+                                        }
+
+                                        ui.add_space(20.0);
+                                        ui.separator();
+                                        ui.add_space(10.0);
+
+                                        // === JOIN SECTION ===
+                                        ui.label(egui::RichText::new("Join a Game").size(18.0).color(egui::Color32::BLACK));
+                                        ui.add_space(10.0);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Address:");
+                                            ui.add(egui::TextEdit::singleline(&mut state.network_join_address).desired_width(150.0));
+                                        });
+                                        ui.add_space(5.0);
+
+                                        ui.horizontal(|ui| {
+                                            ui.label("Name:");
+                                            ui.add(egui::TextEdit::singleline(&mut state.network_player_name).desired_width(120.0));
+                                        });
+                                        ui.add_space(10.0);
+
+                                        if ui.add_sized([200.0, 40.0], egui::Button::new("🔗 Join Game")).clicked() {
+                                            let address = state.network_join_address.clone();
+                                            let name = state.network_player_name.clone();
+                                            match network::NetworkManager::join(&address, &name) {
+                                                Ok(nm) => {
+                                                    // Update seed from server
+                                                    state.seed = nm.seed();
+                                                    state.network = nm;
+                                                    println!("[NET] Connected to {}", address);
+                                                    // Return to game with new seed
+                                                    state.game_state = GameState::Playing;
+                                                    state.pause_menu_page = PauseMenuPage::Main;
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("[NET] Failed to join: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(30.0);
+                                    if ui.add_sized([200.0, 40.0], egui::Button::new("Back")).clicked() {
+                                        state.pause_menu_page = PauseMenuPage::Main;
+                                    }
+                                }
                                 PauseMenuPage::CharacterSheet => {
                                     // Handled above, this case won't be reached
                                 }
@@ -6416,16 +6671,6 @@ fn main() {
                             fern_instances,
                             offset_x, offset_z)) => {
 
-                            // Debug: Show generation counts - ROCK DIAGNOSTIC
-                            let tree_count: usize = tree_groups.values().map(|v| v.len()).sum();
-                            let shrub_count: usize = shrub_groups.values().map(|v| v.len()).sum();
-                            println!("========================================");
-                            println!("[CHUNK DEBUG] Chunk ({}, {}) received:", offset_x, offset_z);
-                            println!("[CHUNK DEBUG]   Total rocks: {}", rock_instances.len());
-                            println!("[CHUNK DEBUG]   Trees: {} (groups: {:?})", tree_count, tree_groups.keys().collect::<Vec<_>>());
-                            println!("[CHUNK DEBUG]   Shrubs: {} (groups: {:?})", shrub_count, shrub_groups.keys().collect::<Vec<_>>());
-                            println!("========================================");
-
                             // Update status
                             state.loading_progress.current_status = format!(
                                 "Uploading chunk at ({}, {})...",
@@ -6478,9 +6723,6 @@ fn main() {
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
-                                    println!("[FOLIAGE] Tree '{}' bark: {} instances", name, transforms.len());
-                                } else {
-                                    println!("[FOLIAGE] MISSING bark mesh '{}' - registry has {} entries", bark_name, state.mesh_registry.len());
                                 }
                                 // Render leaves mesh (BLEND) with same transforms
                                 let leaves_name = format!("{}_leaves", name);
@@ -6489,9 +6731,6 @@ fn main() {
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), transforms);
                                     foliage_pipelines.push(tp);
-                                    println!("[FOLIAGE] Tree '{}' leaves: {} instances", name, transforms.len());
-                                } else {
-                                    println!("[FOLIAGE] MISSING leaves mesh '{}' - registry has {} entries", leaves_name, state.mesh_registry.len());
                                 }
                             }
                             drop(shadow_map);
@@ -6512,7 +6751,6 @@ fn main() {
                                         tp.set_mesh(mesh.clone());
                                         tp.upload_instances(ctx.device(), transforms);
                                         foliage_pipelines.push(tp);
-                                        println!("[SHRUB] '{}' bark: {} instances", name, transforms.len());
                                     }
                                     let leaves_name = format!("{}_leaves", name);
                                     if let Some(mesh) = state.mesh_registry.get(&leaves_name) {
@@ -6520,7 +6758,6 @@ fn main() {
                                         tp.set_mesh(mesh.clone());
                                         tp.upload_instances(ctx.device(), transforms);
                                         foliage_pipelines.push(tp);
-                                        println!("[SHRUB] '{}' leaves: {} instances", name, transforms.len());
                                     }
                                 }
                             }
@@ -6559,14 +6796,11 @@ fn main() {
                                         tp.set_mesh(mesh.clone());
                                         tp.upload_instances(ctx.device(), &conifer_shrub_transforms);
                                         pipelines.push(tp);
-                                        println!("[SHRUB] conifer_shrub_0 LOD{}: {} instances", lod, conifer_shrub_transforms.len());
                                     }
                                 }
                             }
 
                             drop(shadow_map_shrubs);
-                            println!("[CHUNK] Foliage LOD0: {} pipelines, Conifer shrubs: {}/{}/{}",
-                                foliage_pipelines.len(), conifer_shrubs_lod0.len(), conifer_shrubs_lod1.len(), conifer_shrubs_lod2.len());
 
                             // Create LOD1 pipelines (scaled down transforms for reduced visual volume)
                             // LOD1 now uses separate bark/leaves like LOD0
@@ -6586,7 +6820,6 @@ fn main() {
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), &scaled_transforms);
                                     foliage_pipelines_lod1.push(tp);
-                                    println!("[LOD1] Tree '{}' bark: {} instances", name, transforms.len());
                                 }
 
                                 // Then leaves mesh
@@ -6596,11 +6829,9 @@ fn main() {
                                     tp.set_mesh(mesh.clone());
                                     tp.upload_instances(ctx.device(), &scaled_transforms);
                                     foliage_pipelines_lod1.push(tp);
-                                    println!("[LOD1] Tree '{}' leaves: {} instances", name, transforms.len());
                                 }
                             }
                             drop(shadow_map_lod1);
-                            println!("[CHUNK] Foliage LOD1: {} pipelines", foliage_pipelines_lod1.len());
 
                             // Create LOD2 pipelines (billboard/simplified for distant rendering)
                             // LOD2 now uses separate bark/leaves meshes like LOD0/LOD1 for proper texturing
@@ -6632,11 +6863,8 @@ fn main() {
                                     tp.upload_instances(ctx.device(), &scaled_transforms);
                                     foliage_pipelines_lod2.push(tp);
                                 }
-
-                                println!("[LOD2] Tree '{}': {} instances (bark+leaves)", name, transforms.len());
                             }
                             drop(shadow_map_lod2);
-                            println!("[CHUNK] Foliage LOD2: {} pipelines", foliage_pipelines_lod2.len());
 
                             let mut detritus_pipeline = None;
                             if !det_pos.is_empty() {
@@ -6661,9 +6889,6 @@ fn main() {
                             }
 
                             // Debug: Show rock type breakdown
-                            println!("[ROCK DEBUG] Rock types: {:?}, boulders: {}, dead_logs: {}",
-                                rock_groups.keys().collect::<Vec<_>>(), boulder_transforms.len(), dead_log_transforms.len());
-
                             // Create pipelines for non-boulder rocks
                             let mut rock_pipelines = Vec::new();
                             let shadow_map = shadow_map_mutex.safe_lock();
@@ -6689,7 +6914,6 @@ fn main() {
                                         bp.set_mesh(mesh.clone());
                                         bp.upload_instances(ctx.device(), &boulder_transforms);
                                         pipelines.push(bp);
-                                        println!("[BOULDER] LOD{}: {} instances", lod, boulder_transforms.len());
                                     }
                                 }
                             }
@@ -6711,15 +6935,11 @@ fn main() {
                                         dlp.set_mesh(mesh.clone());
                                         dlp.upload_instances(ctx.device(), &dead_log_transforms);
                                         pipelines.push(dlp);
-                                        println!("[DEAD_LOG] LOD{}: {} instances", lod, dead_log_transforms.len());
                                     }
                                 }
                             }
 
                             drop(shadow_map);
-                            println!("[ROCK DEBUG] Rock pipelines: {}, Boulder LODs: {}/{}/{}, DeadLog LODs: {}/{}/{}",
-                                rock_pipelines.len(), boulders_lod0.len(), boulders_lod1.len(), boulders_lod2.len(),
-                                dead_logs_lod0.len(), dead_logs_lod1.len(), dead_logs_lod2.len());
 
                             // Process Buildings
                             let mut building_pipelines = Vec::new();
@@ -6818,10 +7038,6 @@ fn main() {
                                     fp.set_mesh(mesh.clone());
                                     fp.upload_instances(ctx.device(), &transforms);
                                     fern_pipelines.push(fp);
-                                    println!("[FERN] Created pipeline '{}': {} instances", name, transforms.len());
-                                } else {
-                                    println!("[FERN] Mesh '{}' not in registry! Available meshes: {:?}",
-                                        name, state.mesh_registry.keys().take(10).collect::<Vec<_>>());
                                 }
                             }
                             drop(shadow_map_for_ferns);
@@ -6919,7 +7135,6 @@ fn main() {
                                 }
 
                                 drop(shadow_map_g2);
-                                println!("[GRASS2] Created {} instances for chunk", grass2_transforms.len());
                             }
 
                             // ================================================================
@@ -7121,10 +7336,6 @@ fn main() {
                                     }
                                 }
                             }
-
-                            // Debug: Print flower spawning stats
-                            println!("[FLOWER DEBUG] Chunk ({},{}): checked {} positions, {} passed biome filter, {} chamomile spawned",
-                                offset_x, offset_z, flower_debug_checks, flower_debug_passed, chamomile_transforms.len());
 
                             // CLOVER PATCHES (offset from chamomile by half spacing)
                             let clover_seed = state.seed.wrapping_add(8888) ^ (offset_x as u32) ^ ((offset_z as u32) << 16);
@@ -7494,6 +7705,129 @@ fn main() {
                                 println!("[HEDGE] {} instances (forest/beach edges)", hedge_transforms.len());
                             }
 
+                            // ================================================================
+                            // CAVE SYSTEM: Generate Perlin worm caves for this chunk
+                            // ================================================================
+                            let chunk_min = Vec3::new(offset_x as f32, -100.0, offset_z as f32);
+                            let chunk_max = Vec3::new(offset_x as f32 + chunk_size, 200.0, offset_z as f32 + chunk_size);
+
+                            // Check if this chunk should have a cave entrance
+                            // Use noise to deterministically place cave entrances
+                            let cave_entrance_noise = croatoan_wfc::fbm_3d(
+                                Vec3::new(offset_x as f32 * 0.003, 0.0, offset_z as f32 * 0.003),
+                                2, 2.0, 0.5, state.seed.wrapping_add(99999)
+                            );
+
+                            let mut cave_mesh_pipeline: Option<TreePipeline> = None;
+                            let mut chunk_bio_orbs = Vec::new();
+                            let mut chunk_bones = Vec::new();
+                            let mut chunk_artifacts = Vec::new();
+
+                            // ~30% of chunks get cave entrances for testing (was 0.7 = 5%)
+                            if cave_entrance_noise > 0.2 {
+                                // Find a suitable entrance point (hillside or mountain)
+                                let entrance_x = offset_x as f32 + chunk_size * 0.5;
+                                let entrance_z = offset_z as f32 + chunk_size * 0.5;
+                                let (entrance_height, _) = croatoan_wfc::get_height_at(entrance_x, entrance_z, state.seed);
+
+                                // Create caves in any terrain above sea level (was 15.0)
+                                if entrance_height > 2.0 {
+                                    let entrance_pos = Vec3::new(entrance_x, entrance_height - 2.0, entrance_z);
+
+                                    // Calculate initial direction (into the hillside)
+                                    let biome_t = croatoan_wfc::get_biome_t(entrance_x, entrance_z, state.seed);
+                                    let inward_angle = std::f32::consts::PI * (0.5 + biome_t); // Varies based on terrain
+                                    let initial_dir = Vec3::new(inward_angle.cos(), -0.2, inward_angle.sin()).normalize();
+
+                                    // Configure worm tunnel
+                                    let worm_config = WormConfig {
+                                        seed: state.seed.wrapping_add(offset_x as u32).wrapping_add((offset_z as u32) << 16),
+                                        step_size: 2.0,
+                                        min_radius: 2.5,
+                                        max_radius: 8.0,
+                                        radius_frequency: 0.02,
+                                        direction_frequency: 0.015,
+                                        branch_probability: 0.15, // Increased for testing (was 0.015)
+                                        min_tunnel_length: 60.0,
+                                        max_tunnel_length: 200.0,
+                                        descent_bias: 0.12,
+                                        humidity_frequency: 0.05,
+                                    };
+
+                                    // Terrain height function for the worm to follow
+                                    let seed_for_terrain = state.seed;
+                                    let terrain_height_fn = |x: f32, z: f32| -> f32 {
+                                        let (h, _) = croatoan_wfc::get_height_at(x, z, seed_for_terrain);
+                                        h
+                                    };
+
+                                    // Generate the Perlin worm tunnel
+                                    let worm_tunnel = generate_perlin_worm(entrance_pos, initial_dir, &worm_config, &terrain_height_fn);
+
+                                    // Store worm tunnel for collision detection
+                                    state.worm_tunnels.push(worm_tunnel.clone());
+
+                                    // Generate cave mesh for this chunk
+                                    let mesh_config = CaveMeshConfig::default();
+                                    if let Some(cave_mesh_data) = generate_cave_mesh_for_chunk(&worm_tunnel, chunk_min, chunk_max, &mesh_config) {
+                                        if !cave_mesh_data.positions.is_empty() {
+                                            // Generate dummy UVs (caves don't need textures)
+                                            let dummy_uvs: Vec<[f32; 2]> = vec![[0.0, 0.0]; cave_mesh_data.positions.len()];
+
+                                            // Create TreeMesh from cave mesh data
+                                            let cave_tree_mesh = TreePipeline::create_mesh(
+                                                ctx.device(),
+                                                &cave_mesh_data.positions,
+                                                &cave_mesh_data.normals,
+                                                &dummy_uvs,
+                                                &cave_mesh_data.indices,
+                                                None, // No texture
+                                            );
+
+                                            // Create pipeline with identity transform (mesh is already in world space)
+                                            let shadow_map_cave = shadow_map_mutex.safe_lock();
+                                            let mut cave_pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_cave);
+                                            cave_pipeline.set_mesh(cave_tree_mesh);
+                                            cave_pipeline.upload_instances(ctx.device(), &[Mat4::IDENTITY]);
+                                            drop(shadow_map_cave);
+
+                                            cave_mesh_pipeline = Some(cave_pipeline);
+                                        }
+                                    }
+
+                                    // Generate bioluminescent orbs (density 1.0 = default)
+                                    let orbs = generate_bio_orbs(&worm_tunnel, 1.0);
+
+                                    // Filter orbs to this chunk
+                                    for orb in orbs {
+                                        if orb.position.x >= chunk_min.x && orb.position.x < chunk_max.x &&
+                                           orb.position.z >= chunk_min.z && orb.position.z < chunk_max.z {
+                                            chunk_bio_orbs.push(orb);
+                                        }
+                                    }
+
+                                    // Generate bones and artifacts
+                                    let cave_gen_config = CaveGenConfig::default();
+                                    let (bones, artifacts) = generate_worm_cave_items(&worm_tunnel, &cave_gen_config);
+
+                                    // Filter items to this chunk
+                                    for bone in bones {
+                                        if bone.position.x >= chunk_min.x && bone.position.x < chunk_max.x &&
+                                           bone.position.z >= chunk_min.z && bone.position.z < chunk_max.z {
+                                            chunk_bones.push(bone);
+                                        }
+                                    }
+
+                                    for artifact in artifacts {
+                                        if artifact.position.x >= chunk_min.x && artifact.position.x < chunk_max.x &&
+                                           artifact.position.z >= chunk_min.z && artifact.position.z < chunk_max.z {
+                                            chunk_artifacts.push(artifact);
+                                        }
+                                    }
+
+                                }
+                            }
+
                             // Add to Manager
                             let loaded_chunk = LoadedChunk {
                                 terrain: terrain_pipeline,
@@ -7531,6 +7865,10 @@ fn main() {
                                 hedge_lod1: hedge_lod1_pipelines,
                                 buildings: building_pipelines,
                                 river_water: Vec::new(), // TODO: implement river water
+                                cave_mesh: cave_mesh_pipeline,
+                                bio_orbs: chunk_bio_orbs,
+                                cave_bones: chunk_bones,
+                                cave_artifacts: chunk_artifacts,
                                 bounds,
                             };
                             
@@ -7959,6 +8297,8 @@ fn main() {
                 let mut rain_pipeline = rain_pipeline_mutex.safe_lock();
                 // Lock ember_pipeline early so it outlives render_pass
                 let mut ember_pipeline = ember_pipeline_mutex.safe_lock();
+                // Lock bio_orb_pipeline early so it outlives render_pass
+                let mut bio_orb_pipeline = bio_orb_pipeline_mutex.safe_lock();
                 // Container pipelines must be declared here to outlive render_pass
                 let mut container_pipelines: Vec<TreePipeline> = Vec::new();
                 // Campfire pipelines must be declared here to outlive render_pass
@@ -8238,7 +8578,7 @@ fn main() {
                                 if boulder_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
                                 boulder_lod0_fade_start, boulder_lod0_end,
                             );
-                            rocks_rendered += boulder.instance_count() as usize;
+                            boulders_rendered += boulder.instance_count() as usize;
                             boulder.render(&mut render_pass);
                         }
                     }
@@ -8259,6 +8599,7 @@ fn main() {
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0, lod_mode, fade_start, fade_end,
                             );
+                            boulders_rendered += boulder.instance_count() as usize;
                             boulder.render(&mut render_pass);
                         }
                     }
@@ -8274,6 +8615,7 @@ fn main() {
                                 if boulder_transition_1_2 { LODFadeMode::LOD1FadeIn } else { LODFadeMode::Disabled },
                                 boulder_lod1_fade_start, boulder_lod1_end,
                             );
+                            boulders_rendered += boulder.instance_count() as usize;
                             boulder.render(&mut render_pass);
                         }
                     }
@@ -8672,6 +9014,19 @@ fn main() {
                             building.render(&mut render_pass);
                         }
                     }
+
+                    // Cave mesh (Perlin worm caves)
+                    if let Some(ref cave_mesh) = chunk.cave_mesh {
+                        // Update cave mesh uniforms (same as trees)
+                        cave_mesh.update_camera_full(
+                            ctx.queue(), &view_proj, &light_view_proj,
+                            sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                            fog_color, fog_start, fog_end, fog_density,
+                            0.4, // ambient (darker in caves)
+                            0.6, // shadow strength
+                        );
+                        cave_mesh.render(&mut render_pass);
+                    }
                 }
 
                 // Render Storage Containers (chests, crates, etc.)
@@ -8680,7 +9035,8 @@ fn main() {
                     let mut rendered_count = 0usize;
                     let player_pos = state.camera.position;
                     let container_max_distance = 200.0;
-                    let lod_threshold = 50.0;
+                    let lod0_threshold = 20.0;  // Close: use high-poly LOD0
+                    let lod1_threshold = 50.0;  // Medium: use LOD1
 
                     // Debug: log container count once
                     static CONTAINER_DEBUG_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -8695,9 +9051,11 @@ fn main() {
                         }
                     }
 
-                    // Collect transforms for each mesh type
+                    // Collect transforms for each mesh type and LOD level
+                    let mut closed_lod0_transforms: Vec<Mat4> = Vec::new();
                     let mut closed_lod1_transforms: Vec<Mat4> = Vec::new();
                     let mut closed_lod2_transforms: Vec<Mat4> = Vec::new();
+                    let mut open_lod0_transforms: Vec<Mat4> = Vec::new();
                     let mut open_lod1_transforms: Vec<Mat4> = Vec::new();
                     let mut open_lod2_transforms: Vec<Mat4> = Vec::new();
 
@@ -8716,12 +9074,14 @@ fn main() {
                             chest_pos,
                         );
 
-                        let is_lod1 = dist < lod_threshold;
+                        // Select LOD based on distance: LOD0 (close), LOD1 (medium), LOD2 (far)
                         if container.is_open {
-                            if is_lod1 { open_lod1_transforms.push(transform); }
+                            if dist < lod0_threshold { open_lod0_transforms.push(transform); }
+                            else if dist < lod1_threshold { open_lod1_transforms.push(transform); }
                             else { open_lod2_transforms.push(transform); }
                         } else {
-                            if is_lod1 { closed_lod1_transforms.push(transform); }
+                            if dist < lod0_threshold { closed_lod0_transforms.push(transform); }
+                            else if dist < lod1_threshold { closed_lod1_transforms.push(transform); }
                             else { closed_lod2_transforms.push(transform); }
                         }
                     }
@@ -8729,6 +9089,33 @@ fn main() {
                     // Create pipelines for each variant with transforms
                     let shadow_map = shadow_map_mutex.safe_lock();
 
+                    // LOD0 - High poly for close range
+                    if !closed_lod0_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_closed_lod0") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &closed_lod0_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += closed_lod0_transforms.len();
+                        }
+                    }
+                    if !open_lod0_transforms.is_empty() {
+                        if let Some(mesh) = state.mesh_registry.get("chest_open_lod0") {
+                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            p.set_mesh(mesh.clone());
+                            p.upload_instances(ctx.device(), &open_lod0_transforms);
+                            p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
+                            container_pipelines.push(p);
+                            rendered_count += open_lod0_transforms.len();
+                        }
+                    }
+
+                    // LOD1 - Medium poly for medium range
                     if !closed_lod1_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_closed_lod1") {
                             let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
@@ -8978,6 +9365,29 @@ fn main() {
                     &ember_campfire_data,
                 );
                 ember_pipeline.render(&mut render_pass);
+
+                // Render Bioluminescent Orbs (from caves)
+                // Collect all bio orbs from loaded chunks
+                let mut all_bio_orbs: Vec<BioOrbInstance> = Vec::new();
+                for (_coord, chunk) in manager.iter_chunks() {
+                    for orb in &chunk.bio_orbs {
+                        all_bio_orbs.push(BioOrbInstance {
+                            position: orb.position.to_array(),
+                            radius: orb.cluster_size * 0.3,
+                            color: orb.color,
+                            intensity: orb.intensity,
+                            pulse_phase: orb.pulse_phase,
+                            pulse_speed: orb.pulse_speed,
+                            _padding: [0.0, 0.0],
+                        });
+                    }
+                }
+
+                if !all_bio_orbs.is_empty() {
+                    bio_orb_pipeline.upload_instances(ctx.device(), &all_bio_orbs);
+                    bio_orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position, elapsed);
+                    bio_orb_pipeline.render(&mut render_pass);
+                }
 
                 // Log culling stats occasionally (every ~60 frames)
                 static mut FRAME_COUNTER: u32 = 0;

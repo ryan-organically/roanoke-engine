@@ -63,6 +63,18 @@ impl Player {
     }
 
     pub fn update(&mut self, dt: f32, input_dir: Vec3, seed: u32) {
+        // Use default terrain height function
+        self.update_with_height_fn(dt, input_dir, seed, |x, z| {
+            let (h, _) = get_height_at(x, z, seed);
+            h
+        });
+    }
+
+    /// Update with a custom height function (for cave-aware collision)
+    pub fn update_with_height_fn<F>(&mut self, dt: f32, input_dir: Vec3, seed: u32, height_fn: F)
+    where
+        F: Fn(f32, f32) -> f32,
+    {
         // Apply Gravity
         self.velocity.y -= self.gravity * dt;
 
@@ -70,9 +82,9 @@ impl Player {
         // Input dir is relative to camera rotation
         let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin()).normalize();
         let right = Vec3::new(-self.yaw.sin(), 0.0, self.yaw.cos()).normalize();
-        
+
         let move_vec = (forward * input_dir.z + right * input_dir.x).normalize_or_zero();
-        
+
         // Simple movement (no inertia for now)
         self.velocity.x = move_vec.x * self.speed;
         self.velocity.z = move_vec.z * self.speed;
@@ -80,11 +92,11 @@ impl Player {
         // Apply Velocity
         self.position += self.velocity * dt;
 
-        // Terrain Collision
-        let (terrain_height, _) = get_height_at(self.position.x, self.position.z, seed);
-        
-        if self.position.y < terrain_height + self.height {
-            self.position.y = terrain_height + self.height;
+        // Terrain Collision (height_fn may account for caves)
+        let ground_height = height_fn(self.position.x, self.position.z);
+
+        if self.position.y < ground_height + self.height {
+            self.position.y = ground_height + self.height;
             self.velocity.y = 0.0;
             self.on_ground = true;
         } else {

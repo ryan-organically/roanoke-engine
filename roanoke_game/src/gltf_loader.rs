@@ -1092,11 +1092,31 @@ impl ModelCache {
         // Try loading .glb first - don't rely on exists() which can fail on Windows
         match load_gltf(&glb_path) {
             Ok(model) => {
+                // Verify with absolute path and file size to detect stale cache issues
+                let abs_path = std::path::Path::new(&glb_path).canonicalize()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| glb_path.clone());
+                let file_size = std::fs::metadata(&glb_path)
+                    .map(|m| format!("{:.1}MB", m.len() as f64 / 1_048_576.0))
+                    .unwrap_or_else(|_| "?".to_string());
+
+                // Calculate vertex bounds to verify model data
+                let mut min_y = f32::MAX;
+                let mut max_y = f32::MIN;
+                for mesh in &model.meshes {
+                    for pos in &mesh.positions {
+                        min_y = min_y.min(pos[1]);
+                        max_y = max_y.max(pos[1]);
+                    }
+                }
+                println!("[ModelCache] ✓ '{}' {} | {} meshes | Y: {:.2} to {:.2} | {}",
+                    name, file_size, model.meshes.len(), min_y, max_y, abs_path);
+
                 self.models.insert(name.to_string(), model);
                 return self.models.get(name);
             }
-            Err(_) => {
-                // GLB failed, try GLTF
+            Err(e) => {
+                println!("[ModelCache] GLB not found: {} - {}", glb_path, e);
             }
         }
 
