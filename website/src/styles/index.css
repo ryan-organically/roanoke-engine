@@ -230,9 +230,36 @@ main {
   margin-bottom: 0;
 }
 
+/* Voyage Section */
+.voyage {
+  background-color: var(--color-bg);
+}
+
+.voyage strong {
+  color: var(--color-accent);
+  font-weight: 400;
+}
+
+.fernandes-mystery {
+  background-color: var(--color-bg-secondary);
+  padding: 1.5rem 2rem;
+  margin: 2rem 0;
+  border-left: 3px solid var(--color-accent-dim);
+}
+
+.fernandes-mystery p {
+  font-style: italic;
+  color: var(--color-text);
+  margin-bottom: 1rem;
+}
+
+.fernandes-mystery p:last-child {
+  margin-bottom: 0;
+}
+
 /* Thanksgiving Section */
 .thanksgiving {
-  background-color: var(--color-bg);
+  background-color: var(--color-bg-secondary);
 }
 
 .event-date {
@@ -302,6 +329,30 @@ main {
 }
 
 .virginia-fate em {
+  color: var(--color-accent);
+}
+
+.weeping-grove {
+  margin-top: 3rem;
+  padding-top: 3rem;
+  border-top: 1px solid var(--color-bg-tertiary);
+}
+
+.weeping-grove h3 {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 400;
+  color: var(--color-text);
+  letter-spacing: 0.1em;
+  margin-bottom: 1.5rem;
+}
+
+.weeping-grove p {
+  margin-bottom: 1.5rem;
+  color: var(--color-text-muted);
+}
+
+.weeping-grove em {
   color: var(--color-accent);
 }
 

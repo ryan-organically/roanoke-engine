@@ -1,6 +1,6 @@
 # Roanoke: The Lost Colony
 
-**Version 0.0.4**
+**Version 0.0.5**
 
 ---
 
@@ -29,6 +29,58 @@ The Secotan welcomed these strange visitors. They shared knowledge of the land: 
 From the first interactions, both groups exchanged hostages and sent intermediaries to learn one another's languages. These interpreters became bridges between worlds—the only ones who could translate not just words, but meanings.
 
 But White saw something the other Englishmen did not. He saw a people whose relationship with the land was ancient, intricate, and complete. They did not struggle against the wilderness—they moved within it. They did not clear forests—they shaped them. The land provided because they understood how to ask.
+
+---
+
+### The Voyage of 1587
+
+In April of 1587, three ships departed Portsmouth: the *Lyon* (commanded by pilot Simon Fernandes), a fly-boat piloted by Edward Spicer, and a pinnace under Captain Edward Stafford. White had been appointed governor, with twelve assistants including his son-in-law Ananias Dare—and, strangely, Fernandes himself.
+
+The voyage was troubled from the start.
+
+Fernandes repeatedly undermined White's authority. In Portugal, he abandoned the fly-boat. At the Virgin Islands, he refused to let settlers gather fruit and plants. At Hispaniola, he promised to visit a friend who might provide cattle, then sailed past without stopping. At Caicos, he claimed they would find salt—they found none.
+
+Near the Cape of Fear, Fernandes nearly ran the *Lyon* aground. Only Captain Stafford's warning saved them.
+
+When they finally reached Hatorask on July 22nd, White intended to check on fifteen Englishmen left from a previous voyage, then continue to the Chesapeake Bay—the planned site for their permanent settlement.
+
+Fernandes refused.
+
+"It was too late in the summer," he declared. The settlers would disembark at Roanoke. He would take no one further except White and two or three men of his choosing.
+
+The colonists had no choice. They landed on Roanoke—a place that was never meant to be their home.
+
+Of the fifteen men left behind, they found only bones.
+
+*Why did Fernandes sabotage the expedition? Was he a Spanish agent? A privateer with his own agenda? Simply incompetent? History does not record his motives—only that when the fly-boat arrived safely weeks later, Fernandes was "irritated by their safe arrival." He had hoped, it was said, that they would be killed or enslaved by pirates.*
+
+*Whatever his reasons, his decision stranded 117 people in a place they were never meant to stay.*
+
+---
+
+### The First Blood (July 28, 1587)
+
+Six days after landing, one of the twelve assistants—George Howe—went alone to hunt crabs two miles from the settlement.
+
+The Wingino natives from Dasamonguepeuk found him there. They shot him sixteen times with arrows and crushed his skull.
+
+It was a message, or perhaps vengeance for the violence of previous English expeditions. Either way, the colonists now knew: they were not welcome here. The fragile hope of peaceful relations had already begun to crack.
+
+---
+
+### The Mistaken Attack (August 8-9, 1587)
+
+White wanted answers. He wanted justice. With twenty-three men and their Croatoan guide Manteo, he sailed at midnight to the village where Howe's killers lived.
+
+They attacked at dawn, firing into the camp before the startled figures could flee into the reeds.
+
+Only after the shooting stopped did they realize their mistake.
+
+These were not the Wingino. These were Croatoan—their allies—who had come to harvest the abandoned crops of the village. The Wingino had fled after killing Howe. The Croatoan had simply arrived to claim what was left behind.
+
+Manteo was grieved. But he placed the blame on his own people: if the Croatoan chiefs had delivered on their promise to send word, this tragedy would not have happened.
+
+The alliance survived. But trust, once bloodied, does not easily heal.
 
 ---
 
@@ -289,6 +341,7 @@ The tobacco hunger. The breaking point. The reckoning.
 ---
 
 **Document History**
+- v0.0.5 - Added 1587 Voyage section: Simon Fernandes sabotage, George Howe's death, mistaken Croatoan attack (sourced from Hakluyt's Principal Navigations via primary research)
 - v0.0.4 - Expanded Roanoke era: Awkward Thanksgiving, Virginia Dare birth/baptism/adolescence, the transformation theory, CROATOAN
 - v0.0.3 - Added Jamestown era: Wahunsonacock, Pocahontas, kidnapping, Rebecca, John Rolfe; restructured into Parts/Eras
 - v0.0.2 - Added John White and the Secotan, James River plantation conflicts

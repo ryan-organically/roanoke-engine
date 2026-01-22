@@ -37,6 +37,26 @@ function Mystery() {
           </p>
         </div>
 
+        <div className="weeping-grove">
+          <h3>The Weeping Grove</h3>
+          <p>
+            There is a place on the western edge of the island where it has not stopped raining
+            since 1587. The Croatoan call it <em>Nunnehi-Tewaneni</em>—"Where the Spirits Grieve."
+          </p>
+          <p>
+            They say an elder was performing a rain-speaking ceremony when a desperate colonist
+            found him alone. The ceremony was never finished. The sky has been trying to answer
+            a question that has no recipient ever since.
+          </p>
+          <p>
+            Virginia knew about the grove. She could hear the rain from anywhere on the island—
+            a sound beneath sounds, a question waiting to be completed.
+          </p>
+          <p className="dramatic-line">
+            The land remembers what was done to it. The sky waits for someone who knows how to listen.
+          </p>
+        </div>
+
         <div className="mystery-conclusion">
           <h3>The Mystery</h3>
           <p>What happened to the Lost Colony of Roanoke?</p>

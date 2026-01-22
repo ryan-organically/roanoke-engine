@@ -2,6 +2,7 @@ import Navigation from './components/Navigation'
 import Hero from './components/Hero'
 import Plot from './components/Plot'
 import JohnWhite from './components/JohnWhite'
+import Voyage from './components/Voyage'
 import Thanksgiving from './components/Thanksgiving'
 import VirginiaDare from './components/VirginiaDare'
 import Mystery from './components/Mystery'
@@ -19,6 +20,7 @@ function App() {
         <Hero />
         <Plot />
         <JohnWhite />
+        <Voyage />
         <Thanksgiving />
         <VirginiaDare />
         <Mystery />
