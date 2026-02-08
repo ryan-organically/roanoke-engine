@@ -17,3 +17,6 @@ trees/uo
 # Save files (optional - remove if you want to commit saves)
 saves/
 .claude/settings.local.json
+
+# Node modules (website)
+website/node_modules/
