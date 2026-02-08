@@ -9064,19 +9064,6 @@ fn main() {
                     let lod0_threshold = 20.0;  // Close: use high-poly LOD0
                     let lod1_threshold = 50.0;  // Medium: use LOD1
 
-                    // Debug: log container count once
-                    static CONTAINER_DEBUG_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    let total_containers = state.storage_manager.all_containers().count();
-                    if total_containers > 0 && !CONTAINER_DEBUG_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        println!("[CONTAINER] {} containers in world, player at ({:.1}, {:.1}, {:.1})",
-                            total_containers, player_pos.x, player_pos.y, player_pos.z);
-                        for c in state.storage_manager.all_containers() {
-                            println!("[CONTAINER]   - {:?} at ({:.1}, {:.1}, {:.1}) dist={:.1}",
-                                c.container_type, c.position.x, c.position.y, c.position.z,
-                                c.position.distance(player_pos));
-                        }
-                    }
-
                     // Collect transforms for each mesh type and LOD level
                     let mut closed_lod0_transforms: Vec<Mat4> = Vec::new();
                     let mut closed_lod1_transforms: Vec<Mat4> = Vec::new();
@@ -9411,7 +9398,7 @@ fn main() {
                 static FRAME_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 let frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if frame % 300 == 1 {
-                    println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}, containers={}",
+                    log::debug!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}, containers={}",
                         terrain_rendered, grass_rendered, trees_rendered, trees_lod1_rendered,
                         shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered, containers_rendered);
                 }
