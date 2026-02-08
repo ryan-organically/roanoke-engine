@@ -213,7 +213,8 @@ pub struct CoastalAmbience {
     pub beach_wind_volume: f32,
     pub forest_wind_volume: f32,      // Constant loop in forest
     pub forest_breeze_volume: f32,    // Occasional gusts
-    pub mockingjay_volume: f32,       // Occasional bird calls
+    pub mockingjay_volume: f32,       // Sparse random bird calls
+    pub redwing_blackbird_volume: f32, // Primary forest bird ambience
 
     // Target volumes (for smooth transitions)
     pub target_waves_near: f32,
@@ -221,12 +222,14 @@ pub struct CoastalAmbience {
     pub target_forest_wind: f32,
     pub target_forest_breeze: f32,
     pub target_mockingjay: f32,
+    pub target_redwing_blackbird: f32,
 
     // Distance thresholds
     pub waves_max_distance: f32,      // Full fade at this distance from surf
     pub beach_wind_max_distance: f32,
     pub forest_breeze_chance: f32,    // Random trigger chance per second
     pub mockingjay_chance: f32,       // Random trigger chance per second
+    pub redwing_blackbird_chance: f32, // Random trigger chance per second
 }
 
 impl CoastalAmbience {
@@ -237,15 +240,18 @@ impl CoastalAmbience {
             forest_wind_volume: 0.0,
             forest_breeze_volume: 0.0,
             mockingjay_volume: 0.0,
+            redwing_blackbird_volume: 0.0,
             target_waves_near: 0.0,
             target_beach_wind: 0.0,
             target_forest_wind: 0.0,
             target_forest_breeze: 0.0,
             target_mockingjay: 0.0,
+            target_redwing_blackbird: 0.0,
             waves_max_distance: 150.0,      // Waves audible deep inland toward forest
             beach_wind_max_distance: 100.0, // Beach wind carries far
             forest_breeze_chance: 0.02,     // 2% chance per second when in forest
-            mockingjay_chance: 0.008,       // ~1 call every 2 minutes on average
+            mockingjay_chance: 0.005,       // ~1 call every 3+ minutes (sparse)
+            redwing_blackbird_chance: 0.0,  // Not used - redwing is continuous now
         }
     }
 
@@ -281,17 +287,18 @@ impl CoastalAmbience {
             self.target_forest_wind = 0.0;
         }
 
-        // Mockingjay: continuous loop in forest, layered with forest wind
+        // Redwing blackbird: primary continuous loop in forest
         let in_forest = biome_t >= 0.72;
         if in_forest {
-            self.target_mockingjay = 0.6; // Steady presence with birds
+            self.target_redwing_blackbird = 0.7; // Primary forest bird ambience
         } else {
-            self.target_mockingjay = 0.0;
+            self.target_redwing_blackbird = 0.0;
         }
 
-        // Forest breeze gusts: handled externally via trigger
+        // Mockingjay and forest breeze: handled externally via random trigger
         if !in_forest {
             self.target_forest_breeze = 0.0;
+            self.target_mockingjay = 0.0;
         }
     }
 
@@ -305,15 +312,23 @@ impl CoastalAmbience {
         self.target_forest_breeze = 0.7;
     }
 
+    /// Trigger mockingjay call (sparse overlay)
+    pub fn trigger_mockingjay(&mut self) {
+        self.target_mockingjay = 0.5;
+    }
+
     pub fn update(&mut self, dt: f32) {
         let transition_speed = 0.8; // Slightly faster than weather for responsiveness
         let forest_transition = 0.4; // Slower fade for forest ambience
         let breeze_fade_speed = 0.3; // Slower fade for breeze gusts
+        let bird_fade_speed = 0.25; // Slower fade for bird calls
 
         self.waves_near_volume += (self.target_waves_near - self.waves_near_volume) * dt * transition_speed;
         self.beach_wind_volume += (self.target_beach_wind - self.beach_wind_volume) * dt * transition_speed;
         self.forest_wind_volume += (self.target_forest_wind - self.forest_wind_volume) * dt * forest_transition;
-        self.mockingjay_volume += (self.target_mockingjay - self.mockingjay_volume) * dt * forest_transition;
+
+        // Redwing blackbird: primary continuous forest ambience
+        self.redwing_blackbird_volume += (self.target_redwing_blackbird - self.redwing_blackbird_volume) * dt * forest_transition;
 
         // Forest breeze fades out after trigger
         self.forest_breeze_volume += (self.target_forest_breeze - self.forest_breeze_volume) * dt * breeze_fade_speed;
@@ -321,6 +336,15 @@ impl CoastalAmbience {
             self.target_forest_breeze -= dt * 0.15;
             if self.target_forest_breeze < 0.01 {
                 self.target_forest_breeze = 0.0;
+            }
+        }
+
+        // Mockingjay fades out after random trigger (sparse overlay)
+        self.mockingjay_volume += (self.target_mockingjay - self.mockingjay_volume) * dt * bird_fade_speed;
+        if self.target_mockingjay > 0.0 {
+            self.target_mockingjay -= dt * 0.06; // Slow fade for longer bird calls
+            if self.target_mockingjay < 0.01 {
+                self.target_mockingjay = 0.0;
             }
         }
     }
@@ -358,6 +382,7 @@ pub struct AudioSystem {
     forest_wind_handle: Option<StaticSoundHandle>,
     forest_breeze_handle: Option<StaticSoundHandle>,
     mockingjay_handle: Option<StaticSoundHandle>,
+    redwing_blackbird_handle: Option<StaticSoundHandle>,
 
     // Footsteps - elastic loop that adjusts to player speed
     footsteps_gravel_handle: Option<StaticSoundHandle>,
@@ -438,6 +463,7 @@ impl AudioSystem {
             forest_wind_handle: None,
             forest_breeze_handle: None,
             mockingjay_handle: None,
+            redwing_blackbird_handle: None,
             footsteps_gravel_handle: None,
             footsteps_gravel_data: None,
             footsteps_water_handle: None,
@@ -495,12 +521,20 @@ impl AudioSystem {
             log::warn!("[AUDIO] Could not load forest wind.mp3");
         }
 
-        // Mockingjay - occasional bird calls in the forest
+        // Mockingjay - continuous bird calls in the forest
         if let Ok(sound) = self.load_sound("assets/audio/ambience/mockingjay.mp3") {
             self.load_ambient_loop("mockingjay", sound);
             log::info!("[AUDIO] Loaded coastal sound: mockingjay");
         } else {
             log::warn!("[AUDIO] Could not load mockingjay.mp3");
+        }
+
+        // Redwing blackbird - random bird overlay in forest
+        if let Ok(sound) = self.load_sound("assets/audio/ambience/redwinged blackird forest.mp3") {
+            self.load_ambient_loop("redwing_blackbird", sound);
+            log::info!("[AUDIO] Loaded coastal sound: redwing_blackbird");
+        } else {
+            log::warn!("[AUDIO] Could not load redwinged blackird forest.mp3");
         }
 
         // Beach wind - future: uncomment when file is added
@@ -572,6 +606,7 @@ impl AudioSystem {
                         "forest_wind" => self.forest_wind_handle = Some(handle),
                         "forest_breeze" => self.forest_breeze_handle = Some(handle),
                         "mockingjay" => self.mockingjay_handle = Some(handle),
+                        "redwing_blackbird" => self.redwing_blackbird_handle = Some(handle),
                         _ => log::warn!("[AUDIO] Unknown ambient type: {}", ambient_type),
                     }
                     log::info!("[AUDIO] Loaded ambient loop: {}", ambient_type);
@@ -793,6 +828,10 @@ impl AudioSystem {
             let vol = self.coastal_ambience.mockingjay_volume * master;
             let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
         }
+        if let Some(ref mut handle) = self.redwing_blackbird_handle {
+            let vol = self.coastal_ambience.redwing_blackbird_volume * master;
+            let _ = handle.set_volume(Volume::Amplitude(vol as f64), Tween::default());
+        }
     }
 
     /// Update coastal ambience based on player position
@@ -807,6 +846,14 @@ impl AudioSystem {
             let chance = self.coastal_ambience.forest_breeze_chance * dt;
             if rand::random::<f32>() < chance {
                 self.coastal_ambience.trigger_forest_breeze();
+            }
+        }
+
+        // Random mockingjay calls (sparse)
+        if in_forest && self.coastal_ambience.mockingjay_volume < 0.1 {
+            let chance = self.coastal_ambience.mockingjay_chance * dt;
+            if rand::random::<f32>() < chance {
+                self.coastal_ambience.trigger_mockingjay();
             }
         }
 

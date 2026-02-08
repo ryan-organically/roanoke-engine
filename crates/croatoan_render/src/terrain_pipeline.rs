@@ -1,5 +1,6 @@
 use wgpu::util::DeviceExt;
 use glam::Mat4;
+use std::sync::{Arc, OnceLock, Mutex};
 
 use crate::pipeline_validation::{
     MeshValidator, PipelineResult,
@@ -36,10 +37,12 @@ impl TerrainTextures {
             depth_or_array_layers: 1,
         };
 
+        let mip_count = (width.max(height) as f32).log2().floor() as u32 + 1;
+
         let grass_diffuse = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Grass Tile Texture"),
             size,
-            mip_level_count: 1,
+            mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -47,6 +50,7 @@ impl TerrainTextures {
             view_formats: &[],
         });
 
+        // Upload mip level 0
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &grass_diffuse,
@@ -62,6 +66,51 @@ impl TerrainTextures {
             },
             size,
         );
+
+        // Generate mip chain via CPU box filter
+        {
+            let mut prev_data = data;
+            let mut prev_w = width;
+            let mut prev_h = height;
+            for level in 1..mip_count {
+                let new_w = (prev_w / 2).max(1);
+                let new_h = (prev_h / 2).max(1);
+                let mut mip = vec![0u8; (new_w * new_h * 4) as usize];
+                for y in 0..new_h {
+                    for x in 0..new_w {
+                        let sx = (x * 2).min(prev_w - 1);
+                        let sy = (y * 2).min(prev_h - 1);
+                        let sx1 = (sx + 1).min(prev_w - 1);
+                        let sy1 = (sy + 1).min(prev_h - 1);
+                        for c in 0..4u32 {
+                            let avg = (prev_data[(sy * prev_w + sx) as usize * 4 + c as usize] as u32
+                                + prev_data[(sy * prev_w + sx1) as usize * 4 + c as usize] as u32
+                                + prev_data[(sy1 * prev_w + sx) as usize * 4 + c as usize] as u32
+                                + prev_data[(sy1 * prev_w + sx1) as usize * 4 + c as usize] as u32) / 4;
+                            mip[(y * new_w + x) as usize * 4 + c as usize] = avg as u8;
+                        }
+                    }
+                }
+                queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &grass_diffuse,
+                        mip_level: level,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &mip,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * new_w),
+                        rows_per_image: Some(new_h),
+                    },
+                    wgpu::Extent3d { width: new_w, height: new_h, depth_or_array_layers: 1 },
+                );
+                prev_data = mip;
+                prev_w = new_w;
+                prev_h = new_h;
+            }
+        }
 
         let grass_diffuse_view = grass_diffuse.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -183,12 +232,20 @@ struct Uniforms {
 unsafe impl bytemuck::Pod for Uniforms {}
 unsafe impl bytemuck::Zeroable for Uniforms {}
 
+/// GPU resources shared across ALL TerrainPipeline instances (created once, never changes)
+struct SharedTerrainState {
+    render_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    texture_bind_group: wgpu::BindGroup,
+}
+
+static SHARED_TERRAIN: OnceLock<Mutex<Option<Arc<SharedTerrainState>>>> = OnceLock::new();
+
 /// Terrain rendering pipeline with vertex buffers
 pub struct TerrainPipeline {
-    render_pipeline: wgpu::RenderPipeline,
+    shared: Arc<SharedTerrainState>,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    texture_bind_group: wgpu::BindGroup,
     pub index_count: u32,
     pub vertex_buffer: wgpu::Buffer, // Made public for shadow pass
     pub index_buffer: wgpu::Buffer,  // Made public for shadow pass
@@ -238,36 +295,28 @@ impl TerrainPipeline {
         }
     }
 
-    /// Create pipeline without validation (internal use)
-    fn new_unchecked(
+    /// Get or create the shared pipeline state (shader, render pipeline, layouts, terrain texture bind group).
+    /// Created once on first call; all subsequent TerrainPipelines share the same GPU objects.
+    fn get_shared(
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
-        positions: &[[f32; 3]],
-        colors: &[[f32; 3]],
-        normals: &[[f32; 3]],
-        indices: &[u32],
-        shadow_map: &crate::shadows::ShadowMap,
         terrain_textures: &TerrainTextures,
-    ) -> Self {
-        // Load shader
+    ) -> Arc<SharedTerrainState> {
+        let mutex = SHARED_TERRAIN.get_or_init(|| Mutex::new(None));
+        let mut guard = mutex.lock().unwrap();
+        if let Some(shared) = guard.as_ref() {
+            return Arc::clone(shared);
+        }
+
+        // First call — create all shared GPU resources
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Terrain Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../../../assets/shaders/terrain.wgsl").into()),
         });
 
-        // Create uniform buffer for view-projection matrix and time
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Uniform Buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Camera Bind Group Layout"),
             entries: &[
-                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -278,7 +327,6 @@ impl TerrainPipeline {
                     },
                     count: None,
                 },
-                // Shadow Map Texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -289,7 +337,6 @@ impl TerrainPipeline {
                     },
                     count: None,
                 },
-                // Shadow Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -299,31 +346,9 @@ impl TerrainPipeline {
             ],
         });
 
-        // Create bind group
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Terrain Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
-                },
-            ],
-        });
-
-        // Create texture bind group layout (Group 1)
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Terrain Texture Bind Group Layout"),
             entries: &[
-                // Grass Diffuse Texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -334,7 +359,6 @@ impl TerrainPipeline {
                     },
                     count: None,
                 },
-                // Terrain Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -344,7 +368,6 @@ impl TerrainPipeline {
             ],
         });
 
-        // Create texture bind group
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Terrain Texture Bind Group"),
             layout: &texture_bind_group_layout,
@@ -360,45 +383,22 @@ impl TerrainPipeline {
             ],
         });
 
-        // Create vertex buffers
-        let (vertex_buffer, index_buffer) = Self::create_buffers(device, positions, colors, normals, indices);
-        let index_count = indices.len() as u32;
-
-        // Create pipeline layout with both bind groups
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Terrain Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout, &texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        // Define vertex buffer layout
-        // Stride: 36 bytes (3 floats position + 3 floats color + 3 floats normal)
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                // Position (location 0)
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                // Color (location 1)
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                // Normal (location 2)
-                wgpu::VertexAttribute {
-                    offset: 24,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
+                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
             ],
         };
 
-        // Create render pipeline
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Terrain Pipeline"),
             layout: Some(&pipeline_layout),
@@ -420,7 +420,7 @@ impl TerrainPipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Disable culling to debug visibility
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -440,13 +440,64 @@ impl TerrainPipeline {
             multiview: None,
         });
 
-        Self {
+        let shared = Arc::new(SharedTerrainState {
             render_pipeline,
+            bind_group_layout,
+            texture_bind_group,
+        });
+        *guard = Some(Arc::clone(&shared));
+        shared
+    }
+
+    /// Create pipeline without validation (internal use)
+    fn new_unchecked(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        positions: &[[f32; 3]],
+        colors: &[[f32; 3]],
+        normals: &[[f32; 3]],
+        indices: &[u32],
+        shadow_map: &crate::shadows::ShadowMap,
+        terrain_textures: &TerrainTextures,
+    ) -> Self {
+        let shared = Self::get_shared(device, surface_format, terrain_textures);
+
+        // Per-pipeline: uniform buffer + bind group (references shared shadow map)
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Terrain Uniform Buffer"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Terrain Bind Group"),
+            layout: &shared.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
+                },
+            ],
+        });
+
+        let (vertex_buffer, index_buffer) = Self::create_buffers(device, positions, colors, normals, indices);
+        let index_count = indices.len() as u32;
+
+        Self {
+            shared,
             vertex_buffer,
             index_buffer,
             uniform_buffer,
             bind_group,
-            texture_bind_group,
             index_count,
         }
     }
@@ -549,9 +600,9 @@ impl TerrainPipeline {
             return;
         }
 
-        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_pipeline(&self.shared.render_pipeline);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.shared.texture_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         render_pass.draw_indexed(0..self.index_count, 0, 0..1);

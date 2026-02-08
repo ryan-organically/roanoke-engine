@@ -54,35 +54,49 @@ fn noise(p: vec2<f32>) -> f32 {
 // WAVE FUNCTIONS
 // ============================================================================
 
-// Base ocean surface - the jiggly "being out in deep water" feel
+// Gerstner wave helper - physically-based ocean surface with circular orbital motion
+// Returns vec4(horizontal_displacement_x, height, horizontal_displacement_z, 0)
+fn gerstner_wave(pos: vec2<f32>, time: f32, dir: vec2<f32>, wavelength: f32, steepness: f32, amplitude: f32) -> vec4<f32> {
+    let k = TAU / wavelength;                // Wave number
+    let omega = sqrt(G * k);                 // Deep water dispersion relation
+    let phase = k * dot(dir, pos) - omega * time;
+    let c = cos(phase);
+    let s = sin(phase);
+
+    // Gerstner displacement: horizontal movement creates sharp crests, flat troughs
+    let q = steepness / (k * amplitude); // Normalized steepness (Q parameter)
+    let horiz_x = q * amplitude * dir.x * c;
+    let horiz_z = q * amplitude * dir.y * c;
+    let vert = amplitude * s;
+
+    return vec4<f32>(horiz_x, vert, horiz_z, 0.0);
+}
+
+// Base ocean surface - Gerstner wave sum for realistic circular orbital motion
 fn ocean_jiggle(pos: vec2<f32>, time: f32) -> vec4<f32> {
-    var height = 0.0;
-    var dx = 0.0;
-    var dz = 0.0;
+    var total = vec4<f32>(0.0);
 
-    // Multiple overlapping sine waves at different scales
-    // This creates the chaotic but natural ocean surface
-    for (var i = 0u; i < 8u; i++) {
-        let fi = f32(i);
-        let freq = 0.02 + fi * 0.015;
-        let amp = 0.15 / (1.0 + fi * 0.5);
-        let speed = 0.5 + fi * 0.2;
-        let angle = fi * 0.7 + 0.3;
+    // 8 Gerstner waves with varying direction, wavelength, steepness
+    // Dominant wave direction is wind-aligned (matching uniform wind_direction)
+    // Using golden angle spread for natural-looking wave field
 
-        let dir = vec2<f32>(cos(angle), sin(angle));
-        let phase = dot(pos * freq, dir) + time * speed;
+    // Primary waves (large, slow)
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.9, 0.3)),  45.0, 0.5, 0.45);
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.8, -0.2)), 30.0, 0.5, 0.30);
 
-        height += sin(phase) * amp;
-        dx += cos(phase) * amp * freq * dir.x;
-        dz += cos(phase) * amp * freq * dir.y;
-    }
+    // Secondary waves (medium)
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.7, 0.5)),  20.0, 0.4, 0.20);
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.5, -0.6)), 15.0, 0.4, 0.15);
 
-    // Add some higher frequency ripples
-    let ripple1 = sin(pos.x * 0.15 + time * 1.5) * sin(pos.y * 0.12 + time * 1.2) * 0.08;
-    let ripple2 = sin(pos.x * 0.22 - time * 1.8) * sin(pos.y * 0.18 - time * 1.4) * 0.05;
-    height += ripple1 + ripple2;
+    // Detail waves (small, fast, add texture)
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.3, 0.8)),  10.0, 0.3, 0.10);
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(0.2, -0.9)),   8.0, 0.3, 0.08);
 
-    return vec4<f32>(dx, height, dz, 0.0);
+    // High-frequency capillary waves (fine ripples)
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.6, -0.4)),  5.0, 0.2, 0.05);
+    total += gerstner_wave(pos, time, normalize(vec2<f32>(0.4, 0.7)),    4.0, 0.2, 0.04);
+
+    return total;
 }
 
 // Large distant swell mounds - big smooth hills of water
@@ -95,37 +109,24 @@ fn distant_swell(pos: vec2<f32>, time: f32, shore_dist: f32) -> vec4<f32> {
     var dx = 0.0;
     var dz = 0.0;
 
-    // Large, slow swells - like gentle hills rolling across the ocean
-    // Swell 1: Primary - very long wavelength
-    let wavelength1 = 150.0;
-    let period1 = 12.0;
-    let phase1 = pos.x / wavelength1 + time / period1;
-    let swell1 = sin(phase1 * TAU) * 1.5;
-    let swell1_dx = cos(phase1 * TAU) * 1.5 * TAU / wavelength1;
+    // Large, slow swells using Gerstner for proper orbital motion
+    // These create the big rolling hills visible from shore
+    var swell_total = vec4<f32>(0.0);
 
-    // Swell 2: Secondary - slightly different angle
-    let angle2 = 0.15;
-    let dir2 = vec2<f32>(cos(angle2), sin(angle2));
-    let wavelength2 = 100.0;
-    let period2 = 10.0;
-    let phase2 = dot(pos, dir2) / wavelength2 + time / period2;
-    let swell2 = sin(phase2 * TAU) * 1.0;
-    let swell2_dx = cos(phase2 * TAU) * 1.0 * TAU / wavelength2 * dir2.x;
-    let swell2_dz = cos(phase2 * TAU) * 1.0 * TAU / wavelength2 * dir2.y;
+    // Swell 1: Primary ocean swell - very long wavelength, 2-3m amplitude
+    swell_total += gerstner_wave(pos, time, normalize(vec2<f32>(-1.0, 0.15)), 150.0, 0.3, 2.5);
+
+    // Swell 2: Secondary swell - slightly different angle
+    swell_total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.95, -0.2)), 100.0, 0.3, 1.5);
 
     // Swell 3: Cross-swell for complexity
-    let angle3 = -0.2;
-    let dir3 = vec2<f32>(cos(angle3), sin(angle3));
-    let wavelength3 = 80.0;
-    let period3 = 8.0;
-    let phase3 = dot(pos, dir3) / wavelength3 + time / period3;
-    let swell3 = sin(phase3 * TAU) * 0.6;
+    swell_total += gerstner_wave(pos, time, normalize(vec2<f32>(-0.85, 0.4)),   80.0, 0.25, 0.8);
 
-    height = (swell1 + swell2 + swell3) * swell_factor;
-    dx = (swell1_dx + swell2_dx) * swell_factor;
-    dz = swell2_dz * swell_factor;
+    height = swell_total.y * swell_factor;
+    dx = swell_total.x * swell_factor;
+    dz = swell_total.z * swell_factor;
 
-    return vec4<f32>(dx * 0.3, height, dz * 0.3, 0.0);
+    return vec4<f32>(dx, height, dz, 0.0);
 }
 
 // Coastal waves - these roll toward shore with N-S variation
@@ -299,8 +300,27 @@ fn compute_displacement(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(displacement_texture, vec2<i32>(i32(x), i32(y)),
         vec4<f32>(total_dx, total_height, total_dz, total_foam));
 
-    // Normal calculation
-    let normal = normalize(vec3<f32>(-total_dx * 3.0, 1.0, -total_dz * 3.0));
+    // Normal calculation via finite differences from displacement
+    // Sample neighboring world positions to get height gradient
+    let epsilon = uniforms.size / f32(N); // Grid cell size in world units
+    let pos_px = world_pos + vec2<f32>(epsilon, 0.0);
+    let pos_nz = world_pos + vec2<f32>(0.0, epsilon);
+
+    // Recompute height at offset positions for X gradient
+    let jiggle_px = ocean_jiggle(pos_px, uniforms.time);
+    let swell_px = distant_swell(pos_px, uniforms.time, shore_dist);
+    let coastal_px = coastal_wave(pos_px.x, pos_px.y, uniforms.time, shore_dist);
+    let height_px = (jiggle_px.y * 0.8 + swell_px.y + coastal_px.y) * uniforms.amplitude;
+
+    // Recompute height at offset positions for Z gradient
+    let jiggle_nz = ocean_jiggle(pos_nz, uniforms.time);
+    let swell_nz = distant_swell(pos_nz, uniforms.time, shore_dist);
+    let coastal_nz = coastal_wave(pos_nz.x, pos_nz.y, uniforms.time, shore_dist);
+    let height_nz = (jiggle_nz.y * 0.8 + swell_nz.y + coastal_nz.y) * uniforms.amplitude;
+
+    let dhdx = (height_px - total_height) / epsilon;
+    let dhdz = (height_nz - total_height) / epsilon;
+    let normal = normalize(vec3<f32>(-dhdx, 1.0, -dhdz));
     let packed_shore = clamp(shore_dist / 100.0, 0.0, 1.0);
     textureStore(normal_map_texture, vec2<i32>(i32(x), i32(y)),
         vec4<f32>(normal, packed_shore));

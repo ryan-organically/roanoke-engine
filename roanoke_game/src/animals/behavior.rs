@@ -1383,3 +1383,902 @@ fn update_wolf_pair_behavior(animal: &mut Animal, ctx: &BehaviorContext) {
     animal.behavior_state = new_state;
     execute_state(animal, ctx);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::animals::entity::{Animal, AnimalId};
+    use crate::animals::types::{AnimalSpecies, WolfGroupType};
+
+    /// Helper to create a test animal with default settings
+    fn create_test_animal(species: AnimalSpecies) -> Animal {
+        let stats = species.base_stats();
+        Animal::new(
+            AnimalId(1),
+            species,
+            Vec3::ZERO,
+            stats.health,
+            (0, 0),
+        )
+    }
+
+    /// Helper to create a test wolf with group type
+    fn create_test_wolf(group_type: WolfGroupType, flee_roll: f32) -> Animal {
+        let species = AnimalSpecies::GrayWolf;
+        let stats = species.base_stats();
+        Animal::new_wolf(
+            AnimalId(1),
+            species,
+            Vec3::ZERO,
+            stats.health,
+            (0, 0),
+            group_type,
+            flee_roll,
+        )
+    }
+
+    /// Helper to create a behavior context
+    fn create_context(player_pos: Vec3, player_velocity: Vec3, dt: f32) -> BehaviorContext<'static> {
+        BehaviorContext {
+            player_pos,
+            player_velocity,
+            dt,
+            nearby_animals: &[],
+        }
+    }
+
+    // ===========================================
+    // State Transition Tests
+    // ===========================================
+
+    #[test]
+    fn test_idle_to_alert_transition() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Idle;
+        animal.awareness = 0.35; // Above 0.3 threshold for alert
+
+        // Player within detection range
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Alert(_)),
+            "Animal should transition from Idle to Alert when awareness > 0.3"
+        );
+    }
+
+    #[test]
+    fn test_idle_to_pursue_high_awareness() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Idle;
+        animal.awareness = 0.85; // Above 0.8 threshold for pursue
+
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Pursue(_)),
+            "Aggressive animal should transition from Idle to Pursue when awareness > 0.8"
+        );
+    }
+
+    #[test]
+    fn test_alert_to_idle_when_awareness_drops() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Alert(AlertState::Looking);
+        animal.awareness = 0.15; // Below 0.2 threshold to return to idle
+
+        // Player far away (outside detection range)
+        let player_pos = Vec3::new(100.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Idle),
+            "Animal should transition from Alert to Idle when awareness < 0.2"
+        );
+    }
+
+    #[test]
+    fn test_alert_to_pursue_transition() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Alert(AlertState::Looking);
+        animal.awareness = 0.95; // Above 0.9 threshold for pursue from alert
+
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Pursue(_)),
+            "Animal should transition from Alert to Pursue when awareness > 0.9"
+        );
+    }
+
+    #[test]
+    fn test_pursue_to_attack_when_in_range() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Pursue(PursueState::Chasing);
+        animal.awareness = 1.0;
+        // Ensure attack is ready
+        animal.attack_cooldowns = vec![0.0; 2];
+
+        // Player within attack range (wolf attack range is 2.0)
+        let player_pos = Vec3::new(1.5, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Attack(_)),
+            "Animal should transition from Pursue to Attack when player in attack range"
+        );
+    }
+
+    #[test]
+    fn test_pursue_to_alert_when_player_escapes() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Pursue(PursueState::Chasing);
+        animal.awareness = 1.0;
+
+        // Player beyond 2x detection range (wolf detection is 25.0, so > 50.0)
+        let player_pos = Vec3::new(60.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Alert(_)),
+            "Animal should transition from Pursue to Alert when player escapes"
+        );
+        assert!(
+            animal.awareness < 1.0,
+            "Awareness should be reduced when player escapes"
+        );
+    }
+
+    #[test]
+    fn test_attack_state_progression() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+
+        // Test WindingUp -> Striking
+        animal.behavior_state = BehaviorState::Attack(AttackState::WindingUp);
+        animal.animation_time = 0.0;
+        let player_pos = Vec3::new(1.0, 0.0, 0.0);
+
+        // Simulate time passing during wind-up
+        let state = update_attack_state(&mut animal, AttackState::WindingUp, 1.0, 0.35);
+        assert!(
+            matches!(state, BehaviorState::Attack(AttackState::Striking)),
+            "Attack should progress from WindingUp to Striking after 0.3s"
+        );
+
+        // Test Striking -> Recovering
+        animal.animation_time = 0.0;
+        let state = update_attack_state(&mut animal, AttackState::Striking, 1.0, 0.016);
+        assert!(
+            matches!(state, BehaviorState::Attack(AttackState::Recovering)),
+            "Attack should progress from Striking to Recovering"
+        );
+
+        // Test Recovering -> back to Pursue (player outside attack range)
+        animal.animation_time = 0.0;
+        let state = update_attack_state(&mut animal, AttackState::Recovering, 5.0, 0.6);
+        assert!(
+            matches!(state, BehaviorState::Pursue(PursueState::Chasing)),
+            "After recovery, should return to Pursue if player outside attack range"
+        );
+    }
+
+    // ===========================================
+    // Flee Behavior Tests
+    // ===========================================
+
+    #[test]
+    fn test_flee_trigger_on_low_health() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Pursue(PursueState::Chasing);
+        // Set health below flee threshold (wolf flee_health is 15.0)
+        animal.current_health = 10.0;
+        animal.awareness = 1.0;
+
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_behavior(&mut animal, &ctx);
+
+        assert!(
+            matches!(animal.behavior_state, BehaviorState::Flee(FleeState::Running)),
+            "Animal should flee when health drops below threshold"
+        );
+        assert!(
+            matches!(animal.target, Some(Target::FleeFrom(_))),
+            "Animal should have flee target set"
+        );
+    }
+
+    #[test]
+    fn test_flee_running_to_hiding() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Flee(FleeState::Running);
+        animal.current_health = 10.0; // Below flee threshold to stay in flee mode
+
+        // Player very far away (> 3x detection range = 75.0)
+        let player_pos = Vec3::new(80.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        let new_state = update_flee_state(&mut animal, FleeState::Running, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Flee(FleeState::Hiding)),
+            "Animal should transition to Hiding when far enough from player"
+        );
+    }
+
+    #[test]
+    fn test_flee_hiding_to_idle() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Flee(FleeState::Hiding);
+        animal.awareness = 0.05; // Very low awareness
+
+        // Player far away
+        let player_pos = Vec3::new(100.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.5);
+
+        let new_state = update_flee_state(&mut animal, FleeState::Hiding, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Idle),
+            "Animal should return to Idle from Hiding when awareness is very low"
+        );
+    }
+
+    #[test]
+    fn test_flee_hiding_back_to_running() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Flee(FleeState::Hiding);
+        animal.awareness = 0.5;
+
+        // Player comes back within detection range
+        let player_pos = Vec3::new(20.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        let new_state = update_flee_state(&mut animal, FleeState::Hiding, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Flee(FleeState::Running)),
+            "Animal should resume Running if player found while Hiding"
+        );
+    }
+
+    #[test]
+    fn test_cornered_animal_fights_back() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.behavior_state = BehaviorState::Flee(FleeState::Cornered);
+        animal.attack_cooldowns = vec![0.0; 2]; // Attacks ready
+
+        // Player within attack range
+        let player_pos = Vec3::new(1.5, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        let new_state = update_flee_state(&mut animal, FleeState::Cornered, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Attack(AttackState::WindingUp)),
+            "Cornered animal should fight back"
+        );
+    }
+
+    // ===========================================
+    // Awareness Accumulation Tests
+    // ===========================================
+
+    #[test]
+    fn test_awareness_increases_when_player_detected() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.awareness = 0.0;
+
+        // Player is detected
+        update_awareness(&mut animal, true, 1.0);
+
+        assert!(
+            animal.awareness > 0.0,
+            "Awareness should increase when player detected"
+        );
+    }
+
+    #[test]
+    fn test_awareness_decreases_when_player_not_detected() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.awareness = 0.5;
+
+        // Player not detected
+        update_awareness(&mut animal, false, 1.0);
+
+        assert!(
+            animal.awareness < 0.5,
+            "Awareness should decrease when player not detected"
+        );
+    }
+
+    #[test]
+    fn test_awareness_capped_at_one() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.awareness = 0.9;
+
+        // High dt to push awareness over 1.0
+        update_awareness(&mut animal, true, 10.0);
+
+        assert!(
+            animal.awareness <= 1.0,
+            "Awareness should be capped at 1.0"
+        );
+    }
+
+    #[test]
+    fn test_awareness_minimum_zero() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.awareness = 0.05;
+
+        // High dt to push awareness below 0.0
+        update_awareness(&mut animal, false, 10.0);
+
+        assert!(
+            animal.awareness >= 0.0,
+            "Awareness should not go below 0.0"
+        );
+    }
+
+    #[test]
+    fn test_awareness_rate_varies_by_behavior_type() {
+        // Test stalker (slow awareness)
+        let mut stalker = create_test_animal(AnimalSpecies::EasternCougar);
+        stalker.awareness = 0.0;
+        update_awareness(&mut stalker, true, 1.0);
+        let stalker_awareness = stalker.awareness;
+
+        // Test aggressive (fast awareness)
+        let mut aggressive = create_test_animal(AnimalSpecies::WildBoar);
+        aggressive.awareness = 0.0;
+        update_awareness(&mut aggressive, true, 1.0);
+        let aggressive_awareness = aggressive.awareness;
+
+        assert!(
+            aggressive_awareness > stalker_awareness,
+            "Aggressive animals should alert faster than stalkers"
+        );
+    }
+
+    #[test]
+    fn test_awareness_stays_high_after_damage() {
+        let mut animal = create_test_animal(AnimalSpecies::GrayWolf);
+        animal.awareness = 0.5;
+        animal.last_damage_time = Some(std::time::Instant::now());
+
+        // Even without player detected, awareness should stay high
+        update_awareness(&mut animal, false, 1.0);
+
+        assert!(
+            animal.awareness >= 0.8,
+            "Awareness should stay high after recent damage"
+        );
+    }
+
+    // ===========================================
+    // Wolf Curiosity Behavior Tests
+    // ===========================================
+
+    #[test]
+    fn test_lone_wolf_starts_curious() {
+        let wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+
+        assert!(
+            wolf.curiosity_level == 0.5,
+            "Lone wolf should start with curiosity level 0.5"
+        );
+    }
+
+    #[test]
+    fn test_lone_wolf_idle_to_curious() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.behavior_state = BehaviorState::Idle;
+        wolf.curiosity_level = 0.35; // Above 0.3 threshold
+
+        // Player within extended detection range (1.5x normal)
+        let player_pos = Vec3::new(30.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_lone_wolf_behavior(&mut wolf, &ctx);
+
+        assert!(
+            matches!(wolf.behavior_state, BehaviorState::Curious(_)),
+            "Lone wolf should become curious when player is nearby"
+        );
+    }
+
+    #[test]
+    fn test_lone_wolf_curiosity_increases_with_slow_player() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.behavior_state = BehaviorState::Curious(CuriousState::Watching);
+        let initial_curiosity = wolf.curiosity_level;
+
+        // Player moving slowly within detection
+        let player_pos = Vec3::new(20.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::new(1.0, 0.0, 0.0), 1.0); // slow movement
+
+        update_lone_wolf_behavior(&mut wolf, &ctx);
+
+        assert!(
+            wolf.curiosity_level > initial_curiosity,
+            "Curiosity should increase when player moves slowly"
+        );
+    }
+
+    #[test]
+    fn test_lone_wolf_curiosity_decreases_with_fast_player() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.behavior_state = BehaviorState::Curious(CuriousState::Watching);
+        wolf.curiosity_level = 0.5;
+
+        // Player running fast
+        let player_pos = Vec3::new(20.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::new(10.0, 0.0, 0.0), 1.0); // fast movement
+
+        update_lone_wolf_behavior(&mut wolf, &ctx);
+
+        assert!(
+            wolf.curiosity_level < 0.5,
+            "Curiosity should decrease when player runs"
+        );
+    }
+
+    #[test]
+    fn test_lone_wolf_flees_when_player_charges() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.behavior_state = BehaviorState::Curious(CuriousState::Watching);
+        wolf.position = Vec3::new(10.0, 0.0, 0.0);
+
+        // Player charging toward wolf
+        let player_pos = Vec3::ZERO;
+        let player_vel = Vec3::new(8.0, 0.0, 0.0); // Running toward wolf
+        let ctx = create_context(player_pos, player_vel, 0.016);
+
+        let new_state = update_curious_state(&mut wolf, CuriousState::Watching, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Flee(FleeState::Running)),
+            "Lone wolf should flee when player charges at it"
+        );
+    }
+
+    #[test]
+    fn test_curious_watching_to_investigating() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.curiosity_level = 0.65; // Above 0.6 threshold
+        wolf.position = Vec3::new(25.0, 0.0, 0.0);
+
+        let player_pos = Vec3::ZERO;
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        let new_state = update_curious_state(&mut wolf, CuriousState::Watching, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Curious(CuriousState::Investigating)),
+            "High curiosity wolf should start investigating"
+        );
+    }
+
+    #[test]
+    fn test_curious_investigating_to_circling() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.curiosity_level = 0.85; // Above 0.8 threshold
+        wolf.position = Vec3::new(10.0, 0.0, 0.0); // Close to player
+
+        let player_pos = Vec3::ZERO;
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        let new_state = update_curious_state(&mut wolf, CuriousState::Investigating, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Curious(CuriousState::Circling)),
+            "Very curious wolf close to player should start circling"
+        );
+    }
+
+    #[test]
+    fn test_curious_circling_to_sniffing() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.curiosity_level = 0.96; // Above 0.95 threshold
+        wolf.position = Vec3::new(5.0, 0.0, 0.0);
+
+        // Player stationary
+        let player_pos = Vec3::ZERO;
+        let ctx = create_context(player_pos, Vec3::new(1.0, 0.0, 0.0), 0.016); // Very slow movement
+
+        let new_state = update_curious_state(&mut wolf, CuriousState::Circling, &ctx);
+
+        assert!(
+            matches!(new_state, BehaviorState::Curious(CuriousState::Sniffing)),
+            "Maximum curiosity wolf with stationary player should start sniffing"
+        );
+    }
+
+    #[test]
+    fn test_lone_wolf_flees_when_damaged_recently() {
+        let mut wolf = create_test_wolf(WolfGroupType::Lone, 0.5);
+        wolf.behavior_state = BehaviorState::Curious(CuriousState::Watching);
+        wolf.last_damage_time = Some(std::time::Instant::now());
+        wolf.curiosity_level = 0.8;
+
+        let player_pos = Vec3::new(20.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_lone_wolf_behavior(&mut wolf, &ctx);
+
+        assert!(
+            matches!(wolf.behavior_state, BehaviorState::Flee(FleeState::Running)),
+            "Recently damaged lone wolf should flee"
+        );
+        assert!(
+            wolf.curiosity_level < 0.8,
+            "Curiosity should decrease after damage"
+        );
+    }
+
+    // ===========================================
+    // Wolf Pair Behavior Tests
+    // ===========================================
+
+    #[test]
+    fn test_wolf_pair_flees_with_low_roll() {
+        let mut wolf = create_test_wolf(WolfGroupType::Pair, 0.5); // < 0.7, should flee
+        wolf.behavior_state = BehaviorState::Idle;
+        wolf.awareness = 0.6; // Above 0.5 threshold
+
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_wolf_pair_behavior(&mut wolf, &ctx);
+
+        assert!(
+            matches!(wolf.behavior_state, BehaviorState::Flee(FleeState::Running)),
+            "Wolf pair with low flee roll should flee"
+        );
+    }
+
+    #[test]
+    fn test_wolf_pair_aggressive_with_high_roll() {
+        let mut wolf = create_test_wolf(WolfGroupType::Pair, 0.8); // >= 0.7, should be aggressive
+        wolf.behavior_state = BehaviorState::Idle;
+        wolf.awareness = 0.6; // Above 0.5 threshold
+
+        let player_pos = Vec3::new(10.0, 0.0, 0.0);
+        let ctx = create_context(player_pos, Vec3::ZERO, 0.016);
+
+        update_wolf_pair_behavior(&mut wolf, &ctx);
+
+        assert!(
+            matches!(wolf.behavior_state, BehaviorState::Alert(AlertState::Warning)),
+            "Wolf pair with high flee roll should be aggressive"
+        );
+    }
+
+    // ===========================================
+    // Should Attack Logic Tests
+    // ===========================================
+
+    #[test]
+    fn test_predatory_always_attacks() {
+        let animal = create_test_animal(AnimalSpecies::EasternCougar); // Predatory
+
+        let result = should_attack(&animal, 100.0); // Any distance
+
+        assert!(result, "Predatory animals should always attack");
+    }
+
+    #[test]
+    fn test_territorial_attacks_in_territory() {
+        let mut animal = create_test_animal(AnimalSpecies::BlackBear); // Territorial/Defensive
+        animal.home_position = Vec3::ZERO;
+        animal.territory_radius = 30.0;
+        animal.position = Vec3::new(10.0, 0.0, 0.0); // Within territory
+
+        // For defensive animals (BlackBear), they need damage to attack
+        animal.last_damage_time = Some(std::time::Instant::now());
+
+        let result = should_attack(&animal, 15.0);
+
+        assert!(result, "Defensive animal should attack after being damaged");
+    }
+
+    #[test]
+    fn test_defensive_attacks_only_after_damage() {
+        let mut animal = create_test_animal(AnimalSpecies::BlackBear); // Defensive
+
+        // No damage taken
+        let result_no_damage = should_attack(&animal, 10.0);
+
+        // After damage
+        animal.last_damage_time = Some(std::time::Instant::now());
+        let result_with_damage = should_attack(&animal, 10.0);
+
+        assert!(!result_no_damage, "Defensive animal should not attack without damage");
+        assert!(result_with_damage, "Defensive animal should attack after taking damage");
+    }
+
+    #[test]
+    fn test_cautious_attacks_when_close() {
+        let animal = create_test_animal(AnimalSpecies::RedWolf); // Cautious
+        let stats = animal.species.base_stats();
+
+        // Too far (> 0.5 * detection_range)
+        let result_far = should_attack(&animal, stats.detection_range * 0.6);
+
+        // Close enough (< 0.5 * detection_range)
+        let result_close = should_attack(&animal, stats.detection_range * 0.4);
+
+        assert!(!result_far, "Cautious animal should not attack when far");
+        assert!(result_close, "Cautious animal should attack when close");
+    }
+
+    // ===========================================
+    // Initial Pursue State Tests
+    // ===========================================
+
+    #[test]
+    fn test_stalker_initial_pursue_state() {
+        let state = initial_pursue_state(BehaviorType::Stalker);
+        assert_eq!(state, PursueState::Stalking, "Stalkers should start with Stalking");
+    }
+
+    #[test]
+    fn test_pack_hunter_initial_pursue_state() {
+        let state = initial_pursue_state(BehaviorType::PackHunter);
+        assert_eq!(state, PursueState::Circling, "Pack hunters should start with Circling");
+    }
+
+    #[test]
+    fn test_aggressive_initial_pursue_state() {
+        let state = initial_pursue_state(BehaviorType::Aggressive);
+        assert_eq!(state, PursueState::Chasing, "Aggressive animals should start with Chasing");
+    }
+
+    // ===========================================
+    // Pack System Tests
+    // ===========================================
+
+    #[test]
+    fn test_pack_state_creation() {
+        let pack = PackState::new(PackId(1), Vec3::new(100.0, 0.0, 100.0));
+
+        assert_eq!(pack.pack_id, PackId(1));
+        assert_eq!(pack.morale, 1.0);
+        assert!(pack.alpha_id.is_none());
+        assert!(pack.member_ids.is_empty());
+        assert_eq!(pack.tactic, PackTactic::Patrolling);
+    }
+
+    #[test]
+    fn test_pack_add_member() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+
+        pack.add_member(AnimalId(1), true);
+        pack.add_member(AnimalId(2), false);
+        pack.add_member(AnimalId(3), false);
+
+        assert_eq!(pack.member_count(), 3);
+        assert_eq!(pack.alpha_id, Some(AnimalId(1)));
+    }
+
+    #[test]
+    fn test_pack_remove_member() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+        pack.add_member(AnimalId(1), true);
+        pack.add_member(AnimalId(2), false);
+        pack.morale = 1.0;
+
+        pack.remove_member(AnimalId(2));
+
+        assert_eq!(pack.member_count(), 1);
+        assert!(pack.morale < 1.0, "Morale should drop when member dies");
+    }
+
+    #[test]
+    fn test_pack_alpha_death_severe_morale_drop() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+        pack.add_member(AnimalId(1), true);
+        pack.add_member(AnimalId(2), false);
+        pack.morale = 1.0;
+
+        pack.remove_member(AnimalId(1)); // Alpha dies
+
+        assert!(pack.morale <= 0.3, "Morale should drop severely when alpha dies");
+        assert_eq!(pack.alpha_id, Some(AnimalId(2)), "New alpha should be promoted");
+    }
+
+    #[test]
+    fn test_pack_should_retreat() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+        pack.add_member(AnimalId(1), true);
+        pack.add_member(AnimalId(2), false);
+        pack.morale = 1.0;
+
+        assert!(!pack.should_retreat(), "Pack with good morale should not retreat");
+
+        pack.morale = 0.2;
+        assert!(pack.should_retreat(), "Pack with low morale should retreat");
+
+        pack.morale = 1.0;
+        pack.remove_member(AnimalId(2)); // Only 1 member left
+        assert!(pack.should_retreat(), "Pack with only 1 member should retreat");
+    }
+
+    #[test]
+    fn test_pack_morale_recovery() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+        pack.add_member(AnimalId(1), true);
+        pack.morale = 0.5;
+
+        pack.update_morale(1.0);
+
+        assert!(pack.morale > 0.5, "Morale should slowly recover over time");
+    }
+
+    #[test]
+    fn test_pack_morale_capped_without_alpha() {
+        let mut pack = PackState::new(PackId(1), Vec3::ZERO);
+        pack.add_member(AnimalId(1), false); // No alpha
+        pack.morale = 1.0;
+
+        pack.update_morale(1.0);
+
+        assert!(pack.morale <= 0.5, "Morale should be capped at 0.5 without alpha");
+    }
+
+    // ===========================================
+    // Territory System Tests
+    // ===========================================
+
+    #[test]
+    fn test_territory_contains() {
+        let territory = Territory::new(AnimalId(1), Vec3::ZERO, 50.0);
+
+        assert!(territory.contains(Vec3::new(25.0, 0.0, 25.0)));
+        assert!(!territory.contains(Vec3::new(60.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn test_territory_aggression_at() {
+        let territory = Territory::new(AnimalId(1), Vec3::ZERO, 50.0);
+
+        let center_aggression = territory.aggression_at(Vec3::ZERO);
+        let edge_aggression = territory.aggression_at(Vec3::new(40.0, 0.0, 0.0));
+        let outside_aggression = territory.aggression_at(Vec3::new(60.0, 0.0, 0.0));
+
+        assert!(center_aggression > edge_aggression, "Aggression should be higher at center");
+        assert_eq!(outside_aggression, 0.0, "No aggression outside territory");
+    }
+
+    // ===========================================
+    // Flanking Position Tests
+    // ===========================================
+
+    #[test]
+    fn test_flank_positions_distributed() {
+        let target = Vec3::new(50.0, 0.0, 50.0);
+        let pack_center = Vec3::ZERO;
+        let members = 4;
+        let distance = 10.0;
+
+        let positions: Vec<Vec3> = (0..members)
+            .map(|i| calculate_flank_position(target, pack_center, i, members, distance))
+            .collect();
+
+        // Check that positions are roughly the desired distance from target
+        for pos in &positions {
+            let dist = pos.distance(target);
+            assert!(
+                (dist - distance).abs() < 1.0,
+                "Flank position should be near desired distance from target"
+            );
+        }
+
+        // Check that positions are spread out (not all the same)
+        assert!(
+            positions[0].distance(positions[1]) > 1.0,
+            "Flank positions should be spread out"
+        );
+    }
+
+    #[test]
+    fn test_flank_position_single_member() {
+        let target = Vec3::new(50.0, 0.0, 50.0);
+        let pack_center = Vec3::ZERO;
+
+        let position = calculate_flank_position(target, pack_center, 0, 1, 10.0);
+
+        assert_eq!(position, target, "Single member should go directly to target");
+    }
+
+    // ===========================================
+    // Circle Position Tests
+    // ===========================================
+
+    #[test]
+    fn test_circle_position_moves_perpendicular() {
+        let current = Vec3::new(10.0, 0.0, 0.0);
+        let target = Vec3::ZERO;
+        let radius = 10.0;
+        let speed = 5.0;
+        let dt = 1.0;
+
+        let new_pos = calculate_circle_position(current, target, radius, speed, dt);
+
+        // Should move perpendicular to target direction (circling)
+        let initial_dist = current.distance(target);
+        let new_dist = new_pos.distance(target);
+
+        // Distance should stay roughly the same when at correct radius
+        assert!(
+            (new_dist - initial_dist).abs() < 2.0,
+            "Circling should maintain approximate distance"
+        );
+    }
+
+    // ===========================================
+    // Random Chance Tests (Determinism)
+    // ===========================================
+
+    #[test]
+    fn test_rand_chance_bounds() {
+        // Test that rand_chance returns reasonable results
+        let mut true_count = 0;
+        let iterations = 1000;
+
+        for _ in 0..iterations {
+            if rand_chance(0.5) {
+                true_count += 1;
+            }
+        }
+
+        // With 50% probability, should be roughly 500 +/- significant margin
+        // This is a very loose test since it's pseudo-random
+        assert!(true_count > 200 && true_count < 800,
+            "rand_chance should produce reasonable distribution");
+    }
+
+    #[test]
+    fn test_rand_chance_seeded_deterministic() {
+        let seed = 12345u64;
+        let probability = 0.5;
+
+        let result1 = rand_chance_seeded(probability, seed);
+        let result2 = rand_chance_seeded(probability, seed);
+
+        assert_eq!(result1, result2, "Same seed should produce same result");
+    }
+
+    #[test]
+    fn test_rand_chance_seeded_varies_with_seed() {
+        let probability = 0.5;
+        let mut different_results = false;
+
+        // Check that different seeds can produce different results
+        for seed in 0..100u64 {
+            let result1 = rand_chance_seeded(probability, seed);
+            let result2 = rand_chance_seeded(probability, seed + 1000);
+            if result1 != result2 {
+                different_results = true;
+                break;
+            }
+        }
+
+        assert!(different_results, "Different seeds should sometimes produce different results");
+    }
+}

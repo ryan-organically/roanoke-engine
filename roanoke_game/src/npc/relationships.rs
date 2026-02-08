@@ -6,6 +6,44 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// A rumor that can spread between NPCs
+#[derive(Debug, Clone)]
+pub struct Rumor {
+    /// Who/what the rumor is about
+    pub subject: String,
+    /// Description of the rumor
+    pub description: String,
+    /// Impact on relationships (-100 to 100)
+    pub impact: i32,
+    /// How believable the rumor is (0.0 to 1.0)
+    pub credibility: f32,
+    /// How old the rumor is (in game hours)
+    pub age: f32,
+}
+
+impl Rumor {
+    /// Create a new rumor about the player
+    pub fn about_player(description: &str, impact: i32, witnessed: bool) -> Self {
+        Self {
+            subject: "the outsider".to_string(),
+            description: description.to_string(),
+            impact,
+            credibility: if witnessed { 0.95 } else { 0.7 },
+            age: 0.0,
+        }
+    }
+}
+
+/// Simple random chance (placeholder - use proper RNG in production)
+fn rand_chance(probability: f32) -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    (nanos as f32 / u32::MAX as f32) < probability
+}
+
 /// Individual NPC relationship with the player
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NpcRelationship {
@@ -309,7 +347,7 @@ impl RelationshipManager {
         }
     }
 
-    /// Spread reputation among nearby NPCs
+    /// Spread reputation among nearby NPCs (witnessed events)
     pub fn spread_reputation(&mut self, source_npc: u32, witnesses: &[u32], positive: bool, game_time: f64) {
         let impact = if positive { 3 } else { -5 };
 
@@ -329,6 +367,108 @@ impl RelationshipManager {
                 rel.update_type();
             }
         }
+    }
+
+    /// Spread a rumor from one NPC to another (gossip system)
+    /// Returns true if the rumor was new to the recipient
+    pub fn spread_rumor(
+        &mut self,
+        speaker_npc: u32,
+        listener_npc: u32,
+        rumor: &Rumor,
+        game_time: f64,
+    ) -> bool {
+        // Don't spread to self
+        if speaker_npc == listener_npc {
+            return false;
+        }
+
+        let rel = self.get_or_create(listener_npc);
+
+        // Check if this NPC already has this rumor
+        let already_knows = rel.memories.iter().any(|m| {
+            matches!(m.memory_type, MemoryType::HeardRumor)
+                && m.description.contains(&rumor.subject)
+        });
+
+        if already_knows {
+            return false;
+        }
+
+        // Add rumor memory with decayed impact (gossip is less impactful than witness)
+        let decayed_impact = (rumor.impact as f32 * rumor.credibility * 0.6) as i32;
+
+        rel.affinity = (rel.affinity + decayed_impact).clamp(-100, 100);
+        rel.add_memory(NpcMemory {
+            memory_type: MemoryType::HeardRumor,
+            description: format!("Heard from village: {}", rumor.description),
+            timestamp: game_time,
+            impact: decayed_impact,
+        });
+        rel.update_type();
+
+        true
+    }
+
+    /// Propagate gossip across the village
+    /// Called periodically during socializing hours
+    pub fn propagate_gossip(&mut self, npc_pairs: &[(u32, u32)], game_time: f64) {
+        // Collect rumors to spread from relationships with significant events
+        let rumors_to_spread: Vec<(u32, Rumor)> = self.relationships.iter()
+            .filter_map(|(&npc_id, rel)| {
+                // Only spread rumors from recent significant events
+                rel.memories.iter()
+                    .filter(|m| {
+                        // Recent and impactful
+                        (game_time - m.timestamp) < 24.0 // Last 24 game hours
+                            && m.impact.abs() >= 5
+                            && !matches!(m.memory_type, MemoryType::HeardRumor) // Don't re-spread rumors
+                    })
+                    .max_by_key(|m| m.impact.abs())
+                    .map(|m| (npc_id, Rumor {
+                        subject: format!("the outsider (NPC {})", npc_id),
+                        description: m.description.clone(),
+                        impact: m.impact,
+                        credibility: match m.memory_type {
+                            MemoryType::Witnessed => 0.9,
+                            MemoryType::QuestComplete | MemoryType::Gift => 0.95,
+                            _ => 0.7,
+                        },
+                        age: (game_time - m.timestamp) as f32,
+                    }))
+            })
+            .collect();
+
+        // Spread rumors between socializing NPC pairs
+        for (speaker, listener) in npc_pairs {
+            for (_, rumor) in &rumors_to_spread {
+                // 30% chance to share any particular rumor during socializing
+                if rand_chance(0.3) {
+                    self.spread_rumor(*speaker, *listener, rumor, game_time);
+                }
+            }
+        }
+    }
+
+    /// Get count of NPCs who have heard a specific rumor type
+    pub fn rumor_awareness(&self, rumor_subject: &str) -> usize {
+        self.relationships.values()
+            .filter(|rel| {
+                rel.memories.iter().any(|m| {
+                    matches!(m.memory_type, MemoryType::HeardRumor)
+                        && m.description.contains(rumor_subject)
+                })
+            })
+            .count()
+    }
+
+    /// Check if specific NPC has heard rumors about player
+    pub fn has_heard_rumors(&self, npc_id: u32) -> bool {
+        self.relationships.get(&npc_id)
+            .map(|rel| {
+                rel.memories.iter().any(|m| matches!(m.memory_type, MemoryType::HeardRumor))
+            })
+            .unwrap_or(false)
     }
 
     /// Decay all relationships

@@ -788,7 +788,6 @@ dependencies = [
  "bytemuck",
  "glam 0.25.0",
  "image 0.25.9",
- "lazy_static",
  "log",
  "pollster",
  "wgpu",

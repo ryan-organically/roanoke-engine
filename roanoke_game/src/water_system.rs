@@ -845,13 +845,26 @@ impl WaterSystem {
         );
     }
 
-    pub fn update(&mut self, queue: &wgpu::Queue, time: f32, delta_time: f32) {
+    /// Update wind parameters from weather system
+    pub fn set_wind(&mut self, wind_direction_rad: f32, wind_strength: f32) {
+        // Convert wind direction (radians, 0=from north) to 2D vector
+        let dx = wind_direction_rad.sin();
+        let dz = -wind_direction_rad.cos();
+        self.uniforms.wind_direction = [dx, dz];
+        // Map weather wind_strength (0.3-2.5) to water wind_speed (3-12 m/s)
+        self.uniforms.wind_speed = 3.0 + wind_strength * 3.6;
+        // Also scale amplitude with wind (calm=0.5, storm=1.5)
+        self.uniforms.amplitude = 0.4 + wind_strength * 0.4;
+        self.uniforms.choppiness = 0.3 + wind_strength * 0.25;
+    }
+
+    pub fn update(&mut self, queue: &wgpu::Queue, time: f32, delta_time: f32, sun_dir: [f32; 3]) {
         self.uniforms.time = time;
         self.uniforms.delta_time = delta_time;
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
 
-        // Update time buffer for fragment shader foam animation (32 bytes to match WGSL vec3 alignment)
-        let time_data: [f32; 8] = [time, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Update time + light buffer for fragment shader (32 bytes: time + padding + sun_dir + padding)
+        let time_data: [f32; 8] = [time, 0.0, 0.0, 0.0, sun_dir[0], sun_dir[1], sun_dir[2], 0.0];
         queue.write_buffer(&self.time_buffer, 0, bytemuck::cast_slice(&time_data));
     }
 

@@ -401,8 +401,39 @@ pub struct CombinedAgentAdapter<'a> {
     pub animals: &'a mut crate::animals::AnimalManager,
 }
 
-// Note: Full trait implementations would require the NPC and Animal systems
-// to implement CharacterAgent trait. This is a proof-of-concept structure.
+impl<'a> AgentCollection for CombinedAgentAdapter<'a> {
+    fn iter_ids(&self) -> Box<dyn Iterator<Item = AgentId> + '_> {
+        let npc_ids = self.npcs.npcs.keys().map(|&id| AgentId::npc(id));
+        let animal_ids = self.animals.animals_with_ids().map(|(id, _)| AgentId::animal(id.0));
+        Box::new(npc_ids.chain(animal_ids))
+    }
+
+    fn get_agent(&self, id: AgentId) -> Option<&dyn CharacterAgent> {
+        match id.kind {
+            AgentKind::Npc => {
+                self.npcs.npcs.get(&(id.id as u32)).map(|n| n as &dyn CharacterAgent)
+            }
+            AgentKind::Animal => {
+                use crate::animals::entity::AnimalId;
+                self.animals.get(AnimalId(id.id)).map(|a| a as &dyn CharacterAgent)
+            }
+            _ => None,
+        }
+    }
+
+    fn get_agent_mut(&mut self, id: AgentId) -> Option<&mut dyn CharacterAgent> {
+        match id.kind {
+            AgentKind::Npc => {
+                self.npcs.npcs.get_mut(&(id.id as u32)).map(|n| n as &mut dyn CharacterAgent)
+            }
+            AgentKind::Animal => {
+                use crate::animals::entity::AnimalId;
+                self.animals.get_mut(AnimalId(id.id)).map(|a| a as &mut dyn CharacterAgent)
+            }
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

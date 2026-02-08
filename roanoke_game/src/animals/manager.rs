@@ -476,6 +476,16 @@ impl AnimalManager {
         self.animals.values()
     }
 
+    /// Get all animals with their IDs for unified agent system
+    pub fn animals_with_ids(&self) -> impl Iterator<Item = (AnimalId, &Animal)> {
+        self.animals.iter().map(|(&id, animal)| (id, animal))
+    }
+
+    /// Get mutable animals with their IDs for unified agent system
+    pub fn animals_with_ids_mut(&mut self) -> impl Iterator<Item = (AnimalId, &mut Animal)> {
+        self.animals.iter_mut().map(|(id, animal)| (*id, animal))
+    }
+
     /// Get animals near player for rendering (optimization)
     pub fn animals_near(&self, center: Vec3, radius: f32) -> Vec<&Animal> {
         self.spatial

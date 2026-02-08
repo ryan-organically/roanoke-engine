@@ -382,13 +382,50 @@ pub fn load_texture(path: &str) -> Result<LoadedTexture, String> {
     Ok(LoadedTexture { width, height, data })
 }
 
-/// Create a wgpu texture from loaded texture data
+/// Calculate the number of mip levels for a texture
+fn mip_level_count(width: u32, height: u32) -> u32 {
+    (width.max(height) as f32).log2().floor() as u32 + 1
+}
+
+/// Downsample RGBA8 image data by 2x using box filter
+fn downsample_rgba8(data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let new_w = (width / 2).max(1);
+    let new_h = (height / 2).max(1);
+    let mut out = vec![0u8; (new_w * new_h * 4) as usize];
+
+    for y in 0..new_h {
+        for x in 0..new_w {
+            let sx = (x * 2).min(width - 1);
+            let sy = (y * 2).min(height - 1);
+            let sx1 = (sx + 1).min(width - 1);
+            let sy1 = (sy + 1).min(height - 1);
+
+            for c in 0..4u32 {
+                let i00 = (sy * width + sx) * 4 + c;
+                let i10 = (sy * width + sx1) * 4 + c;
+                let i01 = (sy1 * width + sx) * 4 + c;
+                let i11 = (sy1 * width + sx1) * 4 + c;
+                let avg = (data[i00 as usize] as u32
+                    + data[i10 as usize] as u32
+                    + data[i01 as usize] as u32
+                    + data[i11 as usize] as u32) / 4;
+                out[(y * new_w + x) as usize * 4 + c as usize] = avg as u8;
+            }
+        }
+    }
+
+    (out, new_w, new_h)
+}
+
+/// Create a wgpu texture from loaded texture data with automatic mipmap generation
 pub fn create_gpu_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &LoadedTexture,
     label: Option<&str>,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    let mip_count = mip_level_count(texture.width, texture.height);
+
     let size = wgpu::Extent3d {
         width: texture.width,
         height: texture.height,
@@ -398,7 +435,7 @@ pub fn create_gpu_texture(
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
         label,
         size,
-        mip_level_count: 1,
+        mip_level_count: mip_count,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -406,6 +443,7 @@ pub fn create_gpu_texture(
         view_formats: &[],
     });
 
+    // Upload mip level 0
     queue.write_texture(
         wgpu::ImageCopyTexture {
             texture: &gpu_texture,
@@ -421,6 +459,39 @@ pub fn create_gpu_texture(
         },
         size,
     );
+
+    // Generate and upload remaining mip levels via CPU box filter
+    let mut prev_data = texture.data.clone();
+    let mut prev_w = texture.width;
+    let mut prev_h = texture.height;
+
+    for level in 1..mip_count {
+        let (mip_data, mip_w, mip_h) = downsample_rgba8(&prev_data, prev_w, prev_h);
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &gpu_texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &mip_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * mip_w),
+                rows_per_image: Some(mip_h),
+            },
+            wgpu::Extent3d {
+                width: mip_w,
+                height: mip_h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        prev_data = mip_data;
+        prev_w = mip_w;
+        prev_h = mip_h;
+    }
 
     let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
     (gpu_texture, view)

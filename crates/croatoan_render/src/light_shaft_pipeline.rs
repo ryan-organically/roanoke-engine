@@ -24,11 +24,11 @@ impl Default for LightShaftUniforms {
         Self {
             sun_screen_pos: [0.5, 0.3],
             intensity: 0.6,
-            decay: 0.97,
-            density: 0.6,
-            weight: 0.12,
+            decay: 0.95,
+            density: 0.7,
+            weight: 0.18,
             exposure: 1.2,
-            num_samples: 64, // Higher sample count for quality light beams
+            num_samples: 32, // Halved from 64 — compensated with higher weight/density
         }
     }
 }
@@ -38,6 +38,7 @@ pub struct LightShaftPipeline {
     uniform_buffer: wgpu::Buffer,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    cached_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl LightShaftPipeline {
@@ -141,6 +142,7 @@ impl LightShaftPipeline {
             uniform_buffer,
             bind_group_layout,
             sampler,
+            cached_bind_group: None,
         }
     }
 
@@ -184,9 +186,9 @@ impl LightShaftPipeline {
             intensity,
             decay,
             density,
-            weight: 0.12,
+            weight: 0.18,
             exposure: 1.3,
-            num_samples: 64, // Higher sample count for quality light beams
+            num_samples: 32, // Halved from 64 — compensated with higher weight
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
@@ -217,10 +219,35 @@ impl LightShaftPipeline {
         })
     }
 
-    /// Render light shafts to the output
+    /// Ensure the cached bind group exists. Only creates on first call or after invalidation.
+    pub fn ensure_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        scene_texture: &wgpu::TextureView,
+    ) {
+        if self.cached_bind_group.is_none() {
+            self.cached_bind_group = Some(self.create_bind_group(device, scene_texture));
+        }
+    }
+
+    /// Invalidate the cached bind group (call on resize when scene texture changes)
+    pub fn invalidate_bind_group(&mut self) {
+        self.cached_bind_group = None;
+    }
+
+    /// Render light shafts to the output using the cached bind group
     pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, bind_group: &'a wgpu::BindGroup) {
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+    }
+
+    /// Render using the internally cached bind group
+    pub fn render_cached<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        if let Some(bg) = &self.cached_bind_group {
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, bg, &[]);
+            render_pass.draw(0..3, 0..1);
+        }
     }
 }

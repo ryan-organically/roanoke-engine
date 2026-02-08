@@ -117,6 +117,9 @@ struct SaveData {
     player_pos: [f32; 3],
     player_rot: [f32; 2], // Yaw, Pitch
     inventory: Vec<String>,
+    // NPC System persistence
+    #[serde(default)]
+    npc_relationships: Option<npc::relationships::RelationshipManager>,
 }
 
 struct LoadingProgress {
@@ -374,6 +377,8 @@ struct SharedState {
     animal_spawner: AnimalSpawner,
     // Village System
     village_manager: VillageManager,
+    // NPC System (integrated with unified agent manager)
+    npc_manager: npc::NpcManager,
     // Progression System
     game_progression: GameProgression,
     // Economy System
@@ -1587,6 +1592,8 @@ fn main() {
         animal_spawner: AnimalSpawner::new(12345), // Will be re-seeded when game starts
         // Village System
         village_manager: VillageManager::new(12345), // Will be re-seeded when game starts
+        // NPC System
+        npc_manager: npc::NpcManager::new(),
         // Progression System
         game_progression: GameProgression::new(),
         // Economy System
@@ -3841,6 +3848,8 @@ fn main() {
                     ctx.config().width,
                     ctx.config().height,
                 ));
+                // Invalidate cached light shaft bind group since scene texture changed
+                light_shaft_pipeline_mutex.safe_lock().invalidate_bind_group();
             }
         }
 
@@ -4208,7 +4217,7 @@ fn main() {
             };
             let time_of_day = state.time_of_day;
             let cloud_coverage = state.weather.cloud_coverage;
-            let max_visible_dist = state.render_distance * state.dither_distance_ratio * 4.0; // Match LOD2 max distance (pushed back)
+            let max_visible_dist = state.render_distance * state.dither_distance_ratio * 3.0; // Match LOD2 max distance
             state.atmosphere.update(time_of_day, weather_fog, cloud_coverage, max_visible_dist);
 
             // Override fog density based on manual fog_level (\ key)
@@ -4368,6 +4377,26 @@ fn main() {
                 let game_hour = (state.game_progression.game_time % 24.0) as f32;
                 let player_look_dir = state.camera.forward();
                 state.village_manager.update(delta, game_hour, player_pos, player_look_dir);
+
+                // Update NPC manager (schedules, behaviors, relationships)
+                state.npc_manager.update(delta, player_pos, &faction_rep);
+
+                // Update unified agent manager (cross-system coordination)
+                // Note: We use split borrows to avoid borrow checker conflicts
+                let ua_game_time = state.game_progression.game_time;
+                let ua_world_phase = state.game_progression.world_phase();
+                let SharedState {
+                    ref mut unified_agents,
+                    ref mut npc_manager,
+                    ref mut animal_manager,
+                    ..
+                } = *state;
+                unified_agents.world_phase = ua_world_phase;
+                let mut adapter = character_agent::unified_manager::CombinedAgentAdapter {
+                    npcs: npc_manager,
+                    animals: animal_manager,
+                };
+                unified_agents.update(delta, player_pos, player_vel, ua_game_time, &mut adapter);
 
                 // Check for achievements
                 let game_time = state.game_progression.game_time;
@@ -5142,6 +5171,10 @@ fn main() {
                                                 state.player.position = Vec3::from_array(data.player_pos);
                                                 state.player.yaw = data.player_rot[0];
                                                 state.player.pitch = data.player_rot[1];
+                                                // Restore NPC relationships if present
+                                                if let Some(relationships) = data.npc_relationships {
+                                                    state.npc_manager.relationships = relationships;
+                                                }
                                                 state.game_state = GameState::Loading;
                                                 state.save_name_input = save_name.clone();
                                                 let range = 3;
@@ -5418,6 +5451,10 @@ fn main() {
                                         state.player.position = Vec3::from_array(data.player_pos);
                                         state.player.yaw = data.player_rot[0];
                                         state.player.pitch = data.player_rot[1];
+                                        // Restore NPC relationships if present
+                                        if let Some(relationships) = data.npc_relationships {
+                                            state.npc_manager.relationships = relationships;
+                                        }
                                         state.game_state = GameState::Loading;
                                         state.save_name_input = save_name.clone();
                                         state.show_load_menu = false;
@@ -6135,11 +6172,12 @@ fn main() {
 
                             if ui.button("Save Game").clicked() {
                                 let data = SaveData {
-            seed: state.seed,
-            player_pos: state.player.position.to_array(),
-            player_rot: [state.player.yaw, state.player.pitch],
-            inventory: state.inventory.clone(),
-        };
+                                    seed: state.seed,
+                                    player_pos: state.player.position.to_array(),
+                                    player_rot: [state.player.yaw, state.player.pitch],
+                                    inventory: state.inventory.clone(),
+                                    npc_relationships: Some(state.npc_manager.relationships.clone()),
+                                };
                                 save_game(&state.save_name_input, &data);
                             }
                             if ui.button("Back to Menu").clicked() {
@@ -6439,6 +6477,10 @@ fn main() {
                                                     state.player.yaw = save_data.player_rot[0];
                                                     state.player.pitch = save_data.player_rot[1];
                                                     state.inventory = save_data.inventory;
+                                                    // Restore NPC relationships if present
+                                                    if let Some(relationships) = save_data.npc_relationships {
+                                                        state.npc_manager.relationships = relationships;
+                                                    }
 
                                                     // Reset camera to match loaded player rotation
                                                     state.camera.yaw = state.player.yaw;
@@ -6613,6 +6655,7 @@ fn main() {
                                                 player_pos: state.player.position.to_array(),
                                                 player_rot: [state.player.yaw, state.player.pitch],
                                                 inventory: state.inventory.clone(),
+                                                npc_relationships: Some(state.npc_manager.relationships.clone()),
                                             };
                                             save_game(save_name, &save_data);
                                             println!("[SAVE] Game saved to {}", save_name);
@@ -6708,9 +6751,9 @@ fn main() {
                             // FOLIAGE: Create pipelines for trees and shrubs
                             let mut foliage_pipelines: Vec<TreePipeline> = Vec::new();
                             // tree_groups is already HashMap<String, Vec<Mat4>> from foliage_gen.rs
-                            // DEBUG: Show registry contents when processing first chunk
+                            // Debug: show registry contents when processing first chunk
                             if state.mesh_registry.len() < 20 {
-                                println!("[DEBUG] mesh_registry has {} entries: {:?}",
+                                log::debug!("mesh_registry has {} entries: {:?}",
                                     state.mesh_registry.len(), state.mesh_registry.keys().collect::<Vec<_>>());
                             }
                             // Acquire shadow map once for all tree pipelines
@@ -7988,79 +8031,19 @@ fn main() {
             let fog_end = fog_params[2];
 
             {
-                for (_coord, chunk) in manager.iter_chunks() {
-                    // Procedural grass update DISABLED - using grass2/grass3 models instead
-
-                    for trees in &chunk.trees {
-                        // Textured foliage from GLTF - enable texture sampling + alpha discard
-                        trees.update_camera_full(
-                            ctx.queue(),
-                            &view_proj,
-                            &light_view_proj,
-                            sun_dir.to_array(),
-                            elapsed,
-                            state.camera.position.to_array(),
-                            fog_color,
-                            fog_start,
-                            fog_end,
-                            fog_density,
-                            0.5,   // alpha_cutoff - use 0.5 for clean leaf edges
-                            1.0,   // use_texture = sample from texture
-                        );
-                    }
-                    for fern in &chunk.ferns {
-                        // Ferns use textured alpha cutoff for leaf fronds
-                        fern.update_camera_full(
-                            ctx.queue(),
-                            &view_proj,
-                            &light_view_proj,
-                            sun_dir.to_array(),
-                            elapsed,
-                            state.camera.position.to_array(),
-                            fog_color,
-                            fog_start,
-                            fog_end,
-                            fog_density,
-                            0.5,   // alpha_cutoff for leaf edges
-                            1.0,   // use_texture = sample from texture
-                        );
-                    }
-                    if let Some(detritus) = &chunk.detritus {
-                        detritus.update_camera(
-                            ctx.queue(),
-                            &view_proj,
-                            sun_dir.to_array(),
-                            state.camera.position.to_array(),
-                            fog_color,
-                            fog_start,
-                            fog_end,
-                            fog_density,
-                        );
-                    }
-                    for rock in &chunk.rocks {
-                        rock.update_camera(
-                            ctx.queue(),
-                            &view_proj,
-                            &light_view_proj,
-                            sun_dir.to_array(),
-                            elapsed,
-                            state.camera.position.to_array(),
-                            fog_color,
-                            fog_start,
-                            fog_end,
-                            fog_density,
-                        );
-                    }
-                    // for building in &chunk.buildings {
-                    //     building.update_camera(ctx.queue(), &view_proj);
-                    // }
-                }
+                // Pre-render camera updates: only for pipeline types NOT updated in the render loop.
+                // Trees, ferns, rocks are updated with LOD-specific settings inside the render loop.
             }
 
             // Update Water & Dispatch Compute
             {
                 let mut water = water_system_mutex.safe_lock();
-                water.update(ctx.queue(), elapsed, delta);
+                // Connect weather wind to ocean waves
+                let wind_strength = state.weather.wind_strength();
+                // Wind direction from weather offset drift (slow rotation over time)
+                let wind_angle = state.weather.wind_offset[0] * std::f32::consts::PI;
+                water.set_wind(wind_angle, wind_strength);
+                water.update(ctx.queue(), elapsed, delta, (-sun_dir).to_array());
                 water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
                 water.dispatch(&mut encoder);
             }
@@ -8071,108 +8054,87 @@ fn main() {
                 pond_water.update(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array(), delta);
             }
 
-            // 0. Shadow Pass
+            // 0. Shadow Pass (skip at night — no sun = no shadows)
             {
                 let shadow_map = shadow_map_mutex.safe_lock();
-                let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
-                let instanced_shadow_pipeline = instanced_shadow_pipeline_mutex.safe_lock();
+                if sun_pos_y > 0.02 {
+                    let shadow_pipeline = shadow_pipeline_mutex.safe_lock();
+                    let instanced_shadow_pipeline = instanced_shadow_pipeline_mutex.safe_lock();
 
-                shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
-                instanced_shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
+                    shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
+                    instanced_shadow_pipeline.update_uniforms(ctx.queue(), &light_view_proj);
 
-                let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow Pass"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &shadow_map.view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
+                    let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow Pass"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &shadow_map.view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
 
-                for (_coord, chunk) in manager.iter_chunks() {
-                    // Render terrain shadows
-                    shadow_pipeline.render(
-                        &mut shadow_pass,
-                        &chunk.terrain.vertex_buffer,
-                        &chunk.terrain.index_buffer,
-                        chunk.terrain.index_count,
-                    );
+                    let shadow_max_dist = 250.0;
+                    for (_coord, chunk) in manager.iter_chunks() {
+                        let shadow_dist = (chunk.bounds.center - state.camera.position).length();
+                        if shadow_dist > shadow_max_dist + chunk.bounds.radius { continue; }
 
-                    // Render tree shadows (instanced)
-                    for tree_pipeline in &chunk.trees {
-                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = tree_pipeline.get_shadow_buffers() {
-                            instanced_shadow_pipeline.render(
-                                &mut shadow_pass,
-                                vb,
-                                ib,
-                                inst_buf,
-                                idx_count,
-                                inst_count,
-                            );
+                        // Terrain shadows
+                        shadow_pipeline.render(
+                            &mut shadow_pass,
+                            &chunk.terrain.vertex_buffer,
+                            &chunk.terrain.index_buffer,
+                            chunk.terrain.index_count,
+                        );
+
+                        // Tree shadows (instanced)
+                        for tree_pipeline in &chunk.trees {
+                            if let Some((vb, ib, inst_buf, idx_count, inst_count)) = tree_pipeline.get_shadow_buffers() {
+                                instanced_shadow_pipeline.render(
+                                    &mut shadow_pass, vb, ib, inst_buf, idx_count, inst_count,
+                                );
+                            }
+                        }
+
+                        // Rock shadows (instanced)
+                        for rock_pipeline in &chunk.rocks {
+                            if let Some((vb, ib, inst_buf, idx_count, inst_count)) = rock_pipeline.get_shadow_buffers() {
+                                instanced_shadow_pipeline.render(
+                                    &mut shadow_pass, vb, ib, inst_buf, idx_count, inst_count,
+                                );
+                            }
+                        }
+
+                        // Boulder shadows - LOD0 only
+                        for boulder in &chunk.boulders_lod0 {
+                            if let Some((vb, ib, inst_buf, idx_count, inst_count)) = boulder.get_shadow_buffers() {
+                                instanced_shadow_pipeline.render(
+                                    &mut shadow_pass, vb, ib, inst_buf, idx_count, inst_count,
+                                );
+                            }
                         }
                     }
-
-                    // Render rock shadows (instanced - same format as trees)
-                    for rock_pipeline in &chunk.rocks {
-                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = rock_pipeline.get_shadow_buffers() {
-                            instanced_shadow_pipeline.render(
-                                &mut shadow_pass,
-                                vb,
-                                ib,
-                                inst_buf,
-                                idx_count,
-                                inst_count,
-                            );
-                        }
-                    }
-
-                    // Render fern shadows (instanced)
-                    for fern_pipeline in &chunk.ferns {
-                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = fern_pipeline.get_shadow_buffers() {
-                            instanced_shadow_pipeline.render(
-                                &mut shadow_pass,
-                                vb,
-                                ib,
-                                inst_buf,
-                                idx_count,
-                                inst_count,
-                            );
-                        }
-                    }
-
-                    // Render beach grass (grass3) shadows - LOD0 only for performance
-                    for grass3 in &chunk.grass3_lod0 {
-                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = grass3.get_shadow_buffers() {
-                            instanced_shadow_pipeline.render(
-                                &mut shadow_pass,
-                                vb,
-                                ib,
-                                inst_buf,
-                                idx_count,
-                                inst_count,
-                            );
-                        }
-                    }
-
-                    // Render boulder shadows - LOD0 only for performance
-                    for boulder in &chunk.boulders_lod0 {
-                        if let Some((vb, ib, inst_buf, idx_count, inst_count)) = boulder.get_shadow_buffers() {
-                            instanced_shadow_pipeline.render(
-                                &mut shadow_pass,
-                                vb,
-                                ib,
-                                inst_buf,
-                                idx_count,
-                                inst_count,
-                            );
-                        }
-                    }
+                } else {
+                    // Night: clear shadow map to max depth (no shadows)
+                    let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow Clear"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &shadow_map.view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
                 }
             }
 
@@ -8299,11 +8261,17 @@ fn main() {
                 let mut ember_pipeline = ember_pipeline_mutex.safe_lock();
                 // Lock bio_orb_pipeline early so it outlives render_pass
                 let mut bio_orb_pipeline = bio_orb_pipeline_mutex.safe_lock();
-                // Container pipelines must be declared here to outlive render_pass
+                // Reusable pipeline pool — avoids per-frame TreePipeline::new() GPU overhead
+                // Pipelines are popped from the free list, used, then returned after render_pass
+                static PIPELINE_FREE_LIST: OnceLock<Mutex<Vec<TreePipeline>>> = OnceLock::new();
+                // Cache campfire meshes — they're deterministic and never change after creation
+                static CAMPFIRE_MESH_CACHE: OnceLock<Mutex<std::collections::HashMap<u64, TreeMesh>>> = OnceLock::new();
+                let pipeline_free_list_mutex = PIPELINE_FREE_LIST.get_or_init(|| Mutex::new(Vec::new()));
+                let mut pipeline_free_list = pipeline_free_list_mutex.safe_lock();
+                let mut pipeline_pool: Vec<TreePipeline> = pipeline_free_list.drain(..).collect();
+
                 let mut container_pipelines: Vec<TreePipeline> = Vec::new();
-                // Campfire pipelines must be declared here to outlive render_pass
                 let mut campfire_pipelines: Vec<TreePipeline> = Vec::new();
-                // Weapon pipelines for dropped weapons (daggers, flintlocks, hatchets)
                 let mut weapon_pipelines: Vec<TreePipeline> = Vec::new();
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Main Pass"),
@@ -8337,7 +8305,7 @@ fn main() {
                 // Render chunks with frustum culling and LOD
                 let mut terrain_rendered = 0;
                 let mut terrain_culled = 0;
-                let mut grass_rendered = 0;
+                let grass_rendered = 0;
                 let mut trees_rendered = 0;
                 let mut trees_lod1_rendered = 0;
                 let mut trees_lod2_rendered = 0;
@@ -8345,7 +8313,7 @@ fn main() {
                 let mut boulders_rendered: usize = 0;
                 let mut shrubs_rendered: usize = 0;
                 let mut ferns_rendered: usize = 0;
-                let mut dead_logs_rendered: usize = 0;
+                let dead_logs_rendered: usize = 0;
                 let mut buildings_rendered = 0;
 
                 // Use render distance setting from pause menu
@@ -8361,28 +8329,31 @@ fn main() {
                 let dither_base = state.render_distance * state.dither_distance_ratio;
                 let _fade_width = state.dither_fade_width; // Reserved for future fine-tuning
 
-                // 3-tier LOD with dither pushed FAR back to prevent pop-ins:
-                // LOD0 solid: 0-400 (full detail visible much longer)
-                // LOD0->LOD1 transition: 400-600 (200 units crossfade)
-                // LOD1 solid: 600-850 (stable mid-range)
-                // LOD1->LOD2 transition: 850-1020 (170 units crossfade)
-                // LOD2 solid: 1020+ (distant silhouettes fade into fog only)
-                let lod0_fade_start = dither_base * 1.2;    // ~400 @ default (pushed way back)
-                let lod0_fade_end = dither_base * 1.8;      // ~600 @ default (LOD0 fully faded)
-                let lod1_fade_start = dither_base * 2.5;    // ~850 @ default (LOD1 starts fading)
-                let lod1_fade_end = dither_base * 3.0;      // ~1020 @ default (LOD1 fully faded)
-                let lod2_max = dither_base * 4.0;           // ~1360 @ default (extended for fog fade)
+                // 3-tier LOD with tightened distances for performance:
+                // LOD0 solid: 0-170 (full detail only where visible)
+                // LOD0->LOD1 transition: 170-270 (100 unit crossfade)
+                // LOD1 solid: 270-510 (mid-range)
+                // LOD1->LOD2 transition: 510-680 (170 unit crossfade)
+                // LOD2 solid: 680-1020 (distant silhouettes fade into fog)
+                let lod0_fade_start = dither_base * 0.5;    // ~170 @ default
+                let lod0_fade_end = dither_base * 0.8;      // ~270 @ default (LOD0 fully faded)
+                let lod1_fade_start = dither_base * 1.5;    // ~510 @ default (LOD1 starts fading)
+                let lod1_fade_end = dither_base * 2.0;      // ~680 @ default (LOD1 fully faded)
+                let lod2_max = dither_base * 3.0;           // ~1020 @ default (fog fade)
                 let lod_config = TreeLODConfig {
-                    lod0_fade_start,                        // ~400: LOD0 starts fading (pushed back)
-                    lod0_fade_end,                          // ~600: LOD0 fully faded, LOD1 solid
-                    lod1_fade_start,                        // ~850: LOD1 starts fading
-                    lod1_fade_end,                          // ~1020: LOD1 fully faded, LOD2 solid
-                    lod2_max_distance: lod2_max,            // ~1360: LOD2 fades into fog
+                    lod0_fade_start,                        // ~170: LOD0 starts fading
+                    lod0_fade_end,                          // ~270: LOD0 fully faded, LOD1 solid
+                    lod1_fade_start,                        // ~510: LOD1 starts fading
+                    lod1_fade_end,                          // ~680: LOD1 fully faded, LOD2 solid
+                    lod2_max_distance: lod2_max,            // ~1020: LOD2 fades into fog
                 };
 
-                // Get campfire lights for terrain shader (up to 4 nearest)
+                // Collect bio-orbs during main chunk loop (avoids separate chunk iteration)
+                let mut all_bio_orbs: Vec<BioOrbInstance> = Vec::new();
+
+                // Get campfire lights once (used by terrain shader + ember particles)
                 let campfire_light_data: Vec<[f32; 4]> = state.campfire_manager
-                    .get_light_data(state.camera.position, 50.0, 4)
+                    .get_light_data(state.camera.position, 50.0, 8)
                     .iter()
                     .map(|l| [l.position.x, l.position.y, l.position.z, l.intensity])
                     .collect();
@@ -8422,10 +8393,10 @@ fn main() {
 
                     // Procedural grass render DISABLED - using grass2/grass3 models instead
 
-                    // Trees with 3-tier LOD system - dithered transitions pushed FAR back
-                    // LOD0 (full detail): 0-600, dither out at 400-600 (no pop-ins visible)
-                    // LOD1 (simplified): 400-1020, dither in at 400-600, solid 600-850, dither out 850-1020
-                    // LOD2 (billboard): 850-1360+, dither in at 850-1020, solid into fog
+                    // Trees with 3-tier LOD system - tightened for performance
+                    // LOD0 (full detail): 0-270, dither out at 170-270
+                    // LOD1 (simplified): 170-680, dither in at 170-270, solid 270-510, dither out 510-680
+                    // LOD2 (low-poly): 510-1020, dither in at 510-680, solid into fog
 
                     // Determine LOD ranges and transition zones
                     let in_lod0_range = dist <= lod_config.lod0_fade_end;
@@ -8437,6 +8408,7 @@ fn main() {
                     // Render LOD0 (full detail) when in range
                     if in_lod0_range {
                         for trees in &chunk.trees {
+                            if !trees.is_visible(&frustum) { continue; }
                             if in_near_transition {
                                 trees.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
@@ -8464,6 +8436,7 @@ fn main() {
                     // Mid transition (to LOD2) takes priority over near transition
                     if in_lod1_range {
                         for trees_lod1 in &chunk.trees_lod1 {
+                            if !trees_lod1.is_visible(&frustum) { continue; }
                             if in_mid_transition {
                                 // Fading OUT to LOD2 (far end of LOD1)
                                 trees_lod1.update_camera_with_lod(
@@ -8503,6 +8476,7 @@ fn main() {
                     // Fades in from LOD1 at mid transition, solid beyond into fog
                     if in_lod2_range {
                         for trees_lod2 in &chunk.trees_lod2 {
+                            if !trees_lod2.is_visible(&frustum) { continue; }
                             if in_mid_transition {
                                 // Fading IN from LOD1
                                 trees_lod2.update_camera_with_lod(
@@ -8528,16 +8502,22 @@ fn main() {
                         }
                     }
 
-                    // Detritus
+                    // Detritus (update_camera + render in one pass — no separate pre-render loop)
                     if let Some(detritus) = &chunk.detritus {
                         if dist <= detritus_max_distance {
+                            detritus.update_camera(
+                                ctx.queue(), &view_proj, sun_dir.to_array(),
+                                state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                            );
                             detritus.render(&mut render_pass);
                         }
                     }
 
-                    // Rocks (non-boulder, same max distance as LOD2 trees)
+                    // Rocks (non-boulder, moderate draw distance)
+                    let rock_max_distance = 500.0;
                     for rock in &chunk.rocks {
-                        if dist <= lod_config.lod2_max_distance {
+                        if dist <= rock_max_distance && rock.is_visible(&frustum) {
                             rock.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8549,18 +8529,16 @@ fn main() {
                         }
                     }
 
-                    // Boulders with LOD system - dithered fade between detail levels
-                    // Extended distances for better visibility
-                    // LOD0: 0-400 units (high detail), fade out 350-400
-                    // LOD1: 350-800 units (medium), fade 350-400 in, 750-800 out
-                    // LOD2: 750-1200 units (low detail), fade in 750-800
-                    let boulder_lod0_end = 400.0;
-                    let boulder_lod0_fade_start = 350.0;
-                    let boulder_lod1_end = 800.0;
-                    let boulder_lod1_fade_start = 750.0;
+                    // Boulders with LOD system - tightened distances for performance
+                    // LOD0: 0-200 units (high detail), fade out 150-200
+                    // LOD1: 150-450 units (medium), fade 150-200 in, 400-450 out
+                    // LOD2: 400-700 units (low detail), fade in 400-450
+                    let boulder_lod0_end = 200.0;
+                    let boulder_lod0_fade_start = 150.0;
+                    let boulder_lod1_end = 450.0;
+                    let boulder_lod1_fade_start = 400.0;
 
-                    // Cap boulder rendering at reasonable distance for FPS
-                    let boulder_max_distance = state.render_distance * 1.5;
+                    let boulder_max_distance = 700.0;
                     let in_boulder_lod0 = dist <= boulder_lod0_end;
                     let in_boulder_lod1 = dist >= boulder_lod0_fade_start && dist <= boulder_lod1_end;
                     let in_boulder_lod2 = dist >= boulder_lod1_fade_start && dist <= boulder_max_distance;
@@ -8570,6 +8548,7 @@ fn main() {
                     // Boulder LOD0 (high detail) - NO WIND (boulders are static)
                     if in_boulder_lod0 {
                         for boulder in &chunk.boulders_lod0 {
+                            if !boulder.is_visible(&frustum) { continue; }
                             boulder.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8586,6 +8565,7 @@ fn main() {
                     // Boulder LOD1 (medium detail) - NO WIND
                     if in_boulder_lod1 {
                         for boulder in &chunk.boulders_lod1 {
+                            if !boulder.is_visible(&frustum) { continue; }
                             let (lod_mode, fade_start, fade_end) = if boulder_transition_0_1 {
                                 (LODFadeMode::LOD1FadeIn, boulder_lod0_fade_start, boulder_lod0_end)
                             } else if boulder_transition_1_2 {
@@ -8607,6 +8587,7 @@ fn main() {
                     // Boulder LOD2 (low detail) - NO WIND
                     if in_boulder_lod2 {
                         for boulder in &chunk.boulders_lod2 {
+                            if !boulder.is_visible(&frustum) { continue; }
                             boulder.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8621,18 +8602,19 @@ fn main() {
                     }
 
                     // Dead logs (fallen trees / driftwood) - LOD based on distance
-                    // LOD distances: 0-150 (LOD0), 100-400 (LOD1), 350-800 (LOD2)
-                    let dead_log_lod0_end = 150.0;
-                    let dead_log_lod0_fade_start = 100.0;
-                    let dead_log_lod1_end = 400.0;
-                    let dead_log_lod1_fade_start = 350.0;
+                    // LOD distances: 0-100 (LOD0), 80-250 (LOD1), 200-500 (LOD2)
+                    let dead_log_lod0_end = 100.0;
+                    let dead_log_lod0_fade_start = 80.0;
+                    let dead_log_lod1_end = 250.0;
+                    let dead_log_lod1_fade_start = 200.0;
 
                     let in_dead_log_lod0 = dist <= dead_log_lod0_end;
                     let in_dead_log_lod1 = dist >= dead_log_lod0_fade_start && dist <= dead_log_lod1_end;
-                    let in_dead_log_lod2 = dist >= dead_log_lod1_fade_start && dist <= 800.0;
+                    let in_dead_log_lod2 = dist >= dead_log_lod1_fade_start && dist <= 500.0;
 
                     if in_dead_log_lod0 {
                         for dead_log in &chunk.dead_logs_lod0 {
+                            if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8645,6 +8627,7 @@ fn main() {
 
                     if in_dead_log_lod1 && !in_dead_log_lod0 {
                         for dead_log in &chunk.dead_logs_lod1 {
+                            if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8657,6 +8640,7 @@ fn main() {
 
                     if in_dead_log_lod2 && !in_dead_log_lod1 {
                         for dead_log in &chunk.dead_logs_lod2 {
+                            if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8679,6 +8663,7 @@ fn main() {
 
                     if in_shrub_lod0 {
                         for shrub in &chunk.conifer_shrubs_lod0 {
+                            if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8692,6 +8677,7 @@ fn main() {
 
                     if in_shrub_lod1 {
                         for shrub in &chunk.conifer_shrubs_lod1 {
+                            if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8705,6 +8691,7 @@ fn main() {
 
                     if in_shrub_lod2 {
                         for shrub in &chunk.conifer_shrubs_lod2 {
+                            if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8732,6 +8719,7 @@ fn main() {
                     // Chamomile rendering
                     if dist <= chamomile_lod0_end {
                         for flower in &chunk.chamomile_lod0 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8742,6 +8730,7 @@ fn main() {
                         }
                     } else if dist <= chamomile_lod1_end {
                         for flower in &chunk.chamomile_lod1 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8755,6 +8744,7 @@ fn main() {
                     // Clover patch rendering
                     if dist <= clover_patch_lod0_end {
                         for flower in &chunk.clover_patch_lod0 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8765,6 +8755,7 @@ fn main() {
                         }
                     } else if dist <= clover_patch_lod1_end {
                         for flower in &chunk.clover_patch_lod1 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8778,6 +8769,7 @@ fn main() {
                     // Groundcover (daisy) rendering
                     if dist <= groundcover_lod0_end {
                         for flower in &chunk.groundcover_lod0 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8788,6 +8780,7 @@ fn main() {
                         }
                     } else if dist <= groundcover_lod1_end {
                         for flower in &chunk.groundcover_lod1 {
+                            if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8804,6 +8797,7 @@ fn main() {
 
                     if dist <= spikegrass_lod0_end {
                         for sg in &chunk.spikegrass_lod0 {
+                            if !sg.is_visible(&frustum) { continue; }
                             sg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8814,6 +8808,7 @@ fn main() {
                         }
                     } else if dist <= spikegrass_lod1_end {
                         for sg in &chunk.spikegrass_lod1 {
+                            if !sg.is_visible(&frustum) { continue; }
                             sg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8830,6 +8825,7 @@ fn main() {
 
                     if dist <= hedge_lod0_end {
                         for hg in &chunk.hedge_lod0 {
+                            if !hg.is_visible(&frustum) { continue; }
                             hg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8840,6 +8836,7 @@ fn main() {
                         }
                     } else if dist <= hedge_lod1_end {
                         for hg in &chunk.hedge_lod1 {
+                            if !hg.is_visible(&frustum) { continue; }
                             hg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8850,9 +8847,16 @@ fn main() {
                         }
                     }
 
-                    // Ferns (forest understory - same max distance as LOD2 trees)
+                    // Ferns (forest understory - small plants, limited draw distance)
+                    let fern_max_distance = 150.0;
                     for fern in &chunk.ferns {
-                        if dist <= lod_config.lod2_max_distance {
+                        if dist <= fern_max_distance && fern.is_visible(&frustum) {
+                            fern.update_camera_full(
+                                ctx.queue(), &view_proj, &light_view_proj,
+                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                fog_color, fog_start, fog_end, fog_density,
+                                0.5, 1.0,
+                            );
                             ferns_rendered += fern.instance_count() as usize;
                             fern.render(&mut render_pass);
                         }
@@ -8879,6 +8883,7 @@ fn main() {
 
                     if in_grass2_lod0 {
                         for g2 in &chunk.grass2_lod0 {
+                            if !g2.is_visible(&frustum) { continue; }
                             g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8893,6 +8898,7 @@ fn main() {
 
                     if in_grass2_lod1 {
                         for g2 in &chunk.grass2_lod1 {
+                            if !g2.is_visible(&frustum) { continue; }
                             let (lod_mode, fade_start, fade_end) = if grass2_transition_0_1 {
                                 (LODFadeMode::LOD1FadeIn, grass2_lod0_fade_start, grass2_lod0_end)
                             } else if grass2_transition_1_2 {
@@ -8912,6 +8918,7 @@ fn main() {
 
                     if in_grass2_lod2 {
                         for g2 in &chunk.grass2_lod2 {
+                            if !g2.is_visible(&frustum) { continue; }
                             g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8947,6 +8954,7 @@ fn main() {
                     // Render grass3 LOD0 (highest detail, close range)
                     if in_grass3_lod0 {
                         for g3 in &chunk.grass3_lod0 {
+                            if !g3.is_visible(&frustum) { continue; }
                             g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -8962,6 +8970,7 @@ fn main() {
                     // Render grass3 LOD1 (mid-range)
                     if in_grass3_lod1 {
                         for g3 in &chunk.grass3_lod1 {
+                            if !g3.is_visible(&frustum) { continue; }
                             let (lod_mode, fade_start, fade_end) = if grass3_transition_0_1 {
                                 (LODFadeMode::LOD1FadeIn, grass3_lod0_fade_start, grass3_lod0_end)
                             } else if grass3_transition_1_2 {
@@ -8982,6 +8991,7 @@ fn main() {
                     // Render grass3 LOD2 (far range, lowest detail)
                     if in_grass3_lod2 {
                         for g3 in &chunk.grass3_lod2 {
+                            if !g3.is_visible(&frustum) { continue; }
                             g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
                                 sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -9017,7 +9027,6 @@ fn main() {
 
                     // Cave mesh (Perlin worm caves)
                     if let Some(ref cave_mesh) = chunk.cave_mesh {
-                        // Update cave mesh uniforms (same as trees)
                         cave_mesh.update_camera_full(
                             ctx.queue(), &view_proj, &light_view_proj,
                             sun_dir.to_array(), elapsed, state.camera.position.to_array(),
@@ -9026,6 +9035,19 @@ fn main() {
                             0.6, // shadow strength
                         );
                         cave_mesh.render(&mut render_pass);
+                    }
+
+                    // Collect bio-orbs from this chunk (merged into main loop to avoid extra iteration)
+                    for orb in &chunk.bio_orbs {
+                        all_bio_orbs.push(BioOrbInstance {
+                            position: orb.position.to_array(),
+                            radius: orb.cluster_size * 0.3,
+                            color: orb.color,
+                            intensity: orb.intensity,
+                            pulse_phase: orb.pulse_phase,
+                            pulse_speed: orb.pulse_speed,
+                            _padding: [0.0, 0.0],
+                        });
                     }
                 }
 
@@ -9089,10 +9111,17 @@ fn main() {
                     // Create pipelines for each variant with transforms
                     let shadow_map = shadow_map_mutex.safe_lock();
 
+                    // Helper: get a reusable pipeline from pool (avoids per-frame GPU resource creation)
+                    macro_rules! get_pipeline {
+                        ($pool:expr, $shadow_map:expr) => {
+                            $pool.pop().unwrap_or_else(|| TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), $shadow_map))
+                        };
+                    }
+
                     // LOD0 - High poly for close range
                     if !closed_lod0_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_closed_lod0") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod0_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9104,7 +9133,7 @@ fn main() {
                     }
                     if !open_lod0_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_open_lod0") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod0_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9118,7 +9147,7 @@ fn main() {
                     // LOD1 - Medium poly for medium range
                     if !closed_lod1_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_closed_lod1") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod1_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9130,7 +9159,7 @@ fn main() {
                     }
                     if !closed_lod2_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_closed_lod2") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod2_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9142,7 +9171,7 @@ fn main() {
                     }
                     if !open_lod1_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_open_lod1") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod1_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9154,7 +9183,7 @@ fn main() {
                     }
                     if !open_lod2_transforms.is_empty() {
                         if let Some(mesh) = state.mesh_registry.get("chest_open_lod2") {
-                            let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
+                            let mut p = get_pipeline!(pipeline_pool, &shadow_map);
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod2_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
@@ -9171,28 +9200,30 @@ fn main() {
                         .cloned()
                         .collect();
 
-                    for campfire in &nearby_campfires {
-                        // Generate mesh for this campfire
-                        let mesh_data = campfire::CampfireMesh::generate(campfire);
-                        let (positions, normals, uvs, indices) = mesh_data.to_tree_mesh_data();
+                    {
+                        let campfire_cache_mutex = CAMPFIRE_MESH_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+                        let mut campfire_cache = campfire_cache_mutex.safe_lock();
 
-                        if !positions.is_empty() {
-                            // Create pipeline and mesh
-                            let mut pipeline = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map);
-                            let tree_mesh = TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, None);
-                            pipeline.set_mesh(tree_mesh);
+                        for campfire in &nearby_campfires {
+                            // Get cached mesh or generate + cache on first encounter
+                            let tree_mesh = campfire_cache.entry(campfire.id.0).or_insert_with(|| {
+                                let mesh_data = campfire::CampfireMesh::generate(campfire);
+                                let (positions, normals, uvs, indices) = mesh_data.to_tree_mesh_data();
+                                TreePipeline::create_mesh(ctx.device(), &positions, &normals, &uvs, &indices, None)
+                            });
 
-                            // Single instance at origin (mesh is already in world space)
-                            let transforms = vec![Mat4::IDENTITY];
-                            pipeline.upload_instances(ctx.device(), &transforms);
-                            // Use no_wind variant - campfire stones should not sway
-                            pipeline.update_camera_no_wind(
-                                ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
-                                fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
-                                LODFadeMode::Disabled, 0.0, 0.0
-                            );
-                            campfire_pipelines.push(pipeline);
+                            if tree_mesh.index_count > 0 {
+                                let mut pipeline = get_pipeline!(pipeline_pool, &shadow_map);
+                                pipeline.set_mesh(tree_mesh.clone());
+                                pipeline.upload_instances(ctx.device(), &[Mat4::IDENTITY]);
+                                pipeline.update_camera_no_wind(
+                                    ctx.queue(), &view_proj, &light_view_proj,
+                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
+                                    LODFadeMode::Disabled, 0.0, 0.0
+                                );
+                                campfire_pipelines.push(pipeline);
+                            }
                         }
                     }
 
@@ -9255,7 +9286,7 @@ fn main() {
                         // Render daggers
                         if !dagger_transforms.is_empty() {
                             if let Some(mesh) = state.mesh_registry.get("dagger_lod0") {
-                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                let mut p = get_pipeline!(pipeline_pool, &shadow_map_weapons);
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &dagger_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
@@ -9269,7 +9300,7 @@ fn main() {
                         // Render flintlocks
                         if !flintlock_transforms.is_empty() {
                             if let Some(mesh) = state.mesh_registry.get("flintlock_lod0") {
-                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                let mut p = get_pipeline!(pipeline_pool, &shadow_map_weapons);
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &flintlock_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
@@ -9283,7 +9314,7 @@ fn main() {
                         // Render hatchets
                         if !hatchet_transforms.is_empty() {
                             if let Some(mesh) = state.mesh_registry.get("hatchet_lod0") {
-                                let mut p = TreePipeline::new(ctx.device(), ctx.queue(), ctx.surface_format(), &shadow_map_weapons);
+                                let mut p = get_pipeline!(pipeline_pool, &shadow_map_weapons);
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &hatchet_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
@@ -9332,57 +9363,40 @@ fn main() {
                 // Render Pond/Lake Water (inland bodies)
                 pond_water_guard.draw(&mut render_pass);
 
-                // Render Rain Particles (when stormy)
-                rain_pipeline.update(
-                    ctx.queue(),
-                    &view_proj,
-                    state.camera.position,
-                    state.camera.right(),
-                    state.camera.up,
-                    elapsed,
-                    state.weather.rain_intensity(),
-                    state.weather.wind_strength(),
-                    Vec3::from_array(fog_color),
-                    fog_start,
-                    fog_end,
-                );
-                rain_pipeline.render(&mut render_pass);
-
-                // Render Ember Particles (from campfires)
-                // Get campfire data for ember pipeline (up to 8 campfires)
-                let ember_campfire_data: Vec<[f32; 4]> = state.campfire_manager
-                    .get_light_data(state.camera.position, 50.0, 8)
-                    .iter()
-                    .map(|l| [l.position.x, l.position.y, l.position.z, l.intensity])
-                    .collect();
-                ember_pipeline.update(
-                    ctx.queue(),
-                    &view_proj,
-                    state.camera.position,
-                    state.camera.right(),
-                    state.camera.up,
-                    elapsed,
-                    &ember_campfire_data,
-                );
-                ember_pipeline.render(&mut render_pass);
-
-                // Render Bioluminescent Orbs (from caves)
-                // Collect all bio orbs from loaded chunks
-                let mut all_bio_orbs: Vec<BioOrbInstance> = Vec::new();
-                for (_coord, chunk) in manager.iter_chunks() {
-                    for orb in &chunk.bio_orbs {
-                        all_bio_orbs.push(BioOrbInstance {
-                            position: orb.position.to_array(),
-                            radius: orb.cluster_size * 0.3,
-                            color: orb.color,
-                            intensity: orb.intensity,
-                            pulse_phase: orb.pulse_phase,
-                            pulse_speed: orb.pulse_speed,
-                            _padding: [0.0, 0.0],
-                        });
-                    }
+                // Render Rain Particles (skip when not raining)
+                if state.weather.rain_intensity() > 0.01 {
+                    rain_pipeline.update(
+                        ctx.queue(),
+                        &view_proj,
+                        state.camera.position,
+                        state.camera.right(),
+                        state.camera.up,
+                        elapsed,
+                        state.weather.rain_intensity(),
+                        state.weather.wind_strength(),
+                        Vec3::from_array(fog_color),
+                        fog_start,
+                        fog_end,
+                    );
+                    rain_pipeline.render(&mut render_pass);
                 }
 
+                // Render Ember Particles (skip when no campfires nearby)
+                // Reuses campfire_light_data queried earlier (same spatial query)
+                if !campfire_light_data.is_empty() {
+                    ember_pipeline.update(
+                        ctx.queue(),
+                        &view_proj,
+                        state.camera.position,
+                        state.camera.right(),
+                        state.camera.up,
+                        elapsed,
+                        &campfire_light_data,
+                    );
+                    ember_pipeline.render(&mut render_pass);
+                }
+
+                // Render Bioluminescent Orbs (collected during main chunk loop above)
                 if !all_bio_orbs.is_empty() {
                     bio_orb_pipeline.upload_instances(ctx.device(), &all_bio_orbs);
                     bio_orb_pipeline.update_camera(ctx.queue(), &view_proj, state.camera.position, elapsed);
@@ -9390,108 +9404,65 @@ fn main() {
                 }
 
                 // Log culling stats occasionally (every ~60 frames)
-                static mut FRAME_COUNTER: u32 = 0;
-                unsafe {
-                    FRAME_COUNTER += 1;
-                    if FRAME_COUNTER % 300 == 1 {
-                        println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}, containers={}",
-                            terrain_rendered, grass_rendered, trees_rendered, trees_lod1_rendered,
-                            shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered, containers_rendered);
-                    }
+                static FRAME_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let frame = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if frame % 300 == 1 {
+                    println!("[RENDER STATS] terrain={}, grass={}, trees={}/lod1:{}, shrubs={}, ferns={}, rocks={}, boulders={}, buildings={}, containers={}",
+                        terrain_rendered, grass_rendered, trees_rendered, trees_lod1_rendered,
+                        shrubs_rendered, ferns_rendered, rocks_rendered, boulders_rendered, buildings_rendered, containers_rendered);
                 }
                 let _ = (terrain_rendered, terrain_culled, grass_rendered, trees_rendered, trees_lod1_rendered,
                          rocks_rendered, boulders_rendered, shrubs_rendered, ferns_rendered, dead_logs_rendered, buildings_rendered, containers_rendered);
+
+                drop(render_pass);
+
+                // Return pipelines to free list for reuse next frame
+                pipeline_free_list.extend(container_pipelines.drain(..));
+                pipeline_free_list.extend(campfire_pipelines.drain(..));
+                pipeline_free_list.extend(weapon_pipelines.drain(..));
+                pipeline_free_list.extend(pipeline_pool.drain(..));
             } // End Main Pass
 
             // 2.5 Light Shaft Post-Process Pass
             if offscreen_view.is_some() {
-                let light_shaft_pipeline = light_shaft_pipeline_mutex.safe_lock();
-                let atmo = &state.atmosphere.state;
+                let mut light_shaft_pipeline = light_shaft_pipeline_mutex.safe_lock();
 
-                // Calculate sun screen position
-                if let Some(sun_screen_pos) = LightShaftPipeline::calculate_sun_screen_pos(sun_dir, view_proj) {
-                    // Only render light shafts during daytime with sufficient intensity
+                // Apply light shafts when sun is visible and intense enough
+                let sun_screen_pos = LightShaftPipeline::calculate_sun_screen_pos(sun_dir, view_proj);
+                let atmo = &state.atmosphere.state;
+                if let Some(pos) = sun_screen_pos {
                     if atmo.light_shaft_intensity > 0.01 && sun_pos_y > 0.0 {
                         light_shaft_pipeline.update_uniforms(
-                            ctx.queue(),
-                            sun_screen_pos,
-                            atmo.light_shaft_intensity,
-                            atmo.light_shaft_decay,
-                            atmo.light_shaft_density,
+                            ctx.queue(), pos,
+                            atmo.light_shaft_intensity, atmo.light_shaft_decay, atmo.light_shaft_density,
                         );
-
-                        // Create bind group with offscreen texture
-                        let bind_group = light_shaft_pipeline.create_bind_group(
-                            ctx.device(),
-                            offscreen_view.unwrap(),
-                        );
-
-                        let mut light_shaft_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Light Shaft Pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-
-                        light_shaft_pipeline.render(&mut light_shaft_pass, &bind_group);
                     } else {
-                        // No light shafts - just copy offscreen to view
-                        let bind_group = light_shaft_pipeline.create_bind_group(
-                            ctx.device(),
-                            offscreen_view.unwrap(),
-                        );
                         light_shaft_pipeline.update_uniforms(ctx.queue(), [0.5, 0.5], 0.0, 0.96, 0.5);
-
-                        let mut copy_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Copy Pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-
-                        light_shaft_pipeline.render(&mut copy_pass, &bind_group);
                     }
                 } else {
-                    // Sun off-screen - just copy offscreen to view
-                    let bind_group = light_shaft_pipeline.create_bind_group(
-                        ctx.device(),
-                        offscreen_view.unwrap(),
-                    );
                     light_shaft_pipeline.update_uniforms(ctx.queue(), [0.5, 0.5], 0.0, 0.96, 0.5);
-
-                    let mut copy_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Copy Pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-
-                    light_shaft_pipeline.render(&mut copy_pass, &bind_group);
                 }
+
+                // Cached bind group — only created on first frame or after resize invalidation
+                light_shaft_pipeline.ensure_bind_group(
+                    ctx.device(), offscreen_view.unwrap(),
+                );
+
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Light Shaft Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                light_shaft_pipeline.render_cached(&mut pass);
             }
 
             // 3. Weapon Viewmodel Pass (First-person weapon)

@@ -130,7 +130,8 @@ fn caustic_pattern(p: vec2<f32>, time: f32) -> f32 {
     let n2 = noise(p2 * 8.0);
 
     // Create bright caustic lines where noise gradients align
-    let caustic = pow(abs(sin(n1 * 6.28) * sin(n2 * 6.28)), 2.0);
+    let caustic_base = abs(sin(n1 * 6.28) * sin(n2 * 6.28));
+    let caustic = caustic_base * caustic_base;
 
     return caustic;
 }
@@ -150,7 +151,8 @@ fn ripple_ring(p: vec2<f32>, center: vec2<f32>, time: f32, birth_time: f32) -> f
     let intensity = 1.0 - age / 5.0;
 
     // Ring pattern
-    let ring = exp(-pow((dist - ring_radius) / ring_width, 2.0));
+    let ring_d = (dist - ring_radius) / ring_width;
+    let ring = exp(-ring_d * ring_d);
 
     return ring * intensity * 0.3;
 }
@@ -179,7 +181,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ));
 
     // Fresnel effect - more reflection at grazing angles
-    let fresnel = pow(1.0 - max(dot(view_dir, normal), 0.0), 3.0);
+    let f_base = 1.0 - max(dot(view_dir, normal), 0.0);
+    let fresnel = f_base * f_base * f_base;
 
     // Depth simulation based on distance from edge
     // Edges are shallower, center is deeper

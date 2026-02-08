@@ -7,13 +7,17 @@ struct CameraUniform {
     _padding: f32,
 }
 
-struct TimeUniform {
+struct TimeAndLightUniform {
     time: f32,
-    _padding: vec3<f32>,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    sun_dir: vec3<f32>,
+    _pad3: f32,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(0) @binding(1) var<uniform> time_data: TimeUniform;
+@group(0) @binding(1) var<uniform> time_data: TimeAndLightUniform;
 
 struct WaterMaterial {
     deep_color: vec4<f32>,
@@ -92,45 +96,58 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let shallow_aqua = vec3<f32>(0.12, 0.40, 0.48);   // Shallow turquoise
     let very_shallow = vec3<f32>(0.25, 0.55, 0.55);   // Very shallow, almost see-through
 
-    // Blend based on distance from shore
-    var water_color: vec3<f32>;
-    if (shore_dist > 60.0) {
-        water_color = deep_blue;
-    } else if (shore_dist > 30.0) {
-        let t = (shore_dist - 30.0) / 30.0;
-        water_color = mix(mid_blue, deep_blue, t);
-    } else if (shore_dist > 10.0) {
-        let t = (shore_dist - 10.0) / 20.0;
-        water_color = mix(shallow_aqua, mid_blue, t);
-    } else {
-        let t = shore_dist / 10.0;
-        water_color = mix(very_shallow, shallow_aqua, t);
-    }
+    // Blend based on distance from shore (branchless smoothstep)
+    let t_shallow = smoothstep(0.0, 10.0, shore_dist);
+    let t_mid = smoothstep(10.0, 30.0, shore_dist);
+    let t_deep = smoothstep(30.0, 60.0, shore_dist);
+    var water_color = mix(very_shallow, shallow_aqua, t_shallow);
+    water_color = mix(water_color, mid_blue, t_mid);
+    water_color = mix(water_color, deep_blue, t_deep);
 
     // ========================================================================
     // LIGHTING - Blue water with subtle reflections
     // ========================================================================
 
-    let sun_dir = normalize(vec3<f32>(0.3, 0.8, 0.4));  // High sun
-    let sun_color = vec3<f32>(1.0, 0.95, 0.85);  // Warm sunlight
+    let sun_dir = normalize(time_data.sun_dir);
+    // Dynamic sun color based on elevation (sun_dir.y = how high the sun is)
+    let sun_elevation = sun_dir.y;
+    let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
+    let sun_color = mix(
+        vec3<f32>(0.1, 0.12, 0.18),  // Night: dim blue moonlight
+        mix(
+            vec3<f32>(1.4, 0.6, 0.25),   // Sunrise/sunset: warm orange
+            vec3<f32>(1.0, 0.95, 0.85),   // Midday: white-yellow
+            clamp(sun_elevation * 2.5, 0.0, 1.0)
+        ),
+        day_factor
+    );
 
     // Fresnel - proper Schlick approximation for water (IOR ~1.33, F0 ≈ 0.02)
     let NdotV = max(dot(normal, view_dir), 0.001);
     let F0 = 0.02;
-    let fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+    let one_minus_NdotV = 1.0 - NdotV;
+    let omn2 = one_minus_NdotV * one_minus_NdotV;
+    let fresnel = F0 + (1.0 - F0) * omn2 * omn2 * one_minus_NdotV;
 
     // Specular highlight - sun sparkles on water
     let half_vec = normalize(view_dir + sun_dir);
     let NdotH = max(dot(normal, half_vec), 0.0);
-    let specular = pow(NdotH, 256.0) * 0.8;  // Softer, less intense
+    // pow(NdotH, 256) via 8 iterative squares
+    var sp = NdotH; sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp; sp *= sp;
+    let specular = sp * 0.8;
 
     // Diffuse lighting - subtle shading
     let NdotL = max(dot(normal, sun_dir), 0.0);
     let diffuse = NdotL * 0.2 + 0.8;  // Mostly ambient
 
-    // Sky reflection - brighter, more realistic sky colors
-    let sky_zenith = vec3<f32>(0.4, 0.6, 0.9);   // Bright blue sky above
-    let sky_horizon = vec3<f32>(0.7, 0.75, 0.8); // Pale horizon
+    // Sky reflection - responds to time of day
+    let night_sky = vec3<f32>(0.02, 0.03, 0.06);
+    let day_sky_zenith = vec3<f32>(0.4, 0.6, 0.9);
+    let day_sky_horizon = vec3<f32>(0.7, 0.75, 0.8);
+    let sunset_sky = vec3<f32>(0.8, 0.45, 0.2);
+    let sunset_factor = smoothstep(0.0, 0.15, sun_elevation) * (1.0 - smoothstep(0.15, 0.4, sun_elevation));
+    let sky_zenith = mix(night_sky, mix(day_sky_zenith, sunset_sky, sunset_factor * 0.5), day_factor);
+    let sky_horizon = mix(night_sky * 1.5, mix(day_sky_horizon, sunset_sky, sunset_factor), day_factor);
 
     // Reflect view dir around normal for sky sampling
     let reflect_dir = reflect(-view_dir, normal);
@@ -138,11 +155,26 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let reflected_sky = mix(sky_horizon, sky_zenith, sky_blend);
 
     // ========================================================================
-    // FOAM - Only at breaking wave crests
+    // FOAM - Breaking wave crests + shore foam line
     // ========================================================================
 
     let foam_color = vec3<f32>(0.95, 0.97, 1.0);  // White with slight blue
-    let foam_amount = clamp(foam, 0.0, 1.0);
+    var foam_amount = clamp(foam, 0.0, 1.0);
+
+    // Shore foam - animated white line where waves meet the beach
+    if (shore_dist < 8.0) {
+        let t = time_data.time;
+        // Scrolling noise pattern along shore
+        let foam_uv = input.world_position.xz * 0.15;
+        let noise1 = sin(foam_uv.x * 3.0 + t * 1.2) * sin(foam_uv.y * 2.5 + t * 0.8);
+        let noise2 = sin(foam_uv.x * 5.0 - t * 1.5) * sin(foam_uv.y * 4.0 + t * 1.1);
+        let foam_noise = (noise1 + noise2) * 0.5 + 0.5;
+
+        // Foam band concentrated near shore (peaks at 1-3m from shore)
+        let shore_band = smoothstep(0.0, 1.5, shore_dist) * smoothstep(8.0, 3.0, shore_dist);
+        let shore_foam = shore_band * foam_noise * 0.7;
+        foam_amount = max(foam_amount, shore_foam);
+    }
 
     // ========================================================================
     // COMBINE - Fresnel-driven reflection
@@ -164,19 +196,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // TRANSPARENCY
     // ========================================================================
 
-    // Shallow water is transparent, deep water is opaque
-    var alpha: f32;
-    if (shore_dist < 5.0) {
-        // Very shallow - highly transparent
-        alpha = 0.3 + shore_dist * 0.08;  // 0.3 to 0.7
-    } else if (shore_dist < 20.0) {
-        // Shallow to mid
-        let t = (shore_dist - 5.0) / 15.0;
-        alpha = mix(0.7, 0.85, t);
-    } else {
-        // Deep water - mostly opaque but still some transparency
-        alpha = min(0.85 + shore_dist * 0.001, 0.92);
-    }
+    // Depth-based transparency using exponential falloff (Beer's law approximation)
+    // Extinction coefficient controls how quickly water becomes opaque
+    let extinction = 0.08; // Lower = clearer water
+    var alpha = 1.0 - exp(-shore_dist * extinction);
+    alpha = clamp(alpha, 0.15, 0.93); // Never fully transparent or opaque
 
     // Fresnel makes glancing angles more opaque (realistic)
     alpha = mix(alpha, 0.98, fresnel);

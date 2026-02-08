@@ -47,8 +47,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Vector from pixel to sun
     let delta_uv = (uv - uniforms.sun_screen_pos) * (1.0 / f32(uniforms.num_samples)) * uniforms.density;
 
-    // Start at current pixel
-    var sample_uv = uv;
+    // Dithered start offset to hide banding with fewer samples
+    let dither = fract(dot(input.position.xy, vec2<f32>(0.46164, 0.96454)));
+    var sample_uv = uv - delta_uv * dither;
     var accumulated_light = vec3<f32>(0.0);
     var illumination_decay = 1.0;
 
@@ -99,7 +100,9 @@ fn fs_occlusion(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let delta_uv = (uv - uniforms.sun_screen_pos) * (1.0 / f32(uniforms.num_samples)) * uniforms.density;
 
-    var sample_uv = uv;
+    // Dithered start offset to hide banding
+    let dither2 = fract(dot(input.position.xy, vec2<f32>(0.46164, 0.96454)));
+    var sample_uv = uv - delta_uv * dither2;
     var accumulated_light = vec3<f32>(0.0);
     var illumination_decay = 1.0;
 

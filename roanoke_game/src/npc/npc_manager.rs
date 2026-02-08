@@ -5,13 +5,17 @@
 use super::relationships::{NpcRelationship, RelationshipManager, ScheduleEntry, NpcActivity};
 use super::dialogue::DialogueManager;
 use super::trading::TradingSystem;
+use super::utility_ai::{UtilityEvaluator, build_context, NpcAction};
+use crate::character_agent::{
+    AgentContext, AgentId, AgentKind, CharacterAgent, EmotionalState,
+    OrbVisualData, UnifiedBehaviorState,
+};
 use crate::progression::reputation::{Faction, ReputationLevel};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Central NPC manager
-#[derive(Debug)]
 pub struct NpcManager {
     /// All NPC instances
     pub npcs: HashMap<u32, NpcInstance>,
@@ -25,6 +29,10 @@ pub struct NpcManager {
     pub trading: TradingSystem,
     /// Current game time (hours)
     pub game_time: f32,
+    /// Utility AI evaluator for decision making
+    utility_evaluator: UtilityEvaluator,
+    /// Enable utility AI (can be toggled for debugging)
+    pub use_utility_ai: bool,
 }
 
 impl NpcManager {
@@ -36,6 +44,8 @@ impl NpcManager {
             dialogue: DialogueManager::new(),
             trading: TradingSystem::new(),
             game_time: 8.0, // Start at 8 AM
+            utility_evaluator: UtilityEvaluator::new(),
+            use_utility_ai: true, // Enable by default
         };
         manager.initialize_village_npcs();
         manager
@@ -161,6 +171,8 @@ impl NpcManager {
             is_essential: matches!(template.role, NpcRole::Elder | NpcRole::Chief),
             mood: 50,
             alertness: 0,
+            awareness: 0.0,
+            emotional_state: EmotionalState::Neutral,
             target: None,
             velocity: Vec3::ZERO,
             look_direction: Vec3::Z,
@@ -184,21 +196,72 @@ impl NpcManager {
         let current_hour = self.game_time as u8;
         let npc_ids: Vec<u32> = self.npcs.keys().copied().collect();
 
+        // Collect socializing NPC pairs for gossip propagation
+        let socializing_pairs: Vec<(u32, u32)> = self.collect_socializing_pairs();
+
         for id in npc_ids {
+            // Get relationship for this NPC (needs separate scope for borrow checker)
+            let relationship = self.relationships.get(id).cloned();
+
             if let Some(npc) = self.npcs.get_mut(&id) {
                 // Update activity based on schedule
                 npc.update_activity(current_hour);
 
-                // Update behavior based on player proximity and relationship
-                let dist_to_player = npc.position.distance(player_pos);
-                let relationship = self.relationships.get(id);
+                if self.use_utility_ai {
+                    // Use utility AI for decision making
+                    let recently_attacked = npc.alertness > 50; // Use alertness as proxy
+                    let ctx = build_context(
+                        npc,
+                        relationship.as_ref(),
+                        player_pos,
+                        self.game_time,
+                        recently_attacked,
+                    );
 
-                npc.update_behavior(dt, player_pos, dist_to_player, relationship);
+                    let (action, _score) = self.utility_evaluator.select_action(&ctx, npc.role);
+
+                    // Apply action to NPC state
+                    npc.apply_utility_action(action, player_pos, dt);
+                } else {
+                    // Legacy behavior-based update
+                    let dist_to_player = npc.position.distance(player_pos);
+                    npc.update_behavior(dt, player_pos, dist_to_player, relationship.as_ref());
+                }
 
                 // Apply movement
                 npc.position += npc.velocity * dt;
             }
         }
+
+        // Propagate gossip among socializing NPCs (once per update cycle)
+        if !socializing_pairs.is_empty() {
+            self.relationships.propagate_gossip(&socializing_pairs, self.game_time as f64);
+        }
+    }
+
+    /// Collect pairs of NPCs who are currently socializing near each other
+    fn collect_socializing_pairs(&self) -> Vec<(u32, u32)> {
+        let socializing_npcs: Vec<(u32, Vec3)> = self.npcs.iter()
+            .filter(|(_, npc)| matches!(npc.current_activity, NpcActivity::Socializing))
+            .map(|(&id, npc)| (id, npc.position))
+            .collect();
+
+        let mut pairs = Vec::new();
+
+        // Find NPCs within talking distance (10 units)
+        for i in 0..socializing_npcs.len() {
+            for j in (i + 1)..socializing_npcs.len() {
+                let (id_a, pos_a) = socializing_npcs[i];
+                let (id_b, pos_b) = socializing_npcs[j];
+
+                if pos_a.distance(pos_b) < 10.0 {
+                    pairs.push((id_a, id_b));
+                    pairs.push((id_b, id_a)); // Bidirectional gossip
+                }
+            }
+        }
+
+        pairs
     }
 
     /// Get NPC by ID
@@ -298,7 +361,9 @@ pub struct NpcInstance {
     pub max_health: f32,
     pub is_essential: bool,
     pub mood: i32,         // -100 to 100
-    pub alertness: i32,    // 0 to 100
+    pub alertness: i32,    // 0 to 100 (legacy, use awareness for CharacterAgent)
+    pub awareness: f32,    // 0.0 to 1.0 - unified awareness for CharacterAgent
+    pub emotional_state: EmotionalState, // Emotional state for visual representation
     pub target: Option<Vec3>,
     pub velocity: Vec3,
     pub look_direction: Vec3,
@@ -444,6 +509,117 @@ impl NpcInstance {
             false
         }
     }
+
+    /// Apply a utility AI action to this NPC
+    pub fn apply_utility_action(&mut self, action: NpcAction, player_pos: Vec3, dt: f32) {
+        // Decay alertness
+        self.alertness = (self.alertness - (10.0 * dt) as i32).max(0);
+
+        // Update behavior state based on action
+        self.behavior_state = action.to_behavior_state();
+
+        // Configure movement and facing based on action
+        match action {
+            NpcAction::Idle => {
+                self.velocity = Vec3::ZERO;
+            }
+            NpcAction::WalkToTarget => {
+                if let Some(target) = self.target {
+                    let to_target = target - self.position;
+                    let dist = to_target.length();
+                    if dist > 1.0 {
+                        let direction = to_target / dist;
+                        self.velocity = direction * 3.0; // Walking speed
+                        self.look_direction = direction;
+                    } else {
+                        self.velocity = Vec3::ZERO;
+                    }
+                }
+            }
+            NpcAction::WorkAtLocation => {
+                self.velocity = Vec3::ZERO;
+            }
+            NpcAction::GreetPlayer => {
+                self.velocity = Vec3::ZERO;
+                let to_player = (player_pos - self.position).normalize();
+                if to_player.length_squared() > 0.001 {
+                    self.look_direction = to_player;
+                }
+            }
+            NpcAction::ApproachPlayer => {
+                let to_player = player_pos - self.position;
+                let dist = to_player.length();
+                if dist > 3.0 {
+                    let direction = to_player / dist;
+                    self.velocity = direction * 2.5; // Slower approach
+                    self.look_direction = direction;
+                } else {
+                    self.velocity = Vec3::ZERO;
+                    self.look_direction = to_player.normalize();
+                }
+            }
+            NpcAction::TradeWithPlayer => {
+                self.velocity = Vec3::ZERO;
+                let to_player = (player_pos - self.position).normalize();
+                if to_player.length_squared() > 0.001 {
+                    self.look_direction = to_player;
+                }
+            }
+            NpcAction::FleeFromPlayer => {
+                let away = (self.position - player_pos).normalize();
+                self.velocity = away * 6.0; // Run speed
+                self.look_direction = away;
+                self.target = Some(self.home_position); // Flee toward home
+            }
+            NpcAction::AttackPlayer => {
+                let to_player = player_pos - self.position;
+                let dist = to_player.length();
+                if dist > 2.0 {
+                    let direction = to_player / dist;
+                    self.velocity = direction * 4.0; // Combat movement
+                    self.look_direction = direction;
+                } else {
+                    self.velocity = Vec3::ZERO;
+                    self.look_direction = to_player.normalize();
+                }
+            }
+            NpcAction::BecomeAlert => {
+                self.velocity = Vec3::ZERO;
+                self.alertness = 100;
+                let to_player = (player_pos - self.position).normalize();
+                if to_player.length_squared() > 0.001 {
+                    self.look_direction = to_player;
+                }
+            }
+            NpcAction::Investigate => {
+                // Move toward last known disturbance (use player pos as proxy)
+                let to_target = player_pos - self.position;
+                let dist = to_target.length();
+                if dist > 5.0 {
+                    let direction = to_target / dist;
+                    self.velocity = direction * 2.0; // Cautious movement
+                    self.look_direction = direction;
+                } else {
+                    self.velocity = Vec3::ZERO;
+                }
+            }
+            NpcAction::ReturnHome => {
+                let to_home = self.home_position - self.position;
+                let dist = to_home.length();
+                if dist > 2.0 {
+                    let direction = to_home / dist;
+                    self.velocity = direction * 3.0;
+                    self.look_direction = direction;
+                } else {
+                    self.velocity = Vec3::ZERO;
+                }
+            }
+            NpcAction::Socialize | NpcAction::ShareGossip => {
+                self.velocity = Vec3::ZERO;
+                // Would look at other NPCs, but we don't have that info here
+            }
+        }
+    }
 }
 
 /// NPC behavior states
@@ -507,4 +683,202 @@ pub enum InteractionResult {
     Generic,
     Busy(NpcActivity),
     Hostile,
+}
+
+// ============================================================================
+// Behavior State Conversion
+// ============================================================================
+
+impl NpcBehaviorState {
+    /// Convert NpcBehaviorState to UnifiedBehaviorState
+    pub fn to_unified(&self) -> UnifiedBehaviorState {
+        match self {
+            NpcBehaviorState::Idle => UnifiedBehaviorState::Idle,
+            NpcBehaviorState::Walking => UnifiedBehaviorState::Traveling,
+            NpcBehaviorState::Working => UnifiedBehaviorState::Working,
+            NpcBehaviorState::Trading => UnifiedBehaviorState::Interacting,
+            NpcBehaviorState::Alert => UnifiedBehaviorState::Alert,
+            NpcBehaviorState::Fleeing => UnifiedBehaviorState::Fleeing,
+            NpcBehaviorState::Greeting => UnifiedBehaviorState::Interacting,
+            NpcBehaviorState::Attacking => UnifiedBehaviorState::Attacking,
+        }
+    }
+
+    /// Create NpcBehaviorState from UnifiedBehaviorState
+    pub fn from_unified(unified: UnifiedBehaviorState) -> Self {
+        match unified {
+            UnifiedBehaviorState::Idle => NpcBehaviorState::Idle,
+            UnifiedBehaviorState::Patrolling => NpcBehaviorState::Walking,
+            UnifiedBehaviorState::Traveling => NpcBehaviorState::Walking,
+            UnifiedBehaviorState::Working => NpcBehaviorState::Working,
+            UnifiedBehaviorState::Alert => NpcBehaviorState::Alert,
+            UnifiedBehaviorState::Observing => NpcBehaviorState::Alert,
+            UnifiedBehaviorState::Approaching => NpcBehaviorState::Walking,
+            UnifiedBehaviorState::Pursuing => NpcBehaviorState::Walking,
+            UnifiedBehaviorState::Fleeing => NpcBehaviorState::Fleeing,
+            UnifiedBehaviorState::Attacking => NpcBehaviorState::Attacking,
+            UnifiedBehaviorState::Recovering => NpcBehaviorState::Idle,
+            UnifiedBehaviorState::Interacting => NpcBehaviorState::Trading,
+            UnifiedBehaviorState::Resting => NpcBehaviorState::Idle,
+            UnifiedBehaviorState::Dead => NpcBehaviorState::Idle, // NPCs handle death separately
+        }
+    }
+}
+
+// ============================================================================
+// CharacterAgent Implementation for NpcInstance
+// ============================================================================
+
+impl CharacterAgent for NpcInstance {
+    fn agent_id(&self) -> AgentId {
+        AgentId::npc(self.id)
+    }
+
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+
+    fn set_position(&mut self, pos: Vec3) {
+        self.position = pos;
+    }
+
+    fn velocity(&self) -> Vec3 {
+        self.velocity
+    }
+
+    fn set_velocity(&mut self, vel: Vec3) {
+        self.velocity = vel;
+    }
+
+    fn base_speed(&self) -> f32 {
+        // NPCs have role-based speeds
+        match self.role {
+            NpcRole::Warrior | NpcRole::Hunter => 5.0,
+            NpcRole::Elder | NpcRole::Child => 2.5,
+            _ => 3.5,
+        }
+    }
+
+    fn awareness(&self) -> f32 {
+        self.awareness
+    }
+
+    fn set_awareness(&mut self, level: f32) {
+        self.awareness = level.clamp(0.0, 1.0);
+        // Sync with legacy alertness
+        self.alertness = (level * 100.0) as i32;
+    }
+
+    fn behavior_state(&self) -> UnifiedBehaviorState {
+        self.behavior_state.to_unified()
+    }
+
+    fn set_behavior_state(&mut self, state: UnifiedBehaviorState) {
+        self.behavior_state = NpcBehaviorState::from_unified(state);
+    }
+
+    fn emotional_state(&self) -> EmotionalState {
+        self.emotional_state
+    }
+
+    fn set_emotional_state(&mut self, state: EmotionalState) {
+        self.emotional_state = state;
+    }
+
+    fn detection_radius(&self) -> f32 {
+        // Role-based detection ranges
+        match self.role {
+            NpcRole::Hunter | NpcRole::Warrior => 40.0,
+            NpcRole::Shaman => 30.0,
+            _ => 20.0,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.health > 0.0
+    }
+
+    fn look_direction(&self) -> Vec3 {
+        self.look_direction
+    }
+
+    fn look_at(&mut self, target: Vec3) {
+        let direction = (target - self.position).normalize();
+        if direction.length_squared() > 0.001 {
+            self.look_direction = direction;
+        }
+    }
+
+    fn update(&mut self, ctx: &AgentContext, dt: f32) {
+        // Sync awareness from legacy alertness if it changed externally
+        let alertness_as_awareness = self.alertness as f32 / 100.0;
+        if (self.awareness - alertness_as_awareness).abs() > 0.01 {
+            self.awareness = alertness_as_awareness;
+        }
+
+        // Update emotional state based on context
+        self.update_emotional_state(ctx);
+
+        // Awareness decay over time
+        if self.awareness > 0.0 {
+            self.awareness = (self.awareness - 0.05 * dt).max(0.0);
+        }
+
+        // Distance-based awareness gain from player
+        let player_dist = self.position.distance(ctx.player_pos);
+        let detection = self.detection_radius();
+        if player_dist < detection {
+            let awareness_gain = crate::character_agent::calculate_awareness_gain(
+                AgentKind::Npc,
+                AgentKind::Player,
+                player_dist,
+                detection,
+                dt,
+            );
+            self.awareness = (self.awareness + awareness_gain).min(1.0);
+        }
+    }
+
+    fn orb_scale(&self) -> f32 {
+        // Vary orb size by role importance
+        match self.role {
+            NpcRole::Elder | NpcRole::Chief => 1.3,
+            NpcRole::Shaman => 1.2,
+            NpcRole::Child => 0.7,
+            _ => 1.0,
+        }
+    }
+}
+
+impl NpcInstance {
+    /// Update emotional state based on context and relationships
+    fn update_emotional_state(&mut self, ctx: &AgentContext) {
+        let player_dist = self.position.distance(ctx.player_pos);
+        let detection = self.detection_radius();
+
+        // Determine emotional response
+        self.emotional_state = if self.health < self.max_health * 0.3 {
+            // Low health = fearful
+            EmotionalState::Fearful
+        } else if matches!(self.behavior_state, NpcBehaviorState::Fleeing) {
+            EmotionalState::Fearful
+        } else if matches!(self.behavior_state, NpcBehaviorState::Attacking) {
+            EmotionalState::Hostile
+        } else if matches!(self.behavior_state, NpcBehaviorState::Alert) {
+            EmotionalState::Alert
+        } else if matches!(self.behavior_state, NpcBehaviorState::Greeting) {
+            EmotionalState::Friendly
+        } else if matches!(self.behavior_state, NpcBehaviorState::Trading) {
+            EmotionalState::Friendly
+        } else if player_dist < detection * 0.5 && self.awareness > 0.3 {
+            // Player nearby and aware
+            EmotionalState::Curious
+        } else if self.mood > 30 {
+            EmotionalState::Calm
+        } else if self.mood < -30 {
+            EmotionalState::Alert
+        } else {
+            EmotionalState::Neutral
+        };
+    }
 }

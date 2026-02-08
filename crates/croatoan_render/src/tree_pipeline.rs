@@ -2,7 +2,7 @@ use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroupLayout, BindGroup};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Mutex};
 
 use crate::pipeline_validation::{
     MeshValidator, PipelineError, PipelineResult,
@@ -113,29 +113,45 @@ pub struct TreeMesh {
     pub texture_bind_group: Option<Arc<BindGroup>>, // Added for textures
 }
 
+/// GPU resources shared across ALL TreePipeline instances (created once, never changes)
+struct SharedPipelineState {
+    pipeline: RenderPipeline,
+    camera_bind_group_layout: BindGroupLayout,
+    texture_bind_group_layout: BindGroupLayout,
+    default_bind_group: BindGroup,
+}
+
+static SHARED_PIPELINE: OnceLock<Mutex<Option<Arc<SharedPipelineState>>>> = OnceLock::new();
+
 #[allow(dead_code)] // Fields stored for future extensibility
 pub struct TreePipeline {
-    pipeline: RenderPipeline,
+    shared: Arc<SharedPipelineState>,
     mesh: Option<TreeMesh>,
     instance_buffer: Option<Buffer>,
     instance_count: u32,
     camera_buffer: Buffer,
     camera_bind_group: BindGroup,
-    camera_bind_group_layout: BindGroupLayout,
-    // We store the texture layout here so we can create bind groups later if needed
-    pub texture_bind_group_layout: BindGroupLayout,
-    default_bind_group: BindGroup,
+    // Bounding sphere computed from instance positions (for per-pipeline frustum culling)
+    bounding_center: [f32; 3],
+    bounding_radius: f32,
 }
 
 
 
 impl TreePipeline {
-    pub fn new(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat, shadow_map: &crate::shadows::ShadowMap) -> Self {
-        // Group 0: Camera + Shadow Map
+    /// Get or create the shared pipeline state (shader, render pipeline, layouts, default texture).
+    /// Created once on first call; all subsequent TreePipelines share the same GPU objects.
+    fn get_shared(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat) -> Arc<SharedPipelineState> {
+        let mutex = SHARED_PIPELINE.get_or_init(|| Mutex::new(None));
+        let mut guard = mutex.lock().unwrap();
+        if let Some(shared) = guard.as_ref() {
+            return Arc::clone(shared);
+        }
+
+        // First call — create all shared GPU resources
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Tree Camera Bind Group Layout"),
             entries: &[
-                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -146,7 +162,6 @@ impl TreePipeline {
                     },
                     count: None,
                 },
-                // Shadow Map Texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -157,7 +172,6 @@ impl TreePipeline {
                     },
                     count: None,
                 },
-                // Shadow Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -167,11 +181,9 @@ impl TreePipeline {
             ],
         });
 
-        // Group 1: Texture
         let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Tree Texture Bind Group Layout"),
             entries: &[
-                // Diffuse Texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -182,7 +194,6 @@ impl TreePipeline {
                     },
                     count: None,
                 },
-                // Sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -192,7 +203,6 @@ impl TreePipeline {
             ],
         });
 
-        // Create default white texture
         let default_texture_size = wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 };
         let default_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Default White Texture"),
@@ -204,21 +214,13 @@ impl TreePipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        
-        // Write white pixel
         queue.write_texture(
             wgpu::ImageCopyTexture {
-                texture: &default_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+                texture: &default_texture, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
             },
             &[255, 255, 255, 255],
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: None,
-            },
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
             default_texture_size,
         );
 
@@ -229,21 +231,15 @@ impl TreePipeline {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
         let default_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&default_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&default_sampler),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&default_texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&default_sampler) },
             ],
             label: Some("Default Texture Bind Group"),
         });
@@ -266,57 +262,23 @@ impl TreePipeline {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[
-                    // Vertex Buffer Layout
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<TreeVertex>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
-                            // Position
-                            wgpu::VertexAttribute {
-                                offset: 0,
-                                shader_location: 0,
-                                format: wgpu::VertexFormat::Float32x3,
-                            },
-                            // Normal
-                            wgpu::VertexAttribute {
-                                offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                                shader_location: 1,
-                                format: wgpu::VertexFormat::Float32x3,
-                            },
-                            // UV
-                            wgpu::VertexAttribute {
-                                offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
-                                shader_location: 2,
-                                format: wgpu::VertexFormat::Float32x2,
-                            },
+                            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                            wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+                            wgpu::VertexAttribute { offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
                         ],
                     },
-                    // Instance Buffer Layout
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<TreeInstance>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
-                            // Model Matrix (4x vec4)
-                            wgpu::VertexAttribute {
-                                offset: 0,
-                                shader_location: 5,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                                shader_location: 6,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: (std::mem::size_of::<[f32; 4]>() * 2) as wgpu::BufferAddress,
-                                shader_location: 7,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: (std::mem::size_of::<[f32; 4]>() * 3) as wgpu::BufferAddress,
-                                shader_location: 8,
-                                format: wgpu::VertexFormat::Float32x4,
-                            },
+                            wgpu::VertexAttribute { offset: 0, shader_location: 5, format: wgpu::VertexFormat::Float32x4 },
+                            wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, shader_location: 6, format: wgpu::VertexFormat::Float32x4 },
+                            wgpu::VertexAttribute { offset: (std::mem::size_of::<[f32; 4]>() * 2) as wgpu::BufferAddress, shader_location: 7, format: wgpu::VertexFormat::Float32x4 },
+                            wgpu::VertexAttribute { offset: (std::mem::size_of::<[f32; 4]>() * 3) as wgpu::BufferAddress, shader_location: 8, format: wgpu::VertexFormat::Float32x4 },
                         ],
                     },
                 ],
@@ -346,15 +308,24 @@ impl TreePipeline {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
             multiview: None,
         });
 
-        // Create camera uniform buffer
+        let shared = Arc::new(SharedPipelineState {
+            pipeline,
+            camera_bind_group_layout,
+            texture_bind_group_layout,
+            default_bind_group,
+        });
+        *guard = Some(Arc::clone(&shared));
+        shared
+    }
+
+    pub fn new(device: &Device, queue: &Queue, surface_format: wgpu::TextureFormat, shadow_map: &crate::shadows::ShadowMap) -> Self {
+        let shared = Self::get_shared(device, queue, surface_format);
+
+        // Per-pipeline: camera uniform buffer + bind group (references shared shadow map)
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tree Camera Buffer"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -362,36 +333,25 @@ impl TreePipeline {
             mapped_at_creation: false,
         });
 
-        // Create camera bind group with shadow map
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Tree Camera Bind Group"),
-            layout: &camera_bind_group_layout,
+            layout: &shared.camera_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&shadow_map.sampler),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_map.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_map.sampler) },
             ],
         });
 
         Self {
-            pipeline,
+            shared,
             mesh: None,
             instance_buffer: None,
             instance_count: 0,
             camera_buffer,
             camera_bind_group,
-            camera_bind_group_layout,
-            texture_bind_group_layout,
-            default_bind_group,
+            bounding_center: [0.0; 3],
+            bounding_radius: 0.0,
         }
     }
 
@@ -537,10 +497,38 @@ impl TreePipeline {
         if instances.is_empty() {
             self.instance_count = 0;
             self.instance_buffer = None;
+            self.bounding_center = [0.0; 3];
+            self.bounding_radius = 0.0;
             return;
         }
 
         self.instance_count = instances.len() as u32;
+
+        // Compute bounding sphere from instance positions (translation = column 3)
+        let mut cx = 0.0f32;
+        let mut cy = 0.0f32;
+        let mut cz = 0.0f32;
+        for m in instances {
+            let col3 = m.col(3);
+            cx += col3.x;
+            cy += col3.y;
+            cz += col3.z;
+        }
+        let n = instances.len() as f32;
+        cx /= n;
+        cy /= n;
+        cz /= n;
+        let mut max_r2 = 0.0f32;
+        for m in instances {
+            let col3 = m.col(3);
+            let dx = col3.x - cx;
+            let dy = col3.y - cy;
+            let dz = col3.z - cz;
+            max_r2 = max_r2.max(dx * dx + dy * dy + dz * dz);
+        }
+        self.bounding_center = [cx, cy, cz];
+        // Add 20m padding for mesh extent (covers trees, boulders, etc.)
+        self.bounding_radius = max_r2.sqrt() + 20.0;
 
         // Convert to instance data with matrix sanitization
         let instance_data: Vec<TreeInstance> = instances.iter()
@@ -794,13 +782,13 @@ impl TreePipeline {
             return;
         }
 
-        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_pipeline(&self.shared.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
         // Use texture bind group if available, otherwise use default
         let texture_bind_group: &BindGroup = mesh.texture_bind_group
             .as_ref()
-            .map_or(&self.default_bind_group, |arc| arc.as_ref());
+            .map_or(&self.shared.default_bind_group, |arc| arc.as_ref());
         render_pass.set_bind_group(1, texture_bind_group, &[]);
 
         render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -837,7 +825,7 @@ impl TreePipeline {
         });
 
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.texture_bind_group_layout,
+            layout: &self.shared.texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -856,6 +844,22 @@ impl TreePipeline {
     #[inline]
     pub fn instance_count(&self) -> u32 {
         self.instance_count
+    }
+
+    /// Check if this pipeline's bounding sphere is visible in the given frustum
+    #[inline]
+    pub fn is_visible(&self, frustum: &crate::frustum::Frustum) -> bool {
+        if self.instance_count == 0 {
+            return false;
+        }
+        let center = glam::Vec3::from(self.bounding_center);
+        frustum.contains_sphere(center, self.bounding_radius)
+    }
+
+    /// Get the bounding sphere center and radius
+    #[inline]
+    pub fn bounding_sphere(&self) -> ([f32; 3], f32) {
+        (self.bounding_center, self.bounding_radius)
     }
 
     /// Get buffers for shadow rendering (vertex, index, instance, counts)

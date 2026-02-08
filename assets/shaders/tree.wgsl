@@ -361,7 +361,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Diffuse with half-lambert for softer shadows
     let n_dot_l = dot(normalize(in.world_normal), -light_dir);
-    let diffuse = pow(n_dot_l * 0.5 + 0.5, 2.0);
+    let hl = n_dot_l * 0.5 + 0.5;
+    let diffuse = hl * hl;
 
     // Bright ambient - grass and foliage catch lots of sky light
     let night_ambient = vec3<f32>(0.08, 0.10, 0.14); // Soft moonlit blue

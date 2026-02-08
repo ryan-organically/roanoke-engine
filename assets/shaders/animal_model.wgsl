@@ -235,8 +235,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Specular highlight - reduced and wet surfaces get more
     let ndoth = max(dot(in.world_normal, half_dir), 0.0);
-    let base_specular = pow(ndoth, 16.0) * 0.1 * day_factor;
-    let wet_specular = pow(ndoth, 32.0) * camera.rain_wetness * 0.25 * day_factor;
+    var ndoth2 = ndoth * ndoth; var ndoth4 = ndoth2 * ndoth2; var ndoth8 = ndoth4 * ndoth4;
+    let ndoth16 = ndoth8 * ndoth8;
+    let base_specular = ndoth16 * 0.1 * day_factor;
+    let wet_specular = ndoth16 * ndoth16 * camera.rain_wetness * 0.25 * day_factor;
     let specular = (base_specular + wet_specular) * shadow;
 
     // Ambient light - reduced for moody atmosphere
@@ -249,7 +251,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let sss = max(0.0, dot(light_dir, in.world_normal)) * 0.08 * day_factor * shadow;
 
     // Rim lighting for silhouette definition in low light
-    let rim = pow(1.0 - max(dot(view_dir, in.world_normal), 0.0), 4.0) * 0.12 * day_factor;
+    let arim = 1.0 - max(dot(view_dir, in.world_normal), 0.0);
+    let arim2 = arim * arim;
+    let rim = arim2 * arim2 * 0.12 * day_factor;
 
     // Combine lighting - shadow affects diffuse/specular, not ambient
     let lighting = ambient + (diffuse + sss + rim) * shadow + specular;

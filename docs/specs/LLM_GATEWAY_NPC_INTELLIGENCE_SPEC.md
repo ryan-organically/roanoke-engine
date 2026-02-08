@@ -1425,3 +1425,1857 @@ by their actions, not their words. You respect strength and honor.
 You are suspicious of colonists but follow the Elder's guidance. You will not
 reveal village defenses or warrior numbers to outsiders.
 ```
+
+---
+
+# Part II: Advanced Agent Systems
+
+This section expands on the core LLM gateway with advanced NPC intelligence systems that create emergent, believable behavior without constant API calls.
+
+---
+
+## NPC Archetypes & Personality Profiles
+
+### Archetype System
+
+Each NPC is assigned an archetype that defines baseline behaviors, speech patterns, and decision tendencies. Archetypes combine with individual personality vectors for unique NPCs.
+
+```rust
+/// Core NPC archetypes based on narrative function
+#[derive(Clone, Debug, PartialEq)]
+pub enum NpcArchetype {
+    // Knowledge Keepers
+    Sage,           // Wisdom, patience, indirect answers
+    Chronicler,     // Facts, dates, linear thinking
+    Mystic,         // Visions, metaphor, spiritual insight
+
+    // Action Oriented
+    Guardian,       // Protection, duty, sacrifice
+    Hunter,         // Pragmatism, tracking, survival
+    Warrior,        // Honor, combat, directness
+
+    // Social Oriented
+    Merchant,       // Trade, value, negotiation
+    Diplomat,       // Peace, compromise, reading people
+    Trickster,      // Chaos, humor, hidden truths
+
+    // Support Roles
+    Healer,         // Compassion, medicine, patience
+    Craftsperson,   // Creation, detail, pride in work
+    Caretaker,      // Nurturing, community, tradition
+}
+
+/// Archetype behavioral modifiers
+#[derive(Clone, Debug)]
+pub struct ArchetypeProfile {
+    pub archetype: NpcArchetype,
+
+    // Speech patterns
+    pub verbosity: f32,           // 0.0 (terse) to 1.0 (verbose)
+    pub formality: f32,           // 0.0 (casual) to 1.0 (formal)
+    pub metaphor_frequency: f32,  // How often they use figurative language
+    pub question_tendency: f32,   // How often they respond with questions
+
+    // Decision tendencies
+    pub risk_tolerance: f32,      // 0.0 (cautious) to 1.0 (bold)
+    pub trust_speed: f32,         // How quickly they warm to strangers
+    pub secret_keeping: f32,      // How well they guard information
+    pub emotional_expression: f32, // How openly they show feelings
+
+    // Knowledge domains
+    pub expertise: Vec<KnowledgeDomain>,
+    pub ignorance: Vec<KnowledgeDomain>,
+
+    // Interaction preferences
+    pub preferred_topics: Vec<String>,
+    pub avoided_topics: Vec<String>,
+    pub conversation_hooks: Vec<ConversationHook>,
+}
+
+#[derive(Clone, Debug)]
+pub enum KnowledgeDomain {
+    TribalHistory,
+    SpiritualPractices,
+    MedicinalPlants,
+    Hunting,
+    Warfare,
+    Agriculture,
+    Trade,
+    Weather,
+    Navigation,
+    Crafting,
+    Cooking,
+    ChildRearing,
+    Diplomacy,
+    ColonistAffairs,
+    AnimalBehavior,
+    PlantLore,
+    Astronomy,
+    Mythology,
+}
+
+impl ArchetypeProfile {
+    pub fn sage() -> Self {
+        Self {
+            archetype: NpcArchetype::Sage,
+            verbosity: 0.7,
+            formality: 0.6,
+            metaphor_frequency: 0.8,
+            question_tendency: 0.5,  // Often answers questions with questions
+            risk_tolerance: 0.3,
+            trust_speed: 0.4,
+            secret_keeping: 0.9,
+            emotional_expression: 0.3,
+            expertise: vec![
+                KnowledgeDomain::TribalHistory,
+                KnowledgeDomain::SpiritualPractices,
+                KnowledgeDomain::Mythology,
+                KnowledgeDomain::Diplomacy,
+            ],
+            ignorance: vec![
+                KnowledgeDomain::ColonistAffairs,
+                KnowledgeDomain::Trade,
+            ],
+            preferred_topics: vec![
+                "the old ways".into(),
+                "wisdom of ancestors".into(),
+                "balance".into(),
+            ],
+            avoided_topics: vec![
+                "war".into(),
+                "revenge".into(),
+            ],
+            conversation_hooks: vec![
+                ConversationHook::OnMention("ancestors", "speaks reverently"),
+                ConversationHook::OnMention("future", "becomes contemplative"),
+            ],
+        }
+    }
+
+    pub fn warrior() -> Self {
+        Self {
+            archetype: NpcArchetype::Warrior,
+            verbosity: 0.2,
+            formality: 0.4,
+            metaphor_frequency: 0.2,
+            question_tendency: 0.1,
+            risk_tolerance: 0.8,
+            trust_speed: 0.2,
+            secret_keeping: 0.95,
+            emotional_expression: 0.2,
+            expertise: vec![
+                KnowledgeDomain::Warfare,
+                KnowledgeDomain::Hunting,
+                KnowledgeDomain::AnimalBehavior,
+            ],
+            ignorance: vec![
+                KnowledgeDomain::SpiritualPractices,
+                KnowledgeDomain::Cooking,
+                KnowledgeDomain::ChildRearing,
+            ],
+            preferred_topics: vec![
+                "strength".into(),
+                "honor".into(),
+                "protection".into(),
+            ],
+            avoided_topics: vec![
+                "feelings".into(),
+                "weakness".into(),
+            ],
+            conversation_hooks: vec![
+                ConversationHook::OnMention("coward", "becomes hostile"),
+                ConversationHook::OnMention("battle", "shows interest"),
+            ],
+        }
+    }
+
+    pub fn trickster() -> Self {
+        Self {
+            archetype: NpcArchetype::Trickster,
+            verbosity: 0.8,
+            formality: 0.1,
+            metaphor_frequency: 0.6,
+            question_tendency: 0.3,
+            risk_tolerance: 0.9,
+            trust_speed: 0.7,  // Seems friendly, but...
+            secret_keeping: 0.3,  // Loves sharing secrets
+            emotional_expression: 0.9,
+            expertise: vec![
+                KnowledgeDomain::Trade,
+                KnowledgeDomain::Diplomacy,
+            ],
+            ignorance: vec![],  // Claims to know everything
+            preferred_topics: vec![
+                "stories".into(),
+                "games".into(),
+                "bargains".into(),
+            ],
+            avoided_topics: vec![],  // Will talk about anything
+            conversation_hooks: vec![
+                ConversationHook::OnMention("truth", "becomes evasive"),
+                ConversationHook::OnMention("game", "proposes a wager"),
+            ],
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ConversationHook {
+    OnMention(&'static str, &'static str),      // keyword, behavior change
+    OnRelationship(RelationshipTier, &'static str),
+    OnTimeOfDay(TimeRange, &'static str),
+    OnWeather(WeatherType, &'static str),
+    OnPlayerItem(&'static str, &'static str),   // item, reaction
+}
+```
+
+---
+
+## Advanced Memory System
+
+NPCs remember interactions through a multi-layered memory architecture that enables callbacks, grudges, and relationship evolution.
+
+### Memory Architecture
+
+```rust
+/// Comprehensive NPC memory system
+pub struct NpcMemoryBank {
+    /// Short-term: Recent interactions (last ~30 minutes game time)
+    pub working_memory: WorkingMemory,
+
+    /// Medium-term: Significant events (days to weeks)
+    pub episodic_memory: EpisodicMemory,
+
+    /// Long-term: Core beliefs and relationship summaries
+    pub semantic_memory: SemanticMemory,
+
+    /// Emotional imprints that color all interactions
+    pub emotional_memory: EmotionalMemory,
+
+    /// Social graph connections
+    pub social_memory: SocialMemory,
+}
+
+/// Recent, vivid memories that decay quickly
+#[derive(Clone, Debug)]
+pub struct WorkingMemory {
+    pub entries: VecDeque<WorkingMemoryEntry>,
+    pub capacity: usize,  // Max ~10 entries
+    pub decay_rate: f32,  // Per game-minute
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkingMemoryEntry {
+    pub id: Uuid,
+    pub timestamp: f64,           // Game time
+    pub content: MemoryContent,
+    pub vividness: f32,           // 0.0-1.0, decays over time
+    pub emotional_charge: f32,    // How emotionally significant
+}
+
+#[derive(Clone, Debug)]
+pub enum MemoryContent {
+    Dialogue {
+        speaker: String,
+        summary: String,
+        sentiment: Sentiment,
+    },
+    Action {
+        actor: String,
+        action: String,
+        target: Option<String>,
+    },
+    Observation {
+        what: String,
+        where_: String,
+    },
+    Gift {
+        item: String,
+        from: String,
+        perceived_value: f32,
+    },
+    Threat {
+        source: String,
+        severity: f32,
+    },
+    Promise {
+        from: String,
+        content: String,
+        fulfilled: Option<bool>,
+    },
+}
+
+/// Significant events that persist longer
+#[derive(Clone, Debug)]
+pub struct EpisodicMemory {
+    pub episodes: Vec<Episode>,
+    pub max_episodes: usize,  // ~50 per NPC
+}
+
+#[derive(Clone, Debug)]
+pub struct Episode {
+    pub id: Uuid,
+    pub title: String,              // "The Day the Stranger Arrived"
+    pub timestamp: f64,
+    pub participants: Vec<String>,
+    pub location: String,
+    pub summary: String,            // Compressed narrative
+    pub emotional_peak: EmotionalPeak,
+    pub consequences: Vec<Consequence>,
+    pub retrieval_cues: Vec<String>, // Keywords that trigger recall
+}
+
+#[derive(Clone, Debug)]
+pub struct EmotionalPeak {
+    pub emotion: Emotion,
+    pub intensity: f32,
+    pub trigger: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Emotion {
+    Joy,
+    Gratitude,
+    Trust,
+    Surprise,
+    Fear,
+    Sadness,
+    Disgust,
+    Anger,
+    Anticipation,
+    Shame,
+    Pride,
+    Grief,
+}
+
+#[derive(Clone, Debug)]
+pub struct Consequence {
+    pub type_: ConsequenceType,
+    pub magnitude: f32,
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum ConsequenceType {
+    RelationshipChange(String, f32),  // person, delta
+    BeliefChange(String),             // new belief
+    DebtOwed(String),                 // person
+    DebtReceived(String),
+    TraumaAcquired,
+    LessonLearned(String),
+}
+
+/// Core beliefs and compressed knowledge
+#[derive(Clone, Debug)]
+pub struct SemanticMemory {
+    /// Beliefs about the world
+    pub beliefs: HashMap<String, Belief>,
+
+    /// Compressed relationship summaries
+    pub relationship_summaries: HashMap<String, RelationshipSummary>,
+
+    /// Learned facts
+    pub knowledge: HashMap<KnowledgeDomain, Vec<KnownFact>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Belief {
+    pub statement: String,
+    pub confidence: f32,       // 0.0-1.0
+    pub source: BeliefSource,
+    pub formed_at: f64,
+    pub challenged_count: u32, // Times this belief was contradicted
+}
+
+#[derive(Clone, Debug)]
+pub enum BeliefSource {
+    Cultural,          // "Everyone knows this"
+    Personal,          // "I have seen this"
+    Taught,            // "Elder told me"
+    Inferred,          // "It must be so"
+    PlayerInfluenced,  // Player convinced them
+}
+
+/// Emotional associations that persist
+#[derive(Clone, Debug)]
+pub struct EmotionalMemory {
+    /// Emotional associations with entities
+    pub entity_feelings: HashMap<String, EmotionalAssociation>,
+
+    /// Emotional associations with places
+    pub place_feelings: HashMap<String, EmotionalAssociation>,
+
+    /// Emotional associations with topics
+    pub topic_feelings: HashMap<String, EmotionalAssociation>,
+
+    /// Trauma markers
+    pub traumas: Vec<Trauma>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EmotionalAssociation {
+    pub valence: f32,         // -1.0 (negative) to 1.0 (positive)
+    pub arousal: f32,         // 0.0 (calm) to 1.0 (intense)
+    pub dominance: f32,       // -1.0 (submissive) to 1.0 (dominant)
+    pub formation_events: Vec<Uuid>,  // Episode IDs that formed this
+}
+
+#[derive(Clone, Debug)]
+pub struct Trauma {
+    pub trigger: String,      // What reminds them
+    pub reaction: TraumaReaction,
+    pub intensity: f32,
+    pub can_heal: bool,
+    pub healing_progress: f32,
+}
+
+#[derive(Clone, Debug)]
+pub enum TraumaReaction {
+    Avoidance,      // Won't discuss
+    Flashback,      // Becomes distressed
+    Aggression,     // Becomes hostile
+    Shutdown,       // Ends conversation
+}
+
+/// Social network awareness
+#[derive(Clone, Debug)]
+pub struct SocialMemory {
+    /// Known relationships between others
+    pub observed_relationships: Vec<ObservedRelationship>,
+
+    /// Group memberships
+    pub group_knowledge: HashMap<String, GroupKnowledge>,
+
+    /// Reputation awareness
+    pub reputation_knowledge: HashMap<String, ReputationKnowledge>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObservedRelationship {
+    pub person_a: String,
+    pub person_b: String,
+    pub relationship_type: String,  // "friends", "enemies", "kin"
+    pub certainty: f32,
+    pub last_observed: f64,
+}
+```
+
+### Memory Retrieval
+
+```rust
+impl NpcMemoryBank {
+    /// Retrieve relevant memories for current context
+    pub fn retrieve_relevant(
+        &self,
+        context: &ConversationContext,
+        max_results: usize,
+    ) -> Vec<RetrievedMemory> {
+        let mut candidates = Vec::new();
+
+        // Check working memory for recent relevant items
+        for entry in &self.working_memory.entries {
+            let relevance = self.calculate_relevance(entry, context);
+            if relevance > 0.3 {
+                candidates.push(RetrievedMemory {
+                    source: MemorySource::Working,
+                    content: entry.content.clone(),
+                    relevance,
+                    recency: entry.vividness,
+                    emotional_charge: entry.emotional_charge,
+                });
+            }
+        }
+
+        // Check episodic memory for matching cues
+        for episode in &self.episodic_memory.episodes {
+            let cue_match = context.keywords.iter()
+                .filter(|k| episode.retrieval_cues.contains(k))
+                .count() as f32 / episode.retrieval_cues.len().max(1) as f32;
+
+            let participant_match = episode.participants.contains(&context.speaker);
+
+            if cue_match > 0.2 || participant_match {
+                candidates.push(RetrievedMemory {
+                    source: MemorySource::Episodic,
+                    content: MemoryContent::Observation {
+                        what: episode.summary.clone(),
+                        where_: episode.location.clone(),
+                    },
+                    relevance: cue_match + if participant_match { 0.3 } else { 0.0 },
+                    recency: self.calculate_recency(episode.timestamp),
+                    emotional_charge: episode.emotional_peak.intensity,
+                });
+            }
+        }
+
+        // Check emotional associations
+        if let Some(feeling) = self.emotional_memory.entity_feelings.get(&context.speaker) {
+            if feeling.valence.abs() > 0.3 || feeling.arousal > 0.5 {
+                candidates.push(RetrievedMemory {
+                    source: MemorySource::Emotional,
+                    content: MemoryContent::Observation {
+                        what: format!("strong feelings about {}", context.speaker),
+                        where_: "".into(),
+                    },
+                    relevance: feeling.arousal,
+                    recency: 1.0,  // Always fresh
+                    emotional_charge: feeling.valence.abs(),
+                });
+            }
+        }
+
+        // Sort by combined score and return top N
+        candidates.sort_by(|a, b| {
+            let score_a = a.relevance * 0.4 + a.recency * 0.3 + a.emotional_charge * 0.3;
+            let score_b = b.relevance * 0.4 + b.recency * 0.3 + b.emotional_charge * 0.3;
+            score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal)
+        });
+
+        candidates.into_iter().take(max_results).collect()
+    }
+
+    /// Generate memory-informed dialogue additions
+    pub fn get_memory_callbacks(&self, context: &ConversationContext) -> Vec<String> {
+        let memories = self.retrieve_relevant(context, 3);
+        let mut callbacks = Vec::new();
+
+        for memory in memories {
+            match &memory.content {
+                MemoryContent::Gift { item, from, .. } if from == &context.speaker => {
+                    callbacks.push(format!("I still have the {} you gave me.", item));
+                }
+                MemoryContent::Promise { content, fulfilled: Some(false), .. } => {
+                    callbacks.push(format!("You once promised {}. I have not forgotten.", content));
+                }
+                MemoryContent::Threat { source, .. } if source == &context.speaker => {
+                    callbacks.push("I remember your threats.".into());
+                }
+                MemoryContent::Action { action, .. } if memory.emotional_charge > 0.7 => {
+                    callbacks.push(format!("I still think of when you {}.", action));
+                }
+                _ => {}
+            }
+        }
+
+        callbacks
+    }
+}
+```
+
+---
+
+## Multi-Agent Coordination
+
+NPCs communicate with each other, share information, form opinions, and coordinate behavior.
+
+### Agent Communication Network
+
+```rust
+/// Manages NPC-to-NPC communication and information propagation
+pub struct AgentCommunicationNetwork {
+    /// Active communication channels
+    channels: HashMap<(NpcId, NpcId), CommunicationChannel>,
+
+    /// Information propagation queue
+    gossip_queue: VecDeque<GossipItem>,
+
+    /// Group conversations
+    group_contexts: HashMap<GroupId, GroupConversation>,
+
+    /// Observation events to process
+    observation_queue: VecDeque<ObservationEvent>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommunicationChannel {
+    pub participants: (NpcId, NpcId),
+    pub relationship_quality: f32,
+    pub communication_frequency: f32,  // Messages per game-day
+    pub trust_level: f32,
+    pub last_communication: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct GossipItem {
+    pub id: Uuid,
+    pub origin: NpcId,
+    pub subject: GossipSubject,
+    pub sentiment: Sentiment,
+    pub credibility: f32,      // Decreases as it spreads
+    pub spread_count: u32,
+    pub created_at: f64,
+    pub heard_by: HashSet<NpcId>,
+}
+
+#[derive(Clone, Debug)]
+pub enum GossipSubject {
+    PlayerAction {
+        action: String,
+        location: String,
+        witnesses: Vec<NpcId>,
+    },
+    PlayerReputation {
+        faction: String,
+        reputation_change: i32,
+    },
+    NpcOpinion {
+        about: NpcId,
+        opinion: String,
+    },
+    WorldEvent {
+        event: String,
+        importance: f32,
+    },
+    Rumor {
+        content: String,
+        truth_value: f32,  // 0.0 = false, 1.0 = true
+    },
+}
+
+impl AgentCommunicationNetwork {
+    /// Process NPC observations and generate gossip
+    pub fn process_observation(&mut self, event: ObservationEvent) {
+        // NPCs who witnessed the event
+        let witnesses: Vec<NpcId> = self.find_witnesses(&event);
+
+        if witnesses.is_empty() {
+            return;
+        }
+
+        // Create gossip item
+        let gossip = GossipItem {
+            id: Uuid::new_v4(),
+            origin: witnesses[0],
+            subject: self.event_to_gossip(&event),
+            sentiment: self.calculate_sentiment(&event),
+            credibility: 1.0,
+            spread_count: 0,
+            created_at: event.timestamp,
+            heard_by: witnesses.iter().cloned().collect(),
+        };
+
+        self.gossip_queue.push_back(gossip);
+    }
+
+    /// Spread gossip through the network
+    pub fn propagate_gossip(&mut self, dt: f32, npc_positions: &HashMap<NpcId, Vec3>) {
+        let mut new_spreads = Vec::new();
+
+        for gossip in &mut self.gossip_queue {
+            // Gossip decays over time
+            gossip.credibility *= 0.99_f32.powf(dt);
+
+            if gossip.credibility < 0.1 {
+                continue;  // Too stale to spread
+            }
+
+            // Find NPCs who can hear this gossip
+            for &hearer in gossip.heard_by.iter() {
+                // Find nearby NPCs who haven't heard it
+                if let Some(hearer_pos) = npc_positions.get(&hearer) {
+                    for (&potential_listener, listener_pos) in npc_positions {
+                        if gossip.heard_by.contains(&potential_listener) {
+                            continue;
+                        }
+
+                        let distance = hearer_pos.distance(*listener_pos);
+                        if distance < 10.0 {  // Conversation range
+                            // Check if they would share this gossip
+                            if let Some(channel) = self.channels.get(&(hearer, potential_listener)) {
+                                let share_chance = channel.trust_level * gossip.credibility;
+                                if rand::random::<f32>() < share_chance * dt {
+                                    new_spreads.push((gossip.id, potential_listener));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply spreads
+        for (gossip_id, listener) in new_spreads {
+            if let Some(gossip) = self.gossip_queue.iter_mut().find(|g| g.id == gossip_id) {
+                gossip.heard_by.insert(listener);
+                gossip.spread_count += 1;
+                gossip.credibility *= 0.9;  // Loses credibility with each retelling
+            }
+        }
+    }
+
+    /// NPCs form opinions based on what they've heard
+    pub fn update_npc_opinions(
+        &self,
+        npc: &mut Npc,
+        subject: &str,
+    ) -> Option<OpinionChange> {
+        let relevant_gossip: Vec<&GossipItem> = self.gossip_queue.iter()
+            .filter(|g| g.heard_by.contains(&npc.id))
+            .filter(|g| self.gossip_mentions(g, subject))
+            .collect();
+
+        if relevant_gossip.is_empty() {
+            return None;
+        }
+
+        // Aggregate sentiment weighted by credibility and NPC's trust in sources
+        let mut weighted_sentiment = 0.0;
+        let mut total_weight = 0.0;
+
+        for gossip in relevant_gossip {
+            let source_trust = self.channels
+                .get(&(gossip.origin, npc.id))
+                .map(|c| c.trust_level)
+                .unwrap_or(0.3);
+
+            let weight = gossip.credibility * source_trust;
+            weighted_sentiment += gossip.sentiment.value() * weight;
+            total_weight += weight;
+        }
+
+        if total_weight > 0.1 {
+            let final_sentiment = weighted_sentiment / total_weight;
+            Some(OpinionChange {
+                subject: subject.to_string(),
+                delta: final_sentiment * 0.1,  // Gradual opinion shifts
+                reason: "heard things".to_string(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Group conversation management
+#[derive(Clone, Debug)]
+pub struct GroupConversation {
+    pub id: GroupId,
+    pub participants: Vec<NpcId>,
+    pub topic: String,
+    pub started_at: f64,
+    pub turn_order: VecDeque<NpcId>,
+    pub contributions: Vec<ConversationContribution>,
+    pub mood: GroupMood,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConversationContribution {
+    pub speaker: NpcId,
+    pub content: String,
+    pub reaction_to: Option<Uuid>,
+    pub emotional_tone: Emotion,
+}
+
+#[derive(Clone, Debug)]
+pub enum GroupMood {
+    Harmonious,
+    Tense,
+    Excited,
+    Somber,
+    Argumentative,
+}
+
+impl GroupConversation {
+    /// Generate next NPC contribution to group conversation
+    pub fn generate_next_turn(
+        &mut self,
+        npcs: &HashMap<NpcId, Npc>,
+        topic_handler: &TopicHandler,
+    ) -> Option<ConversationContribution> {
+        let speaker_id = self.turn_order.pop_front()?;
+        let speaker = npcs.get(&speaker_id)?;
+
+        // Get speaker's perspective on the topic
+        let knowledge = topic_handler.get_npc_knowledge(speaker, &self.topic);
+
+        // Consider recent contributions
+        let recent = self.contributions.iter().rev().take(3).collect::<Vec<_>>();
+
+        // Generate response based on personality and mood
+        let contribution = match (&speaker.personality, &self.mood) {
+            (p, GroupMood::Argumentative) if p.aggression > 0.3 => {
+                self.generate_argumentative_response(speaker, &recent)
+            }
+            (p, _) if p.curiosity > 0.5 => {
+                self.generate_curious_response(speaker, &recent, &knowledge)
+            }
+            (p, _) if p.openness < -0.3 => {
+                // Reserved NPCs contribute less
+                if rand::random::<f32>() > 0.5 {
+                    return None;
+                }
+                self.generate_brief_response(speaker, &recent)
+            }
+            _ => self.generate_standard_response(speaker, &recent, &knowledge),
+        };
+
+        // Add speaker back to queue (round-robin)
+        self.turn_order.push_back(speaker_id);
+
+        contribution
+    }
+}
+```
+
+---
+
+## Player Modeling & Adaptation
+
+NPCs learn player behavioral patterns and adapt their responses accordingly.
+
+### Player Profile System
+
+```rust
+/// Tracks and models player behavior patterns
+pub struct PlayerProfile {
+    pub player_id: PlayerId,
+
+    /// Behavioral tendencies
+    pub tendencies: PlayerTendencies,
+
+    /// Interaction history statistics
+    pub interaction_stats: InteractionStats,
+
+    /// Inferred preferences
+    pub preferences: InferredPreferences,
+
+    /// Engagement metrics
+    pub engagement: EngagementMetrics,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PlayerTendencies {
+    /// Violence vs. diplomacy preference (0.0-1.0)
+    pub aggression: f32,
+
+    /// Exploration vs. task-focus (0.0-1.0)
+    pub curiosity: f32,
+
+    /// Generosity in trades/gifts (0.0-1.0)
+    pub generosity: f32,
+
+    /// Patience in dialogue (0.0-1.0)
+    pub patience: f32,
+
+    /// Honesty in dialogue choices (0.0-1.0)
+    pub honesty: f32,
+
+    /// Help-seeking vs. self-reliant (0.0-1.0)
+    pub help_seeking: f32,
+
+    /// Story engagement vs. mechanics focus (0.0-1.0)
+    pub narrative_interest: f32,
+
+    /// Sample size for each tendency
+    pub sample_counts: HashMap<String, u32>,
+}
+
+impl PlayerTendencies {
+    /// Update tendencies based on observed action
+    pub fn observe_action(&mut self, action: &PlayerAction) {
+        match action {
+            PlayerAction::AttackNpc { provoked } => {
+                self.update_tendency("aggression", if *provoked { 0.6 } else { 0.9 });
+            }
+            PlayerAction::InitiateDialogue => {
+                self.update_tendency("aggression", 0.2);
+            }
+            PlayerAction::GiveGift { value } => {
+                self.update_tendency("generosity", (*value as f32 / 100.0).min(1.0));
+            }
+            PlayerAction::SkipDialogue => {
+                self.update_tendency("patience", 0.1);
+                self.update_tendency("narrative_interest", 0.2);
+            }
+            PlayerAction::ReadFullDialogue => {
+                self.update_tendency("patience", 0.9);
+                self.update_tendency("narrative_interest", 0.8);
+            }
+            PlayerAction::AskForHelp => {
+                self.update_tendency("help_seeking", 0.8);
+            }
+            PlayerAction::ExploreOffPath => {
+                self.update_tendency("curiosity", 0.9);
+            }
+            PlayerAction::ChooseLie => {
+                self.update_tendency("honesty", 0.1);
+            }
+            PlayerAction::ChooseTruth => {
+                self.update_tendency("honesty", 0.9);
+            }
+            _ => {}
+        }
+    }
+
+    fn update_tendency(&mut self, tendency: &str, observed_value: f32) {
+        let count = self.sample_counts.entry(tendency.to_string()).or_insert(0);
+        *count += 1;
+
+        // Exponential moving average
+        let alpha = 1.0 / (*count as f32).min(20.0);
+        let current = match tendency {
+            "aggression" => &mut self.aggression,
+            "curiosity" => &mut self.curiosity,
+            "generosity" => &mut self.generosity,
+            "patience" => &mut self.patience,
+            "honesty" => &mut self.honesty,
+            "help_seeking" => &mut self.help_seeking,
+            "narrative_interest" => &mut self.narrative_interest,
+            _ => return,
+        };
+
+        *current = *current * (1.0 - alpha) + observed_value * alpha;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InteractionStats {
+    pub total_dialogues: u32,
+    pub average_dialogue_length: f32,
+    pub questions_asked: u32,
+    pub topics_explored: HashSet<String>,
+    pub npcs_befriended: u32,
+    pub npcs_angered: u32,
+    pub gifts_given: u32,
+    pub total_gift_value: u32,
+    pub lies_told: u32,
+    pub promises_kept: u32,
+    pub promises_broken: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InferredPreferences {
+    /// Preferred NPC archetypes to talk to
+    pub preferred_archetypes: Vec<(NpcArchetype, f32)>,
+
+    /// Topics they engage with most
+    pub engaged_topics: Vec<(String, f32)>,
+
+    /// Conversation styles they respond to
+    pub preferred_styles: ConversationStylePreferences,
+
+    /// Time of day they play most
+    pub peak_playtimes: Vec<(u8, f32)>,  // hour, frequency
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConversationStylePreferences {
+    pub likes_humor: f32,
+    pub likes_mystery: f32,
+    pub likes_directness: f32,
+    pub likes_metaphor: f32,
+    pub likes_choices: f32,
+    pub likes_backstory: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EngagementMetrics {
+    /// Are they engaged or rushing?
+    pub current_engagement: f32,
+
+    /// Session play time
+    pub session_duration: Duration,
+
+    /// Time since last meaningful interaction
+    pub time_since_interaction: Duration,
+
+    /// Signs of frustration (repeated failed actions)
+    pub frustration_signals: u32,
+
+    /// Signs of boredom (wandering, menu opening)
+    pub boredom_signals: u32,
+}
+```
+
+### Adaptive NPC Behavior
+
+```rust
+impl Npc {
+    /// Adapt behavior based on player profile
+    pub fn adapt_to_player(&mut self, profile: &PlayerProfile) {
+        let tendencies = &profile.tendencies;
+        let prefs = &profile.preferences;
+
+        // Adjust verbosity based on player patience
+        if tendencies.patience < 0.3 {
+            self.dialogue_modifier.brevity_boost = 0.5;  // Shorter responses
+            self.dialogue_modifier.skip_pleasantries = true;
+        }
+
+        // Adjust trust speed based on player honesty
+        if tendencies.honesty > 0.7 {
+            self.personality.trust_speed *= 1.2;  // Trust honest players faster
+        } else if tendencies.honesty < 0.3 {
+            self.personality.trust_speed *= 0.7;  // Slower to trust liars
+        }
+
+        // Adjust topic selection based on interests
+        if let Some((top_topic, _)) = prefs.engaged_topics.first() {
+            self.dialogue_modifier.preferred_redirect = Some(top_topic.clone());
+        }
+
+        // React to player aggression history
+        if tendencies.aggression > 0.7 {
+            self.emotional_state = EmotionalState::Alert;
+            self.alertness = (self.alertness + 30.0).min(100.0);
+        }
+
+        // Match conversation style preferences
+        if prefs.preferred_styles.likes_humor > 0.6 && self.archetype.can_be_humorous() {
+            self.dialogue_modifier.humor_enabled = true;
+        }
+
+        if prefs.preferred_styles.likes_directness > 0.7 {
+            self.archetype_profile.metaphor_frequency *= 0.5;
+        }
+    }
+
+    /// Generate response adapted to player
+    pub fn generate_adapted_response(
+        &self,
+        template: &DialogueTemplate,
+        ctx: &NpcContext,
+        player_profile: &PlayerProfile,
+    ) -> String {
+        let mut response = self.resolve_template(template, ctx);
+
+        // Add engagement hooks for disengaged players
+        if player_profile.engagement.current_engagement < 0.3 {
+            response = self.add_engagement_hook(response, player_profile);
+        }
+
+        // Simplify for impatient players
+        if player_profile.tendencies.patience < 0.3 {
+            response = self.condense_response(response);
+        }
+
+        // Add mystery elements for curious players
+        if player_profile.tendencies.curiosity > 0.7 {
+            response = self.add_mystery_hook(response);
+        }
+
+        response
+    }
+
+    fn add_engagement_hook(&self, response: String, profile: &PlayerProfile) -> String {
+        // Add something to re-engage the player
+        let hooks = vec![
+            "But there is something you should know...",
+            "Wait - you seem distracted. This is important.",
+            "Perhaps I should show you something instead?",
+            "I sense your thoughts are elsewhere. No matter.",
+        ];
+
+        if rand::random::<f32>() < 0.3 {
+            format!("{} {}", response, hooks.choose(&mut rand::thread_rng()).unwrap())
+        } else {
+            response
+        }
+    }
+}
+```
+
+---
+
+## Narrative Integration
+
+NPCs connect to the larger story, providing hooks, foreshadowing, and reacting to player progression.
+
+### Story State Awareness
+
+```rust
+/// Connects NPC behavior to narrative progression
+pub struct NarrativeIntegration {
+    /// Current story phase
+    pub story_phase: StoryPhase,
+
+    /// Active story threads
+    pub active_threads: Vec<StoryThread>,
+
+    /// Player's narrative choices
+    pub player_choices: Vec<NarrativeChoice>,
+
+    /// Foreshadowing opportunities
+    pub foreshadowing_queue: Vec<ForeshadowingHint>,
+
+    /// Character arcs
+    pub character_arcs: HashMap<NpcId, CharacterArc>,
+}
+
+#[derive(Clone, Debug)]
+pub enum StoryPhase {
+    /// Player just arrived, learning the world
+    Arrival,
+    /// Building relationships, learning culture
+    Integration,
+    /// First major conflict
+    RisingTension,
+    /// Choosing sides, point of no return approaching
+    CriticalJunction,
+    /// Major confrontation
+    Climax,
+    /// Dealing with consequences
+    Resolution,
+    /// Post-game, open world
+    Epilogue,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoryThread {
+    pub id: String,
+    pub name: String,
+    pub phase: ThreadPhase,
+    pub key_npcs: Vec<NpcId>,
+    pub unlocked_by: Vec<String>,      // Prerequisite threads
+    pub player_awareness: f32,         // How much player knows
+    pub resolution_paths: Vec<String>, // Possible endings
+}
+
+#[derive(Clone, Debug)]
+pub struct ForeshadowingHint {
+    pub thread_id: String,
+    pub hint_level: u8,        // 1=subtle, 5=obvious
+    pub delivery_npcs: Vec<NpcId>,
+    pub conditions: Vec<HintCondition>,
+    pub hint_templates: Vec<String>,
+    pub delivered: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum HintCondition {
+    PlayerInLocation(String),
+    TimeOfDay(TimeRange),
+    RelationshipAbove(NpcId, f32),
+    ThreadPhase(String, ThreadPhase),
+    PlayerKnowledgeBelow(String, f32),
+}
+
+impl NarrativeIntegration {
+    /// Get story-relevant dialogue additions for NPC
+    pub fn get_narrative_hooks(
+        &self,
+        npc_id: NpcId,
+        ctx: &ConversationContext,
+    ) -> Vec<NarrativeDialogueHook> {
+        let mut hooks = Vec::new();
+
+        // Check if NPC has foreshadowing to deliver
+        for hint in &self.foreshadowing_queue {
+            if !hint.delivered && hint.delivery_npcs.contains(&npc_id) {
+                if self.check_hint_conditions(&hint.conditions, ctx) {
+                    hooks.push(NarrativeDialogueHook::Foreshadowing {
+                        thread: hint.thread_id.clone(),
+                        template: hint.hint_templates.choose(&mut rand::thread_rng())
+                            .cloned()
+                            .unwrap_or_default(),
+                        subtlety: hint.hint_level,
+                    });
+                }
+            }
+        }
+
+        // Check character arc beats
+        if let Some(arc) = self.character_arcs.get(&npc_id) {
+            if let Some(beat) = arc.get_current_beat() {
+                if beat.can_trigger(ctx) {
+                    hooks.push(NarrativeDialogueHook::CharacterBeat {
+                        beat_id: beat.id.clone(),
+                        dialogue: beat.dialogue.clone(),
+                        emotional_shift: beat.emotional_shift,
+                    });
+                }
+            }
+        }
+
+        // Phase-specific hooks
+        match self.story_phase {
+            StoryPhase::RisingTension => {
+                if rand::random::<f32>() < 0.2 {
+                    hooks.push(NarrativeDialogueHook::TensionBuilder {
+                        template: self.get_tension_template(npc_id),
+                    });
+                }
+            }
+            StoryPhase::CriticalJunction => {
+                // NPCs push for decisions
+                if self.npc_has_stake(npc_id) {
+                    hooks.push(NarrativeDialogueHook::DecisionPressure {
+                        thread: self.get_relevant_thread(npc_id),
+                        stance: self.get_npc_stance(npc_id),
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        hooks
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CharacterArc {
+    pub npc_id: NpcId,
+    pub arc_type: ArcType,
+    pub beats: Vec<ArcBeat>,
+    pub current_beat: usize,
+    pub completed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum ArcType {
+    /// Character learns to trust player
+    TrustBuilding,
+    /// Character reveals hidden past
+    SecretRevealed,
+    /// Character changes beliefs
+    BeliefTransformation,
+    /// Character faces fear
+    OvercomingFear,
+    /// Character seeks redemption
+    Redemption,
+    /// Character descends into darkness
+    FallFromGrace,
+    /// Character sacrifices for others
+    Sacrifice,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArcBeat {
+    pub id: String,
+    pub prerequisites: Vec<BeatPrerequisite>,
+    pub dialogue: String,
+    pub emotional_shift: EmotionalShift,
+    pub unlocks: Vec<String>,
+    pub triggered: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum BeatPrerequisite {
+    RelationshipLevel(f32),
+    QuestComplete(String),
+    PreviousBeat(String),
+    PlayerChoice(String),
+    WorldState(String),
+    TimePassed(f64),
+}
+```
+
+---
+
+## Behavior Scripting DSL
+
+A domain-specific language for defining complex NPC behaviors without code changes.
+
+### Script Syntax
+
+```
+# Behavior script for Elder Tawenho
+
+@NPC tawenho
+@ARCHETYPE sage
+@ROLE elder
+
+# Trigger definitions
+TRIGGER morning_greeting:
+  WHEN time_of_day IN [6, 10]
+  AND player_distance < 15
+  AND NOT greeted_today
+  THEN
+    SAY "The sun honors us with another day, {player_title}."
+    SET greeted_today = true
+    MOOD contemplative
+
+TRIGGER respond_to_gift:
+  WHEN received_gift
+  AND gift_value > 10
+  THEN
+    MODIFY relationship.affinity += gift_value * 0.5
+    REMEMBER gift AS positive WITH impact = gift_value
+    IF gift_type == "sacred"
+      SAY "You understand the old ways. This honors the ancestors."
+      MODIFY relationship.respect += 20
+    ELSE IF gift_type == "practical"
+      SAY "A useful gift. You are thoughtful."
+    ELSE
+      SAY "I accept your offering."
+    MOOD grateful FOR 300  # seconds
+
+TRIGGER discuss_spirits:
+  WHEN topic == "spirits" OR topic == "ancestors"
+  AND relationship.trust > 30
+  THEN
+    IF player_knowledge.spirits < 0.3
+      # Player doesn't know much, teach them
+      SAY "The spirits walk among us still. Listen..."
+      TEACH spirits_basics
+      SET player_knowledge.spirits += 0.2
+    ELSE IF player_knowledge.spirits < 0.7
+      SAY "You have learned much. But there is more..."
+      OFFER_QUEST spirit_journey IF NOT quest_active(spirit_journey)
+    ELSE
+      SAY "You see as we see now. The veil is thin for you."
+      UNLOCK_TOPIC deep_mysteries
+
+TRIGGER witness_violence:
+  WHEN witnessed_player_attack
+  AND victim_faction == "croatoan"
+  THEN
+    MODIFY relationship.trust -= 30
+    MODIFY relationship.fear += 20
+    REMEMBER violence AS threatening WITH impact = -50
+    IF relationship.trust < 0
+      SAY "Blood calls to blood. You have chosen your path."
+      SET hostile = true
+      ALERT_VILLAGE
+    ELSE
+      SAY "Why do you bring violence here? Explain yourself."
+      DEMAND_EXPLANATION timeout=30
+
+# Scheduled behaviors
+SCHEDULE daily_prayer:
+  AT time_of_day == 5  # Dawn
+  DURATION 30 minutes
+  LOCATION prayer_site
+  ACTIVITY praying
+  INTERRUPTIBLE false
+
+SCHEDULE evening_stories:
+  AT time_of_day == 19
+  WHEN weather != storming
+  DURATION 60 minutes
+  LOCATION fire_pit
+  ACTIVITY storytelling
+  GATHER_NPCS [children, curious_adults]
+  PLAYER_WELCOME true
+
+# Dialogue tree hooks
+DIALOGUE_HOOK ask_about_colony:
+  REQUIRES relationship.trust > 20
+  RESPONSE:
+    IF story_phase == arrival
+      "The pale ones came in great canoes. Their hunger is endless."
+    ELSE IF story_phase == integration
+      "You are not like the others. Perhaps."
+    ELSE
+      "The colony's fate hangs in balance. You may yet tip the scales."
+
+# Conditional knowledge
+KNOWLEDGE spirits:
+  LEVEL 1: "The spirits of our ancestors guide us."
+  LEVEL 2: "Each tree, each stone, holds memory."
+  LEVEL 3: "The land itself dreams. We walk in that dream."
+  REQUIRES relationship.trust > [10, 40, 70]
+
+# Memory callbacks
+MEMORY_CALLBACK on_reunion:
+  IF days_since_last_meeting > 7
+  AND relationship.affinity > 30
+  THEN
+    SAY "It has been many suns since we spoke, {player_name}."
+    IF memory_exists(positive, recent=30_days)
+      SAY "I think often of {recall_memory(positive).summary}."
+```
+
+### Script Parser
+
+```rust
+/// Parses and executes NPC behavior scripts
+pub struct BehaviorScriptEngine {
+    scripts: HashMap<NpcId, CompiledScript>,
+    parser: ScriptParser,
+    runtime: ScriptRuntime,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledScript {
+    pub npc_id: NpcId,
+    pub triggers: Vec<CompiledTrigger>,
+    pub schedules: Vec<CompiledSchedule>,
+    pub dialogue_hooks: Vec<CompiledDialogueHook>,
+    pub knowledge_trees: HashMap<String, KnowledgeTree>,
+    pub memory_callbacks: Vec<CompiledMemoryCallback>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledTrigger {
+    pub name: String,
+    pub conditions: Vec<Condition>,
+    pub actions: Vec<Action>,
+    pub cooldown: Option<Duration>,
+    pub last_fired: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Condition {
+    TimeOfDay { range: (u8, u8) },
+    PlayerDistance { max: f32 },
+    RelationshipAbove { field: String, value: f32 },
+    RelationshipBelow { field: String, value: f32 },
+    VariableEquals { name: String, value: ScriptValue },
+    VariableSet { name: String },
+    VariableNotSet { name: String },
+    ReceivedGift,
+    TopicEquals { topic: String },
+    PlayerKnowledge { topic: String, comparison: Comparison, value: f32 },
+    WitnessedEvent { event_type: String },
+    QuestActive { quest_id: String },
+    QuestComplete { quest_id: String },
+    StoryPhase { phase: String },
+    Weather { weather_type: String },
+    Custom { expression: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum Action {
+    Say { template: String },
+    SetVariable { name: String, value: ScriptValue },
+    ModifyRelationship { field: String, delta: f32 },
+    Remember { category: String, memory_type: String, impact: f32 },
+    SetMood { mood: String, duration: Option<f32> },
+    Teach { topic: String },
+    OfferQuest { quest_id: String },
+    UnlockTopic { topic: String },
+    AlertVillage,
+    DemandExplanation { timeout: f32 },
+    PlayAnimation { animation: String },
+    PlaySound { sound: String },
+    Branch { conditions: Vec<(Vec<Condition>, Vec<Action>)> },
+}
+
+impl BehaviorScriptEngine {
+    /// Evaluate triggers for an NPC given current context
+    pub fn evaluate_triggers(
+        &mut self,
+        npc_id: NpcId,
+        ctx: &NpcContext,
+        game_time: f64,
+    ) -> Vec<Action> {
+        let script = match self.scripts.get_mut(&npc_id) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+
+        let mut triggered_actions = Vec::new();
+
+        for trigger in &mut script.triggers {
+            // Check cooldown
+            if let Some(last) = trigger.last_fired {
+                if let Some(cooldown) = trigger.cooldown {
+                    if game_time - last < cooldown.as_secs_f64() {
+                        continue;
+                    }
+                }
+            }
+
+            // Evaluate conditions
+            let all_conditions_met = trigger.conditions.iter()
+                .all(|c| self.runtime.evaluate_condition(c, ctx));
+
+            if all_conditions_met {
+                trigger.last_fired = Some(game_time);
+                triggered_actions.extend(trigger.actions.clone());
+            }
+        }
+
+        triggered_actions
+    }
+
+    /// Execute actions and return dialogue/effects
+    pub fn execute_actions(
+        &mut self,
+        npc: &mut Npc,
+        actions: Vec<Action>,
+        ctx: &mut NpcContext,
+    ) -> ExecutionResult {
+        let mut result = ExecutionResult::default();
+
+        for action in actions {
+            match action {
+                Action::Say { template } => {
+                    let resolved = self.runtime.resolve_template(&template, ctx);
+                    result.dialogue.push(resolved);
+                }
+                Action::SetVariable { name, value } => {
+                    ctx.variables.insert(name, value);
+                }
+                Action::ModifyRelationship { field, delta } => {
+                    result.relationship_changes.push((field, delta));
+                }
+                Action::Remember { category, memory_type, impact } => {
+                    result.memories.push(MemoryToCreate {
+                        category,
+                        memory_type,
+                        impact,
+                    });
+                }
+                Action::SetMood { mood, duration } => {
+                    npc.emotional_state = EmotionalState::from_str(&mood);
+                    if let Some(dur) = duration {
+                        result.timed_effects.push(TimedEffect::MoodReset {
+                            after: dur,
+                        });
+                    }
+                }
+                Action::OfferQuest { quest_id } => {
+                    result.quest_offers.push(quest_id);
+                }
+                Action::Branch { conditions } => {
+                    for (conds, branch_actions) in conditions {
+                        if conds.iter().all(|c| self.runtime.evaluate_condition(c, ctx)) {
+                            let branch_result = self.execute_actions(npc, branch_actions, ctx);
+                            result.merge(branch_result);
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    result.other_actions.push(action);
+                }
+            }
+        }
+
+        result
+    }
+}
+```
+
+---
+
+## Debug & Testing Tools
+
+### NPC Debug Console
+
+```rust
+/// In-game debug interface for NPC systems
+pub struct NpcDebugConsole {
+    enabled: bool,
+    selected_npc: Option<NpcId>,
+    show_memory: bool,
+    show_personality: bool,
+    show_relationships: bool,
+    show_triggers: bool,
+    log_entries: VecDeque<DebugLogEntry>,
+}
+
+impl NpcDebugConsole {
+    pub fn render(&mut self, ui: &mut egui::Ui, npc_manager: &NpcManager) {
+        if !self.enabled {
+            return;
+        }
+
+        egui::Window::new("NPC Debug").show(ui.ctx(), |ui| {
+            // NPC selector
+            egui::ComboBox::from_label("Select NPC")
+                .selected_text(self.selected_npc.map(|id|
+                    npc_manager.get(id).map(|n| n.name.as_str()).unwrap_or("Unknown")
+                ).unwrap_or("None"))
+                .show_ui(ui, |ui| {
+                    for npc in npc_manager.all_npcs() {
+                        ui.selectable_value(&mut self.selected_npc, Some(npc.id), &npc.name);
+                    }
+                });
+
+            if let Some(npc_id) = self.selected_npc {
+                if let Some(npc) = npc_manager.get(npc_id) {
+                    ui.separator();
+
+                    // Quick stats
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Role: {:?}", npc.role));
+                        ui.label(format!("State: {:?}", npc.behavior_state));
+                        ui.label(format!("Mood: {:?}", npc.emotional_state));
+                    });
+
+                    // Collapsible sections
+                    ui.checkbox(&mut self.show_personality, "Personality");
+                    if self.show_personality {
+                        self.render_personality(ui, &npc.personality);
+                    }
+
+                    ui.checkbox(&mut self.show_memory, "Memory");
+                    if self.show_memory {
+                        self.render_memory(ui, &npc.memory);
+                    }
+
+                    ui.checkbox(&mut self.show_relationships, "Relationships");
+                    if self.show_relationships {
+                        self.render_relationships(ui, npc_id, npc_manager);
+                    }
+
+                    ui.checkbox(&mut self.show_triggers, "Active Triggers");
+                    if self.show_triggers {
+                        self.render_triggers(ui, npc_id, npc_manager);
+                    }
+
+                    // Manual trigger testing
+                    ui.separator();
+                    ui.label("Test Trigger:");
+                    if ui.button("Gift (value=50)").clicked() {
+                        self.inject_event(npc_id, TestEvent::Gift { value: 50 });
+                    }
+                    if ui.button("Witness Violence").clicked() {
+                        self.inject_event(npc_id, TestEvent::WitnessViolence);
+                    }
+                    if ui.button("Topic: Spirits").clicked() {
+                        self.inject_event(npc_id, TestEvent::Topic("spirits".into()));
+                    }
+                }
+            }
+
+            // Log viewer
+            ui.separator();
+            ui.label("Recent Events:");
+            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                for entry in self.log_entries.iter().rev().take(20) {
+                    let color = match entry.level {
+                        LogLevel::Info => egui::Color32::WHITE,
+                        LogLevel::Warning => egui::Color32::YELLOW,
+                        LogLevel::Error => egui::Color32::RED,
+                        LogLevel::Trigger => egui::Color32::GREEN,
+                    };
+                    ui.colored_label(color, &entry.message);
+                }
+            });
+        });
+    }
+
+    fn render_personality(&self, ui: &mut egui::Ui, personality: &NpcPersonality) {
+        egui::Grid::new("personality_grid").show(ui, |ui| {
+            ui.label("Aggression:");
+            ui.add(egui::ProgressBar::new((personality.aggression + 1.0) / 2.0));
+            ui.end_row();
+
+            ui.label("Curiosity:");
+            ui.add(egui::ProgressBar::new((personality.curiosity + 1.0) / 2.0));
+            ui.end_row();
+
+            ui.label("Spirituality:");
+            ui.add(egui::ProgressBar::new((personality.spirituality + 1.0) / 2.0));
+            ui.end_row();
+
+            // ... other traits
+        });
+    }
+
+    fn render_memory(&self, ui: &mut egui::Ui, memory: &NpcMemoryBank) {
+        ui.label(format!("Working Memory: {} entries", memory.working_memory.entries.len()));
+        for entry in memory.working_memory.entries.iter().take(5) {
+            ui.label(format!("  - {} (vividness: {:.2})",
+                entry.content.summary(), entry.vividness));
+        }
+
+        ui.label(format!("Episodes: {} stored", memory.episodic_memory.episodes.len()));
+        for episode in memory.episodic_memory.episodes.iter().take(3) {
+            ui.label(format!("  - {}", episode.title));
+        }
+    }
+}
+
+/// Automated NPC behavior testing
+pub struct NpcTestHarness {
+    scenarios: Vec<TestScenario>,
+    results: Vec<TestResult>,
+}
+
+#[derive(Clone)]
+pub struct TestScenario {
+    pub name: String,
+    pub setup: Vec<SetupAction>,
+    pub events: Vec<TestEvent>,
+    pub assertions: Vec<Assertion>,
+}
+
+#[derive(Clone)]
+pub enum Assertion {
+    RelationshipAbove { npc: String, field: String, value: f32 },
+    RelationshipBelow { npc: String, field: String, value: f32 },
+    EmotionalState { npc: String, state: EmotionalState },
+    DialogueContains { substring: String },
+    MemoryExists { npc: String, memory_type: String },
+    TriggerFired { npc: String, trigger: String },
+    QuestOffered { quest: String },
+}
+
+impl NpcTestHarness {
+    pub fn run_scenario(&mut self, scenario: &TestScenario) -> TestResult {
+        let mut sandbox = NpcSandbox::new();
+
+        // Setup
+        for action in &scenario.setup {
+            sandbox.apply_setup(action);
+        }
+
+        // Run events
+        let mut dialogue_log = Vec::new();
+        for event in &scenario.events {
+            let responses = sandbox.process_event(event);
+            dialogue_log.extend(responses);
+        }
+
+        // Check assertions
+        let mut failures = Vec::new();
+        for assertion in &scenario.assertions {
+            if !sandbox.check_assertion(assertion, &dialogue_log) {
+                failures.push(format!("{:?} failed", assertion));
+            }
+        }
+
+        TestResult {
+            scenario_name: scenario.name.clone(),
+            passed: failures.is_empty(),
+            failures,
+            dialogue_log,
+        }
+    }
+}
+```
+
+---
+
+## Performance Optimizations
+
+### Batch Processing
+
+```rust
+/// Batches NPC updates to minimize per-frame overhead
+pub struct NpcUpdateBatcher {
+    /// NPCs grouped by update frequency
+    update_groups: Vec<UpdateGroup>,
+
+    /// Current frame's update queue
+    frame_queue: Vec<NpcId>,
+
+    /// Spatial index for proximity queries
+    spatial_index: SpatialHash<NpcId>,
+}
+
+#[derive(Clone)]
+pub struct UpdateGroup {
+    pub frequency: UpdateFrequency,
+    pub npcs: Vec<NpcId>,
+    pub last_update: f64,
+}
+
+#[derive(Clone, Copy)]
+pub enum UpdateFrequency {
+    EveryFrame,      // Player-adjacent NPCs
+    HighFrequency,   // Nearby NPCs (every 2 frames)
+    MediumFrequency, // Visible NPCs (every 5 frames)
+    LowFrequency,    // Distant NPCs (every 30 frames)
+    Dormant,         // Very distant (every 300 frames)
+}
+
+impl NpcUpdateBatcher {
+    pub fn categorize_npcs(
+        &mut self,
+        npcs: &[NpcId],
+        player_pos: Vec3,
+        camera_frustum: &Frustum,
+    ) {
+        for &npc_id in npcs {
+            if let Some(npc_pos) = self.get_npc_position(npc_id) {
+                let distance = player_pos.distance(npc_pos);
+                let in_frustum = camera_frustum.contains(npc_pos);
+
+                let frequency = match (distance, in_frustum) {
+                    (d, _) if d < 15.0 => UpdateFrequency::EveryFrame,
+                    (d, true) if d < 50.0 => UpdateFrequency::HighFrequency,
+                    (d, true) if d < 150.0 => UpdateFrequency::MediumFrequency,
+                    (d, _) if d < 500.0 => UpdateFrequency::LowFrequency,
+                    _ => UpdateFrequency::Dormant,
+                };
+
+                self.assign_to_group(npc_id, frequency);
+            }
+        }
+    }
+
+    pub fn get_frame_updates(&mut self, frame: u64) -> Vec<NpcId> {
+        let mut updates = Vec::new();
+
+        for group in &self.update_groups {
+            let should_update = match group.frequency {
+                UpdateFrequency::EveryFrame => true,
+                UpdateFrequency::HighFrequency => frame % 2 == 0,
+                UpdateFrequency::MediumFrequency => frame % 5 == 0,
+                UpdateFrequency::LowFrequency => frame % 30 == 0,
+                UpdateFrequency::Dormant => frame % 300 == 0,
+            };
+
+            if should_update {
+                updates.extend(&group.npcs);
+            }
+        }
+
+        updates
+    }
+}
+
+/// LLM request batching for cost efficiency
+pub struct LlmRequestBatcher {
+    pending_requests: Vec<LlmRequest>,
+    batch_interval: Duration,
+    last_batch: Instant,
+    max_batch_size: usize,
+}
+
+impl LlmRequestBatcher {
+    pub fn add_request(&mut self, request: LlmRequest) {
+        // Check if similar request already pending
+        if let Some(existing) = self.find_similar(&request) {
+            // Deduplicate by using cached intent
+            existing.share_response_with.push(request.id);
+            return;
+        }
+
+        self.pending_requests.push(request);
+
+        // Flush if batch is full
+        if self.pending_requests.len() >= self.max_batch_size {
+            self.flush_batch();
+        }
+    }
+
+    pub fn tick(&mut self) -> Vec<BatchedRequest> {
+        if self.last_batch.elapsed() >= self.batch_interval {
+            self.flush_batch()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn flush_batch(&mut self) -> Vec<BatchedRequest> {
+        self.last_batch = Instant::now();
+
+        // Group by NPC archetype for better batching
+        let mut by_archetype: HashMap<NpcArchetype, Vec<LlmRequest>> = HashMap::new();
+        for req in self.pending_requests.drain(..) {
+            by_archetype.entry(req.npc_archetype).or_default().push(req);
+        }
+
+        // Create batched requests
+        by_archetype.into_iter()
+            .map(|(archetype, requests)| BatchedRequest {
+                archetype,
+                requests,
+            })
+            .collect()
+    }
+}
+```
+
+---
+
+## Implementation Checklist Update
+
+### Phase 6: Advanced Agent Systems
+- [ ] Implement `NpcArchetype` system with 12 archetypes
+- [ ] Build `NpcMemoryBank` with working/episodic/semantic layers
+- [ ] Create `AgentCommunicationNetwork` for gossip propagation
+- [ ] Implement `PlayerProfile` with tendency tracking
+- [ ] Build `NarrativeIntegration` for story hooks
+- [ ] Create behavior scripting DSL parser
+- [ ] Build `NpcDebugConsole` for testing
+- [ ] Implement `NpcUpdateBatcher` for performance
+- [ ] Write 500+ behavior script lines per major NPC
+- [ ] Create automated test scenarios for all archetypes

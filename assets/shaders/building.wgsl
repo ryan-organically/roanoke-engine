@@ -116,7 +116,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let view_dir = normalize(uniforms.view_pos - in.world_pos);
 
     // Subtle rim lighting for shape definition in moody lighting
-    let rim = pow(1.0 - max(dot(view_dir, normal), 0.0), 4.0) * 0.15 * day_factor;
+    let brim = 1.0 - max(dot(view_dir, normal), 0.0);
+    let brim2 = brim * brim;
+    let rim = brim2 * brim2 * 0.15 * day_factor;
 
     // Apply shadow to diffuse only
     let lighting = ambient + (diff * diffuse_strength + rim) * shadow;
@@ -129,7 +131,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         base_color = base_color * (1.0 - wetness * 0.25);
         // Add subtle specular highlight on wet surfaces
         let half_dir = normalize(-light_dir + view_dir);
-        let spec = pow(max(dot(normal, half_dir), 0.0), 32.0) * wetness * 0.3 * day_factor * shadow;
+        var bsp = max(dot(normal, half_dir), 0.0);
+        bsp *= bsp; bsp *= bsp; bsp *= bsp; bsp *= bsp; bsp *= bsp;
+        let spec = bsp * wetness * 0.3 * day_factor * shadow;
         base_color = base_color + vec3<f32>(spec);
     }
 

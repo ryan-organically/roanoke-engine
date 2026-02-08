@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 use glam::{Mat4, Vec3};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Mutex};
 
 /// Maximum vertices per building mesh (safety limit)
 const MAX_BUILDING_VERTICES: usize = 100_000;
@@ -31,8 +31,7 @@ pub struct BuildingMesh {
 }
 
 pub struct BuildingPipeline {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    shared: Arc<SharedBuildingState>,
     bind_group: Option<wgpu::BindGroup>,  // Created when shadow map is bound
     uniform_buffer: wgpu::Buffer,
     mesh: Option<Arc<BuildingMesh>>,
@@ -57,33 +56,30 @@ struct Uniforms {
     rain_wetness: f32,               // Surface wetness (0-1)
 }
 
-impl BuildingPipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../../../assets/shaders/building.wgsl"));
+/// GPU resources shared across ALL BuildingPipeline instances (created once, never changes)
+struct SharedBuildingState {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
 
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Building Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[Uniforms {
-                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-                light_dir: [0.5, 0.7, 0.3],
-                _padding: 0.0,
-                view_pos: [0.0; 3],
-                ambient_dimming: 0.15,  // Moody default
-                fog_color: [0.5, 0.52, 0.58],
-                _padding3: 0.0,
-                fog_start: 30.0,
-                fog_end: 350.0,
-                shadow_strength: 0.8,
-                rain_wetness: 0.0,
-            }]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+static SHARED_BUILDING: OnceLock<Mutex<Option<Arc<SharedBuildingState>>>> = OnceLock::new();
+
+impl BuildingPipeline {
+    /// Get or create the shared pipeline state (shader, render pipeline, layout).
+    /// Created once on first call; all subsequent BuildingPipelines share the same GPU objects.
+    fn get_shared(device: &wgpu::Device, format: wgpu::TextureFormat) -> Arc<SharedBuildingState> {
+        let mutex = SHARED_BUILDING.get_or_init(|| Mutex::new(None));
+        let mut guard = mutex.lock().unwrap();
+        if let Some(shared) = guard.as_ref() {
+            return Arc::clone(shared);
+        }
+
+        // First call — create all shared GPU resources
+        let shader = device.create_shader_module(wgpu::include_wgsl!("../../../assets/shaders/building.wgsl"));
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Building Bind Group Layout"),
             entries: &[
-                // Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -94,7 +90,6 @@ impl BuildingPipeline {
                     },
                     count: None,
                 },
-                // Shadow map texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -105,7 +100,6 @@ impl BuildingPipeline {
                     },
                     count: None,
                 },
-                // Shadow sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -128,18 +122,16 @@ impl BuildingPipeline {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[
-                    // Vertex Buffer
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<BuildingVertex>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }, // Pos
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 }, // Normal
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 }, // UV
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 32, shader_location: 3 }, // Color
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 32, shader_location: 3 },
                         ],
                     },
-                    // Instance Buffer
                     wgpu::VertexBufferLayout {
                         array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
                         step_mode: wgpu::VertexStepMode::Instance,
@@ -181,10 +173,39 @@ impl BuildingPipeline {
             multiview: None,
         });
 
-        Self {
+        let shared = Arc::new(SharedBuildingState {
             pipeline,
             bind_group_layout,
-            bind_group: None,  // Created when shadow map is bound
+        });
+        *guard = Some(Arc::clone(&shared));
+        shared
+    }
+
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shared = Self::get_shared(device, format);
+
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Building Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[Uniforms {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                light_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                light_dir: [0.5, 0.7, 0.3],
+                _padding: 0.0,
+                view_pos: [0.0; 3],
+                ambient_dimming: 0.15,
+                fog_color: [0.5, 0.52, 0.58],
+                _padding3: 0.0,
+                fog_start: 30.0,
+                fog_end: 350.0,
+                shadow_strength: 0.8,
+                rain_wetness: 0.0,
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        Self {
+            shared,
+            bind_group: None,
             uniform_buffer,
             mesh: None,
             instance_buffer: None,
@@ -200,7 +221,7 @@ impl BuildingPipeline {
         shadow_sampler: &wgpu::Sampler,
     ) {
         self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.bind_group_layout,
+            layout: &self.shared.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -348,7 +369,7 @@ impl BuildingPipeline {
             }
         };
 
-        rpass.set_pipeline(&self.pipeline);
+        rpass.set_pipeline(&self.shared.pipeline);
         rpass.set_bind_group(0, bind_group, &[]);
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_vertex_buffer(1, instance_buffer.slice(..));

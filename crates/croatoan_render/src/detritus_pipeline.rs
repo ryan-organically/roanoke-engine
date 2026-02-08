@@ -1,6 +1,7 @@
-use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroup, util::DeviceExt};
+use wgpu::{Device, Queue, RenderPipeline, Buffer, BindGroup, BindGroupLayout, util::DeviceExt};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+use std::sync::{Arc, OnceLock, Mutex};
 
 use crate::pipeline_validation::{
     MeshValidator, PipelineResult,
@@ -32,8 +33,16 @@ struct CameraUniform {
     fog_end: f32,                   // 4 bytes (108-112) -> Total 112 bytes (aligned to 16)
 }
 
-pub struct DetritusPipeline {
+/// GPU resources shared across ALL DetritusPipeline instances (created once, never changes)
+struct SharedDetritusState {
     pipeline: RenderPipeline,
+    camera_bind_group_layout: BindGroupLayout,
+}
+
+static SHARED_DETRITUS: OnceLock<Mutex<Option<Arc<SharedDetritusState>>>> = OnceLock::new();
+
+pub struct DetritusPipeline {
+    shared: Arc<SharedDetritusState>,
     vertex_buffer: Option<Buffer>,
     index_buffer: Option<Buffer>,
     index_count: u32,
@@ -42,8 +51,16 @@ pub struct DetritusPipeline {
 }
 
 impl DetritusPipeline {
-    pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
-        // Camera bind group layout
+    /// Get or create the shared pipeline state (shader, render pipeline, layout).
+    /// Created once on first call; all subsequent DetritusPipelines share the same GPU objects.
+    fn get_shared(device: &Device, surface_format: wgpu::TextureFormat) -> Arc<SharedDetritusState> {
+        let mutex = SHARED_DETRITUS.get_or_init(|| Mutex::new(None));
+        let mut guard = mutex.lock().unwrap();
+        if let Some(shared) = guard.as_ref() {
+            return Arc::clone(shared);
+        }
+
+        // First call — create all shared GPU resources
         let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Detritus Camera Bind Group Layout"),
             entries: &[
@@ -81,19 +98,16 @@ impl DetritusPipeline {
                     array_stride: std::mem::size_of::<DetritusVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
-                        // Position
                         wgpu::VertexAttribute {
                             offset: 0,
                             shader_location: 0,
                             format: wgpu::VertexFormat::Float32x3,
                         },
-                        // Normal
                         wgpu::VertexAttribute {
                             offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                             shader_location: 1,
                             format: wgpu::VertexFormat::Float32x3,
                         },
-                        // UV
                         wgpu::VertexAttribute {
                             offset: (std::mem::size_of::<[f32; 3]>() * 2) as wgpu::BufferAddress,
                             shader_location: 2,
@@ -135,7 +149,18 @@ impl DetritusPipeline {
             multiview: None,
         });
 
-        // Create camera uniform buffer
+        let shared = Arc::new(SharedDetritusState {
+            pipeline,
+            camera_bind_group_layout,
+        });
+        *guard = Some(Arc::clone(&shared));
+        shared
+    }
+
+    pub fn new(device: &Device, surface_format: wgpu::TextureFormat) -> Self {
+        let shared = Self::get_shared(device, surface_format);
+
+        // Per-pipeline: camera uniform buffer + bind group
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Detritus Camera Buffer"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -143,10 +168,9 @@ impl DetritusPipeline {
             mapped_at_creation: false,
         });
 
-        // Create camera bind group
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Detritus Camera Bind Group"),
-            layout: &camera_bind_group_layout,
+            layout: &shared.camera_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -156,7 +180,7 @@ impl DetritusPipeline {
         });
 
         Self {
-            pipeline,
+            shared,
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
@@ -289,7 +313,7 @@ impl DetritusPipeline {
             }
         };
 
-        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_pipeline(&self.shared.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);

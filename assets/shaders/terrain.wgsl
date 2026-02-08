@@ -184,7 +184,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Rim Lighting (Fresnel-like effect for terrain definition)
     let view_dir_to_cam = normalize(uniforms.view_pos - input.world_pos);
     let rim_dot = 1.0 - max(dot(view_dir_to_cam, normal), 0.0);
-    let rim = pow(rim_dot, 4.0) * 0.3 * sun_color * shadow;
+    let rim_dot2 = rim_dot * rim_dot;
+    let rim = rim_dot2 * rim_dot2 * 0.3 * sun_color * shadow;
 
     // Apply shadow to sun color only
     // Multiplier adjusted for more natural look
@@ -240,7 +241,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Apply lighting to surface color
     var final_color = surface_color * lighting;
 
-    // Water: Override color with proper ocean blue + Fresnel reflection
+    // Water: Override color with proper ocean blue + Fresnel reflection + caustics
     if (is_water) {
         // Depth-based water color: deeper = darker teal, shallow = lighter cyan
         let water_depth = clamp((0.5 - input.original_y) / 5.0, 0.0, 1.0);
@@ -248,10 +249,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let shallow_color = vec3<f32>(0.08, 0.35, 0.45);   // Shallow - cyan
         let water_base = mix(shallow_color, deep_color, water_depth);
 
+        // Scrolling caustics - dual-layer pattern for underwater terrain
+        let caustic_scale = 0.08;
+        let caustic_speed = 0.4;
+        let uv1 = input.world_pos.xz * caustic_scale + vec2<f32>(uniforms.time * caustic_speed, uniforms.time * caustic_speed * 0.7);
+        let uv2 = input.world_pos.xz * caustic_scale * 1.3 - vec2<f32>(uniforms.time * caustic_speed * 0.8, uniforms.time * caustic_speed * 0.5);
+        // Procedural caustic pattern using overlapping sine waves
+        let c1 = sin(uv1.x * 3.0) * sin(uv1.y * 3.0) * 0.5 + 0.5;
+        let c2 = sin(uv2.x * 4.0 + 1.0) * sin(uv2.y * 4.0 + 2.0) * 0.5 + 0.5;
+        let caustic = min(c1, c2); // min creates the characteristic bright network pattern
+        // Caustics fade with depth (strongest in shallows) and only show in daylight
+        let caustic_strength = (1.0 - water_depth) * day_factor * shadow * 0.35;
+        let caustic_color = vec3<f32>(0.3, 0.6, 0.7) * caustic * caustic_strength;
+
         // Fresnel - Schlick approximation for water (IOR ~1.33, F0 ≈ 0.02)
         let NdotV = max(dot(normal, view_dir_to_cam), 0.001);
         let F0 = 0.02;
-        let fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+        let omn = 1.0 - NdotV;
+        let omn2 = omn * omn;
+        let fresnel = F0 + (1.0 - F0) * omn2 * omn2 * omn;
 
         // Sky reflection color (matches sun elevation)
         let sky_reflect = mix(
@@ -265,12 +281,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         );
 
         // Blend water color with sky reflection based on fresnel
-        let water_lit = water_base * lighting;
+        let water_lit = water_base * lighting + caustic_color;
         final_color = mix(water_lit, sky_reflect, fresnel);
 
         // Specular highlight (sun sparkle) - additive on top
         let reflect_dir = reflect(-light_dir, normal);
-        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 128.0);
+        var sp128 = max(dot(view_dir_to_cam, reflect_dir), 0.0);
+        sp128 *= sp128; sp128 *= sp128; sp128 *= sp128; sp128 *= sp128; sp128 *= sp128; sp128 *= sp128; sp128 *= sp128;
+        let spec = sp128;
         let specular = 2.5 * spec * sun_color * shadow;
         final_color += specular;
     }
@@ -282,7 +300,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         let reflect_dir = reflect(-light_dir, wet_normal);
 
         // Softer specular than water (wet sand, not mirror)
-        let spec = pow(max(dot(view_dir_to_cam, reflect_dir), 0.0), 32.0);
+        var sp32 = max(dot(view_dir_to_cam, reflect_dir), 0.0);
+        sp32 *= sp32; sp32 *= sp32; sp32 *= sp32; sp32 *= sp32; sp32 *= sp32;
+        let spec = sp32;
 
         // Reduced shine to prevent beach glare at midday
         let wet_specular = 0.25 * spec * sun_color * shadow * wet_sand_factor * day_factor;
@@ -366,9 +386,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let fog_amount = clamp(raw_fog * uniforms.fog_density, 0.0, 1.0);
 
     // Sun scattering for warm glow when looking toward sun
-    let view_dir = normalize(input.world_pos - uniforms.view_pos);
-    let sun_dot = max(dot(view_dir, normalize(uniforms.sun_dir)), 0.0);
-    let sun_scatter = pow(sun_dot, 8.0);
+    // Reuse view_dir_to_cam (computed earlier for rim lighting) — view_dir = -view_dir_to_cam
+    let sun_dot = max(dot(-view_dir_to_cam, uniforms.sun_dir), 0.0);
+    var sun_s = sun_dot; sun_s *= sun_s; sun_s *= sun_s; sun_s *= sun_s;
+    let sun_scatter = sun_s;
 
     // Fog color with sun tint
     let scatter_color = vec3<f32>(1.0, 0.9, 0.7);

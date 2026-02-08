@@ -88,12 +88,28 @@ impl GraphicsContext {
         .await
         .expect("Failed to find an appropriate adapter");
 
-        // Request device and queue
+        // Request device and queue with desired GPU features
+        let desired_features = wgpu::Features::TEXTURE_COMPRESSION_BC
+            | wgpu::Features::MULTI_DRAW_INDIRECT;
+        let supported = adapter.features();
+        let enabled = desired_features & supported;
+
+        if enabled.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+            log::info!("BC texture compression enabled");
+        } else {
+            log::warn!("BC texture compression NOT supported by adapter");
+        }
+        if enabled.contains(wgpu::Features::MULTI_DRAW_INDIRECT) {
+            log::info!("Multi-draw indirect enabled");
+        } else {
+            log::warn!("Multi-draw indirect NOT supported by adapter");
+        }
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Main Device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: enabled,
                     required_limits: wgpu::Limits::default(),
                 },
                 None,

@@ -1,8 +1,12 @@
 //! Animal entity - runtime state for individual animals
 
-use super::behavior::BehaviorState;
+use super::behavior::{BehaviorState, AlertState, PursueState, FleeState, AttackState, CuriousState};
 use super::quadruped_ik::{QuadrupedConfig, QuadrupedIK};
 use super::types::{AnimalSpecies, StatusEffectType, WolfGroupType};
+use crate::character_agent::{
+    AgentContext, AgentId, AgentKind, CharacterAgent,
+    EmotionalState as UnifiedEmotionalState, UnifiedBehaviorState,
+};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -503,5 +507,180 @@ impl Animal {
     /// Get the IK blend factor
     pub fn get_ik_blend(&self) -> f32 {
         self.quadruped_ik.as_ref().map(|ik| ik.ik_blend).unwrap_or(0.0)
+    }
+}
+
+// ============================================================================
+// Behavior State Conversion
+// ============================================================================
+
+impl BehaviorState {
+    /// Convert animal BehaviorState to UnifiedBehaviorState
+    pub fn to_unified(&self) -> UnifiedBehaviorState {
+        match self {
+            BehaviorState::Idle => UnifiedBehaviorState::Idle,
+            BehaviorState::Patrol => UnifiedBehaviorState::Patrolling,
+            BehaviorState::Alert(_) => UnifiedBehaviorState::Alert,
+            BehaviorState::Pursue(state) => match state {
+                PursueState::Stalking => UnifiedBehaviorState::Observing,
+                _ => UnifiedBehaviorState::Pursuing,
+            },
+            BehaviorState::Attack(_) => UnifiedBehaviorState::Attacking,
+            BehaviorState::Flee(_) => UnifiedBehaviorState::Fleeing,
+            BehaviorState::Dead => UnifiedBehaviorState::Dead,
+            BehaviorState::Curious(_) => UnifiedBehaviorState::Observing,
+            BehaviorState::Approaching => UnifiedBehaviorState::Approaching,
+        }
+    }
+
+    /// Create animal BehaviorState from UnifiedBehaviorState
+    pub fn from_unified(unified: UnifiedBehaviorState) -> Self {
+        match unified {
+            UnifiedBehaviorState::Idle => BehaviorState::Idle,
+            UnifiedBehaviorState::Patrolling => BehaviorState::Patrol,
+            UnifiedBehaviorState::Traveling => BehaviorState::Patrol,
+            UnifiedBehaviorState::Working => BehaviorState::Idle,
+            UnifiedBehaviorState::Alert => BehaviorState::Alert(AlertState::Looking),
+            UnifiedBehaviorState::Observing => BehaviorState::Curious(CuriousState::Watching),
+            UnifiedBehaviorState::Approaching => BehaviorState::Approaching,
+            UnifiedBehaviorState::Pursuing => BehaviorState::Pursue(PursueState::Chasing),
+            UnifiedBehaviorState::Fleeing => BehaviorState::Flee(FleeState::Running),
+            UnifiedBehaviorState::Attacking => BehaviorState::Attack(AttackState::Striking),
+            UnifiedBehaviorState::Recovering => BehaviorState::Idle,
+            UnifiedBehaviorState::Interacting => BehaviorState::Curious(CuriousState::Watching),
+            UnifiedBehaviorState::Resting => BehaviorState::Idle,
+            UnifiedBehaviorState::Dead => BehaviorState::Dead,
+        }
+    }
+
+    /// Derive emotional state from behavior
+    pub fn to_emotional_state(&self) -> UnifiedEmotionalState {
+        match self {
+            BehaviorState::Idle => UnifiedEmotionalState::Neutral,
+            BehaviorState::Patrol => UnifiedEmotionalState::Calm,
+            BehaviorState::Alert(state) => match state {
+                AlertState::Warning => UnifiedEmotionalState::Hostile,
+                _ => UnifiedEmotionalState::Alert,
+            },
+            BehaviorState::Pursue(_) => UnifiedEmotionalState::Hostile,
+            BehaviorState::Attack(_) => UnifiedEmotionalState::Hostile,
+            BehaviorState::Flee(_) => UnifiedEmotionalState::Fearful,
+            BehaviorState::Dead => UnifiedEmotionalState::Neutral,
+            BehaviorState::Curious(_) => UnifiedEmotionalState::Curious,
+            BehaviorState::Approaching => UnifiedEmotionalState::Curious,
+        }
+    }
+}
+
+// ============================================================================
+// CharacterAgent Implementation for Animal
+// ============================================================================
+
+impl CharacterAgent for Animal {
+    fn agent_id(&self) -> AgentId {
+        AgentId::animal(self.id.0)
+    }
+
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+
+    fn set_position(&mut self, pos: Vec3) {
+        self.position = pos;
+    }
+
+    fn velocity(&self) -> Vec3 {
+        self.velocity
+    }
+
+    fn set_velocity(&mut self, vel: Vec3) {
+        self.velocity = vel;
+    }
+
+    fn base_speed(&self) -> f32 {
+        self.species.base_stats().speed
+    }
+
+    fn awareness(&self) -> f32 {
+        self.awareness
+    }
+
+    fn set_awareness(&mut self, level: f32) {
+        self.awareness = level.clamp(0.0, 1.0);
+    }
+
+    fn behavior_state(&self) -> UnifiedBehaviorState {
+        self.behavior_state.to_unified()
+    }
+
+    fn set_behavior_state(&mut self, state: UnifiedBehaviorState) {
+        self.behavior_state = BehaviorState::from_unified(state);
+    }
+
+    fn emotional_state(&self) -> UnifiedEmotionalState {
+        self.behavior_state.to_emotional_state()
+    }
+
+    fn set_emotional_state(&mut self, _state: UnifiedEmotionalState) {
+        // Animals derive emotional state from behavior, so this is a no-op.
+        // The behavior state should be changed instead to affect emotion.
+    }
+
+    fn detection_radius(&self) -> f32 {
+        self.species.base_stats().detection_range
+    }
+
+    fn is_alive(&self) -> bool {
+        self.current_health > 0.0
+    }
+
+    fn look_direction(&self) -> Vec3 {
+        self.forward()
+    }
+
+    fn look_at(&mut self, target: Vec3) {
+        Animal::look_at(self, target);
+    }
+
+    fn update(&mut self, ctx: &AgentContext, dt: f32) {
+        // Awareness decay
+        if self.awareness > 0.0 && !matches!(self.behavior_state, BehaviorState::Alert(_) | BehaviorState::Pursue(_)) {
+            self.awareness = (self.awareness - 0.1 * dt).max(0.0);
+        }
+
+        // Distance-based awareness gain from player
+        let player_dist = self.position.distance(ctx.player_pos);
+        let detection = self.detection_radius();
+        if player_dist < detection {
+            let awareness_gain = crate::character_agent::calculate_awareness_gain(
+                AgentKind::Animal,
+                AgentKind::Player,
+                player_dist,
+                detection,
+                dt,
+            );
+            self.awareness = (self.awareness + awareness_gain).min(1.0);
+
+            // Track last seen player
+            if self.awareness > 0.5 {
+                self.last_seen_player = Some((ctx.player_pos, std::time::Instant::now()));
+            }
+        }
+    }
+
+    fn orb_scale(&self) -> f32 {
+        // Scale orb by animal size
+        match self.species {
+            AnimalSpecies::GrayWolf | AnimalSpecies::RedWolf | AnimalSpecies::Stag => 1.2,
+            AnimalSpecies::Horse | AnimalSpecies::Donkey => 1.4,
+            AnimalSpecies::Fox | AnimalSpecies::Husky => 0.9,
+            AnimalSpecies::WhitetailDeer => 1.0,
+            _ => 1.0,
+        }
+    }
+
+    fn can_communicate_with(&self, other_kind: AgentKind) -> bool {
+        // Animals can communicate with other animals (pack behavior)
+        matches!(other_kind, AgentKind::Animal)
     }
 }
