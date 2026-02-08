@@ -8035,6 +8035,10 @@ fn main() {
                 // Trees, ferns, rocks are updated with LOD-specific settings inside the render loop.
             }
 
+            // Pre-compute frequently-used array conversions (avoid per-chunk to_array() copies)
+            let sun_dir_arr = sun_dir.to_array();
+            let camera_pos_arr = state.camera.position.to_array();
+
             // Update Water & Dispatch Compute
             {
                 let mut water = water_system_mutex.safe_lock();
@@ -8044,14 +8048,14 @@ fn main() {
                 let wind_angle = state.weather.wind_offset[0] * std::f32::consts::PI;
                 water.set_wind(wind_angle, wind_strength);
                 water.update(ctx.queue(), elapsed, delta, (-sun_dir).to_array());
-                water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array());
+                water.update_camera(ctx.queue(), view_proj.to_cols_array_2d(), camera_pos_arr);
                 water.dispatch(&mut encoder);
             }
 
             // Update Pond Water (inland bodies)
             {
                 let mut pond_water = pond_water_system_mutex.safe_lock();
-                pond_water.update(ctx.queue(), view_proj.to_cols_array_2d(), state.camera.position.to_array(), delta);
+                pond_water.update(ctx.queue(), view_proj.to_cols_array_2d(), camera_pos_arr, delta);
             }
 
             // 0. Shadow Pass (skip at night — no sun = no shadows)
@@ -8358,6 +8362,10 @@ fn main() {
                     .map(|l| [l.position.x, l.position.y, l.position.z, l.intensity])
                     .collect();
 
+                // Muzzle flash position is camera-relative, compute once outside chunk loop
+                let flash_offset = state.camera.forward() * 1.5 + Vec3::new(0.3, -0.3, 0.0);
+                let flash_world_pos = state.camera.position + flash_offset;
+
                 for (_coord, chunk) in manager.iter_chunks() {
                     // Frustum cull - skip chunks outside view
                     if !frustum.contains_sphere(chunk.bounds.center, chunk.bounds.radius) {
@@ -8365,10 +8373,6 @@ fn main() {
                         continue;
                     }
                     terrain_rendered += 1;
-
-                    // Calculate muzzle flash world position (in front of player)
-                    let flash_offset = state.camera.forward() * 1.5 + Vec3::new(0.3, -0.3, 0.0);
-                    let flash_world_pos = state.camera.position + flash_offset;
 
                     // Terrain
                     chunk.terrain.update_uniforms(
@@ -8380,9 +8384,9 @@ fn main() {
                         fog_start,
                         fog_end,
                         fog_density,
-                        sun_dir.to_array(),
-                        state.camera.position.to_array(),
-                        state.camera.position.to_array(),
+                        sun_dir_arr,
+                        camera_pos_arr,
+                        camera_pos_arr,
                         flash_world_pos.to_array(),
                         state.swing_animation.muzzle_flash,
                         &campfire_light_data,
@@ -8412,7 +8416,7 @@ fn main() {
                             if in_near_transition {
                                 trees.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                     LODFadeMode::LOD0FadeOut,
@@ -8422,7 +8426,7 @@ fn main() {
                             } else {
                                 trees.update_camera_full(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                 );
@@ -8441,7 +8445,7 @@ fn main() {
                                 // Fading OUT to LOD2 (far end of LOD1)
                                 trees_lod1.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                     LODFadeMode::LOD1FadeOut,
@@ -8452,7 +8456,7 @@ fn main() {
                                 // Fading IN from LOD0 (near end)
                                 trees_lod1.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                     LODFadeMode::LOD1FadeIn,
@@ -8462,7 +8466,7 @@ fn main() {
                             } else {
                                 trees_lod1.update_camera_full(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                 );
@@ -8481,7 +8485,7 @@ fn main() {
                                 // Fading IN from LOD1
                                 trees_lod2.update_camera_with_lod(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                     LODFadeMode::LOD2FadeIn,
@@ -8492,7 +8496,7 @@ fn main() {
                                 // Solid LOD2 (650+), let fog handle the fade-out
                                 trees_lod2.update_camera_full(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density,
                                     0.5, 1.0,
                                 );
@@ -8506,8 +8510,8 @@ fn main() {
                     if let Some(detritus) = &chunk.detritus {
                         if dist <= detritus_max_distance {
                             detritus.update_camera(
-                                ctx.queue(), &view_proj, sun_dir.to_array(),
-                                state.camera.position.to_array(),
+                                ctx.queue(), &view_proj, sun_dir_arr,
+                                camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                             );
                             detritus.render(&mut render_pass);
@@ -8520,7 +8524,7 @@ fn main() {
                         if dist <= rock_max_distance && rock.is_visible(&frustum) {
                             rock.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 0.0, // no alpha cutoff, procedural coloring
                             );
@@ -8551,7 +8555,7 @@ fn main() {
                             if !boulder.is_visible(&frustum) { continue; }
                             boulder.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0,
                                 if boulder_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
@@ -8575,7 +8579,7 @@ fn main() {
                             };
                             boulder.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0, lod_mode, fade_start, fade_end,
                             );
@@ -8590,7 +8594,7 @@ fn main() {
                             if !boulder.is_visible(&frustum) { continue; }
                             boulder.update_camera_no_wind(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0,
                                 if boulder_transition_1_2 { LODFadeMode::LOD1FadeIn } else { LODFadeMode::Disabled },
@@ -8617,7 +8621,7 @@ fn main() {
                             if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0,
                             );
@@ -8630,7 +8634,7 @@ fn main() {
                             if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0,
                             );
@@ -8643,7 +8647,7 @@ fn main() {
                             if !dead_log.is_visible(&frustum) { continue; }
                             dead_log.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.0, 1.0,
                             );
@@ -8666,7 +8670,7 @@ fn main() {
                             if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
@@ -8680,7 +8684,7 @@ fn main() {
                             if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
@@ -8694,7 +8698,7 @@ fn main() {
                             if !shrub.is_visible(&frustum) { continue; }
                             shrub.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, // alpha_cutoff 0.5 for clean foliage edges
                             );
@@ -8722,7 +8726,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8733,7 +8737,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8747,7 +8751,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8758,7 +8762,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8772,7 +8776,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8783,7 +8787,7 @@ fn main() {
                             if !flower.is_visible(&frustum) { continue; }
                             flower.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8800,7 +8804,7 @@ fn main() {
                             if !sg.is_visible(&frustum) { continue; }
                             sg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8811,7 +8815,7 @@ fn main() {
                             if !sg.is_visible(&frustum) { continue; }
                             sg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8828,7 +8832,7 @@ fn main() {
                             if !hg.is_visible(&frustum) { continue; }
                             hg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8839,7 +8843,7 @@ fn main() {
                             if !hg.is_visible(&frustum) { continue; }
                             hg.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8853,7 +8857,7 @@ fn main() {
                         if dist <= fern_max_distance && fern.is_visible(&frustum) {
                             fern.update_camera_full(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                             );
@@ -8886,7 +8890,7 @@ fn main() {
                             if !g2.is_visible(&frustum) { continue; }
                             g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                                 if grass2_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
@@ -8908,7 +8912,7 @@ fn main() {
                             };
                             g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, lod_mode, fade_start, fade_end,
                             );
@@ -8921,7 +8925,7 @@ fn main() {
                             if !g2.is_visible(&frustum) { continue; }
                             g2.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                                 if grass2_transition_1_2 { LODFadeMode::LOD2FadeIn } else { LODFadeMode::Disabled },
@@ -8957,7 +8961,7 @@ fn main() {
                             if !g3.is_visible(&frustum) { continue; }
                             g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                                 if grass3_transition_0_1 { LODFadeMode::LOD0FadeOut } else { LODFadeMode::Disabled },
@@ -8980,7 +8984,7 @@ fn main() {
                             };
                             g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0, lod_mode, fade_start, fade_end,
                             );
@@ -8994,7 +8998,7 @@ fn main() {
                             if !g3.is_visible(&frustum) { continue; }
                             g3.update_camera_with_lod(
                                 ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density,
                                 0.5, 1.0,
                                 if grass3_transition_1_2 { LODFadeMode::LOD2FadeIn } else { LODFadeMode::Disabled },
@@ -9029,7 +9033,7 @@ fn main() {
                     if let Some(ref cave_mesh) = chunk.cave_mesh {
                         cave_mesh.update_camera_full(
                             ctx.queue(), &view_proj, &light_view_proj,
-                            sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                            sun_dir_arr, elapsed, camera_pos_arr,
                             fog_color, fog_start, fog_end, fog_density,
                             0.4, // ambient (darker in caves)
                             0.6, // shadow strength
@@ -9125,7 +9129,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod0_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += closed_lod0_transforms.len();
@@ -9137,7 +9141,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod0_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += open_lod0_transforms.len();
@@ -9151,7 +9155,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod1_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += closed_lod1_transforms.len();
@@ -9163,7 +9167,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &closed_lod2_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += closed_lod2_transforms.len();
@@ -9175,7 +9179,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod1_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += open_lod1_transforms.len();
@@ -9187,7 +9191,7 @@ fn main() {
                             p.set_mesh(mesh.clone());
                             p.upload_instances(ctx.device(), &open_lod2_transforms);
                             p.update_camera_full(ctx.queue(), &view_proj, &light_view_proj,
-                                sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                sun_dir_arr, elapsed, camera_pos_arr,
                                 fog_color, fog_start, fog_end, fog_density, 0.0, 1.0);
                             container_pipelines.push(p);
                             rendered_count += open_lod2_transforms.len();
@@ -9218,7 +9222,7 @@ fn main() {
                                 pipeline.upload_instances(ctx.device(), &[Mat4::IDENTITY]);
                                 pipeline.update_camera_no_wind(
                                     ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
                                     LODFadeMode::Disabled, 0.0, 0.0
                                 );
@@ -9290,7 +9294,7 @@ fn main() {
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &dagger_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
                                     LODFadeMode::Disabled, 0.0, 0.0);
                                 weapon_pipelines.push(p);
@@ -9304,7 +9308,7 @@ fn main() {
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &flintlock_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
                                     LODFadeMode::Disabled, 0.0, 0.0);
                                 weapon_pipelines.push(p);
@@ -9318,7 +9322,7 @@ fn main() {
                                 p.set_mesh(mesh.clone());
                                 p.upload_instances(ctx.device(), &hatchet_transforms);
                                 p.update_camera_no_wind(ctx.queue(), &view_proj, &light_view_proj,
-                                    sun_dir.to_array(), elapsed, state.camera.position.to_array(),
+                                    sun_dir_arr, elapsed, camera_pos_arr,
                                     fog_color, fog_start, fog_end, fog_density, 0.0, 1.0,
                                     LODFadeMode::Disabled, 0.0, 0.0);
                                 weapon_pipelines.push(p);

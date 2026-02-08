@@ -200,7 +200,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tex_color = textureSample(animal_texture, animal_sampler, in.uv);
 
     // Light direction from uniform
-    let light_dir = normalize(camera.light_dir);
+    let light_dir = camera.light_dir; // pre-normalized on CPU
     let sun_elevation = -light_dir.y;
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
 

@@ -108,7 +108,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // LIGHTING - Blue water with subtle reflections
     // ========================================================================
 
-    let sun_dir = normalize(time_data.sun_dir);
+    let sun_dir = time_data.sun_dir; // pre-normalized on CPU
     // Dynamic sun color based on elevation (sun_dir.y = how high the sun is)
     let sun_elevation = sun_dir.y;
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);

@@ -39,8 +39,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Sun direction from uniform
-    let light_dir = normalize(camera.sun_dir);
+    // Sun direction from uniform (already normalized on CPU)
+    let light_dir = camera.sun_dir;
     let sun_elevation = -light_dir.y;
 
     // Day factor: 0 = night, 1 = full day

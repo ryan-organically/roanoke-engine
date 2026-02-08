@@ -342,7 +342,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Lighting (same for both trunk and canopy)
-    let light_dir = normalize(camera.sun_dir);
+    let light_dir = camera.sun_dir;
     let sun_elevation = -light_dir.y;
     let day_factor = smoothstep(-0.1, 0.3, sun_elevation);
 
@@ -359,8 +359,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow = shadow * 0.75 + 0.25;
     }
 
+    // Normalize world normal once, reuse for diffuse + campfire lighting
+    let normal = normalize(in.world_normal);
+
     // Diffuse with half-lambert for softer shadows
-    let n_dot_l = dot(normalize(in.world_normal), -light_dir);
+    let n_dot_l = dot(normal, -light_dir);
     let hl = n_dot_l * 0.5 + 0.5;
     let diffuse = hl * hl;
 
@@ -382,7 +385,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var lighting = ambient + sun_color * diffuse * diffuse_strength * shadow;
 
     // CAMPFIRE LIGHTS - Flickering warm light on canopy (especially visible at night)
-    let normal = normalize(in.world_normal);
     for (var i = 0u; i < camera.campfire_count; i++) {
         let light = camera.campfire_lights[i];
         let light_pos = light.xyz;

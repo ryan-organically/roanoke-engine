@@ -118,9 +118,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         normal = normalize(input.normal);
     }
 
-    // Sun Direction from Uniforms
+    // Sun Direction from Uniforms (pre-normalized on CPU)
     // sun_dir points FROM the sun TO the scene (direction light travels)
-    let light_dir = normalize(uniforms.sun_dir);
+    let light_dir = uniforms.sun_dir;
 
     // Dynamic sun color based on sun elevation (y component of light direction)
     // When sun is low (horizon), warm orange. When high, bright white-yellow.

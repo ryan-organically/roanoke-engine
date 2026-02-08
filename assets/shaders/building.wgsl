@@ -77,7 +77,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Lighting
-    let light_dir = normalize(uniforms.light_dir);
+    let light_dir = uniforms.light_dir; // pre-normalized on CPU
     let normal = normalize(in.normal);
     let sun_elevation = -light_dir.y;
 

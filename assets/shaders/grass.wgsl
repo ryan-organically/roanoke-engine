@@ -171,8 +171,8 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sun direction from uniform (points FROM sun TO scene)
-    let light_dir = normalize(camera.sun_dir);
+    // Sun direction from uniform (points FROM sun TO scene, pre-normalized)
+    let light_dir = camera.sun_dir;
 
     // Grass normal - mostly up, with slight variation based on position for visual interest
     let normal = normalize(vec3<f32>(
