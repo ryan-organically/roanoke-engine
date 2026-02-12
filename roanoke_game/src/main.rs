@@ -6561,12 +6561,32 @@ fn main() {
 
                                         ui.add_space(20.0);
 
-                                        // === BORE TUNNEL SECTION (when hosting) ===
+                                        // === SHARE SECTION (when hosting) ===
                                         if state.network.is_host() {
                                             ui.separator();
                                             ui.add_space(10.0);
-                                            ui.label(egui::RichText::new("Share with Remote Friend:").size(16.0).color(egui::Color32::BLACK));
+                                            ui.label(egui::RichText::new("Friend joins with:").size(16.0).color(egui::Color32::BLACK));
                                             ui.add_space(5.0);
+
+                                            // Show LAN IP for same-network friends
+                                            let port = &state.network_host_port;
+                                            if let Some(lan_ip) = get_lan_ip() {
+                                                let lan_addr = format!("{}:{}", lan_ip, port);
+                                                ui.horizontal(|ui| {
+                                                    ui.label("LAN: ");
+                                                    ui.monospace(egui::RichText::new(&lan_addr).size(16.0).color(egui::Color32::from_rgb(0, 140, 0)));
+                                                    if ui.small_button("Copy").clicked() {
+                                                        ui.output_mut(|o| o.copied_text = lan_addr.clone());
+                                                    }
+                                                });
+                                            } else {
+                                                ui.label(format!("localhost:{}", port));
+                                            }
+                                            ui.add_space(10.0);
+
+                                            // Remote tunnel section
+                                            ui.label(egui::RichText::new("Not on same network?").size(13.0).color(egui::Color32::DARK_GRAY));
+                                            ui.add_space(3.0);
 
                                             if let Some(ref url) = state.bore_url {
                                                 // Tunnel is active - show URL
@@ -9760,4 +9780,12 @@ fn main() {
     if let Err(e) = app.run() {
         eprintln!("Engine error: {}", e);
     }
+}
+
+/// Detect LAN IP by opening a UDP socket to a public address (no data sent).
+fn get_lan_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }
