@@ -24,6 +24,27 @@ Before Blender exports:
 3. Prepare pipeline hookup code
 4. Have everything ready before export
 
+## Build & Run
+
+```bash
+# Single-player
+cargo run -p roanoke_game --release
+
+# Release build
+cargo build --release
+```
+
+## Multiplayer
+
+Multiplayer is built into the game — no separate server binary needed.
+
+**Host:** In-game pause menu → Multiplayer → Host → "Open to LAN"
+**Join:** In-game pause menu → Multiplayer → Join → enter host's address
+**CLI:** `cargo run -p roanoke_game -- --host 7878` or `--join 192.168.1.X:7878 --name YourName`
+**Remote:** After hosting, click "Share via Tunnel (bore)" to get a public URL
+
+Full guide: `docs/guides/MULTIPLAYER.md`
+
 ## Active Work Areas
 
 Track what's being worked on to avoid conflicts:

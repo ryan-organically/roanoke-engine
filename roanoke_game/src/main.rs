@@ -437,6 +437,11 @@ struct SharedState {
     network_host_port: String,
     network_join_address: String,
     network_player_name: String,
+    // Bore tunnel
+    bore_process: Option<std::process::Child>,
+    bore_url: Option<String>,
+    bore_status: String,
+    bore_url_rx: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 impl SharedState {
@@ -1676,6 +1681,10 @@ fn main() {
         network_host_port: "7878".to_string(),
         network_join_address: "127.0.0.1:7878".to_string(),
         network_player_name: format!("Player_{}", rand::random::<u16>()),
+        bore_process: None,
+        bore_url: None,
+        bore_status: String::new(),
+        bore_url_rx: None,
     }));
 
     // ... (Channel setup) ...
@@ -6256,6 +6265,16 @@ fn main() {
                                     }
                                     ui.add_space(10.0);
                                     if ui.add_sized([200.0, 40.0], egui::Button::new("Exit to Main Menu")).clicked() {
+                                        // Clean up networking
+                                        if state.network.is_online() {
+                                            state.network = network::NetworkManager::offline(state.seed);
+                                        }
+                                        if let Some(mut child) = state.bore_process.take() {
+                                            let _ = child.kill();
+                                        }
+                                        state.bore_url = None;
+                                        state.bore_status.clear();
+                                        state.bore_url_rx = None;
                                         state.game_state = GameState::Menu;
                                     }
                                 }
@@ -6508,6 +6527,15 @@ fn main() {
                                     ui.heading("Multiplayer");
                                     ui.add_space(20.0);
 
+                                    // Poll for bore tunnel URL updates
+                                    if let Some(ref rx) = state.bore_url_rx {
+                                        if let Ok(url) = rx.try_recv() {
+                                            state.bore_url = Some(url.clone());
+                                            state.bore_status = format!("Tunnel active: {}", url);
+                                            println!("[BORE] Tunnel ready: {}", url);
+                                        }
+                                    }
+
                                     // Show current status
                                     let status = state.network.status_string();
                                     ui.label(egui::RichText::new(format!("Status: {}", status)).size(16.0).color(egui::Color32::BLACK));
@@ -6533,8 +6561,109 @@ fn main() {
 
                                         ui.add_space(20.0);
 
+                                        // === BORE TUNNEL SECTION (when hosting) ===
+                                        if state.network.is_host() {
+                                            ui.separator();
+                                            ui.add_space(10.0);
+                                            ui.label(egui::RichText::new("Share with Remote Friend:").size(16.0).color(egui::Color32::BLACK));
+                                            ui.add_space(5.0);
+
+                                            if let Some(ref url) = state.bore_url {
+                                                // Tunnel is active - show URL
+                                                ui.horizontal(|ui| {
+                                                    ui.label(egui::RichText::new("Friend connects to:").color(egui::Color32::DARK_GRAY));
+                                                });
+                                                let join_addr = url.clone();
+                                                ui.horizontal(|ui| {
+                                                    ui.monospace(egui::RichText::new(&join_addr).size(16.0).color(egui::Color32::from_rgb(0, 120, 0)));
+                                                    if ui.small_button("Copy").clicked() {
+                                                        ui.output_mut(|o| o.copied_text = join_addr.clone());
+                                                    }
+                                                });
+                                                ui.add_space(5.0);
+                                                if ui.add_sized([200.0, 30.0], egui::Button::new("Stop Tunnel")).clicked() {
+                                                    if let Some(mut child) = state.bore_process.take() {
+                                                        let _ = child.kill();
+                                                        println!("[BORE] Tunnel stopped");
+                                                    }
+                                                    state.bore_url = None;
+                                                    state.bore_status.clear();
+                                                    state.bore_url_rx = None;
+                                                }
+                                            } else if state.bore_process.is_some() {
+                                                // Bore is starting up
+                                                ui.label(egui::RichText::new("Starting tunnel...").color(egui::Color32::DARK_GRAY));
+                                            } else {
+                                                // No tunnel - offer to start one
+                                                if ui.add_sized([200.0, 35.0], egui::Button::new("Share via Tunnel (bore)")).clicked() {
+                                                    let port = state.network_host_port.clone();
+                                                    match std::process::Command::new("bore")
+                                                        .args(["local", &port, "--to", "bore.pub"])
+                                                        .stdout(std::process::Stdio::piped())
+                                                        .stderr(std::process::Stdio::piped())
+                                                        .spawn()
+                                                    {
+                                                        Ok(mut child) => {
+                                                            let (tx, rx) = std::sync::mpsc::channel::<String>();
+                                                            // Read bore's stdout for the tunnel URL
+                                                            if let Some(stdout) = child.stdout.take() {
+                                                                std::thread::Builder::new()
+                                                                    .name("bore-reader".into())
+                                                                    .spawn(move || {
+                                                                        use std::io::BufRead;
+                                                                        let reader = std::io::BufReader::new(stdout);
+                                                                        for line in reader.lines() {
+                                                                            if let Ok(line) = line {
+                                                                                println!("[BORE] {}", line);
+                                                                                // bore outputs: "listening at bore.pub:XXXXX"
+                                                                                if let Some(addr) = line.strip_prefix("listening at ") {
+                                                                                    let _ = tx.send(addr.trim().to_string());
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    })
+                                                                    .ok();
+                                                            }
+                                                            state.bore_process = Some(child);
+                                                            state.bore_url_rx = Some(rx);
+                                                            state.bore_status = "Starting tunnel...".to_string();
+                                                            println!("[BORE] Starting bore tunnel on port {}", port);
+                                                        }
+                                                        Err(_) => {
+                                                            state.bore_status = "bore not found. Install: cargo install bore-cli".to_string();
+                                                            eprintln!("[BORE] bore not found. Install with: cargo install bore-cli");
+                                                        }
+                                                    }
+                                                }
+                                                ui.add_space(3.0);
+                                                ui.label(egui::RichText::new("Lets friends outside your network connect").size(11.0).color(egui::Color32::GRAY));
+                                            }
+
+                                            // Show bore status/error
+                                            if !state.bore_status.is_empty() && state.bore_url.is_none() {
+                                                ui.add_space(5.0);
+                                                let color = if state.bore_status.contains("not found") {
+                                                    egui::Color32::from_rgb(200, 80, 80)
+                                                } else {
+                                                    egui::Color32::DARK_GRAY
+                                                };
+                                                ui.label(egui::RichText::new(&state.bore_status).size(12.0).color(color));
+                                            }
+                                        }
+
+                                        ui.add_space(20.0);
+
                                         // Disconnect button
                                         if ui.add_sized([200.0, 40.0], egui::Button::new("Disconnect")).clicked() {
+                                            // Kill bore tunnel if running
+                                            if let Some(mut child) = state.bore_process.take() {
+                                                let _ = child.kill();
+                                                println!("[BORE] Tunnel stopped");
+                                            }
+                                            state.bore_url = None;
+                                            state.bore_status.clear();
+                                            state.bore_url_rx = None;
                                             // Create new offline manager
                                             state.network = network::NetworkManager::offline(state.seed);
                                             println!("[NET] Disconnected from multiplayer");
@@ -6554,7 +6683,7 @@ fn main() {
                                         });
                                         ui.add_space(5.0);
 
-                                        if ui.add_sized([200.0, 40.0], egui::Button::new("🌐 Open to LAN")).clicked() {
+                                        if ui.add_sized([200.0, 40.0], egui::Button::new("Open to LAN")).clicked() {
                                             let port: u16 = state.network_host_port.parse().unwrap_or(7878);
                                             match network::NetworkManager::host(port, state.seed) {
                                                 Ok(nm) => {
@@ -6588,7 +6717,7 @@ fn main() {
                                         });
                                         ui.add_space(10.0);
 
-                                        if ui.add_sized([200.0, 40.0], egui::Button::new("🔗 Join Game")).clicked() {
+                                        if ui.add_sized([200.0, 40.0], egui::Button::new("Join Game")).clicked() {
                                             let address = state.network_join_address.clone();
                                             let name = state.network_player_name.clone();
                                             match network::NetworkManager::join(&address, &name) {
