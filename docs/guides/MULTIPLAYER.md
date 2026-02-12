@@ -8,7 +8,8 @@ Co-op dev testing over LAN or tunneled connections. Both players see the same pr
 
 ## Prerequisites
 
-- **Rust toolchain** (rustup + cargo) — all dependencies resolve via `cargo build`.
+- **Rust toolchain** (rustup + cargo) — all crate dependencies resolve via `cargo build`.
+- **bore** (optional, for remote tunneling) — `cargo install bore-cli`
 
 ---
 

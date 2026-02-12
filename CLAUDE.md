@@ -38,6 +38,8 @@ cargo build --release
 
 Multiplayer is built into the game — no separate server binary needed.
 
+**Dependencies:** Just Rust. For remote tunneling: `cargo install bore-cli`
+
 **Host:** In-game pause menu → Multiplayer → Host → "Open to LAN"
 **Join:** In-game pause menu → Multiplayer → Join → enter host's address
 **CLI:** `cargo run -p roanoke_game -- --host 7878` or `--join 192.168.1.X:7878 --name YourName`
