@@ -6605,19 +6605,21 @@ fn main() {
                                                     {
                                                         Ok(mut child) => {
                                                             let (tx, rx) = std::sync::mpsc::channel::<String>();
-                                                            // Read bore's stdout for the tunnel URL
-                                                            if let Some(stdout) = child.stdout.take() {
+                                                            // bore writes to stderr via tracing, e.g.:
+                                                            // "2024-01-01T00:00:00Z INFO bore_cli::client: listening at bore.pub:XXXXX"
+                                                            if let Some(stderr) = child.stderr.take() {
                                                                 std::thread::Builder::new()
                                                                     .name("bore-reader".into())
                                                                     .spawn(move || {
                                                                         use std::io::BufRead;
-                                                                        let reader = std::io::BufReader::new(stdout);
+                                                                        let reader = std::io::BufReader::new(stderr);
                                                                         for line in reader.lines() {
                                                                             if let Ok(line) = line {
                                                                                 println!("[BORE] {}", line);
-                                                                                // bore outputs: "listening at bore.pub:XXXXX"
-                                                                                if let Some(addr) = line.strip_prefix("listening at ") {
-                                                                                    let _ = tx.send(addr.trim().to_string());
+                                                                                // Extract address from "...listening at bore.pub:XXXXX"
+                                                                                if let Some(idx) = line.find("listening at ") {
+                                                                                    let addr = line[idx + "listening at ".len()..].trim().to_string();
+                                                                                    let _ = tx.send(addr);
                                                                                     break;
                                                                                 }
                                                                             }
